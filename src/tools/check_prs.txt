@@ -1,0 +1,39 @@
+{
+  "name": "check_prs",
+  "description": "List pull requests for a GitHub repository.",
+  "enabled": true,
+  "handler_id": "check_prs_handler",
+  "json_schema": {
+    "type": "object",
+    "properties": {
+      "repository_url": {
+        "type": "string",
+        "description": "GitHub repository URL, e.g. https://github.com/org/repo."
+      },
+      "state": {
+        "type": "string",
+        "description": "PR state filter: open, closed, or all.",
+        "enum": [
+          "open",
+          "closed",
+          "all"
+        ]
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Number of pull requests to return (1-100).",
+        "minimum": 1,
+        "maximum": 100
+      },
+      "page": {
+        "type": "integer",
+        "description": "Page number for pagination.",
+        "minimum": 1
+      }
+    },
+    "required": [
+      "repository_url"
+    ],
+    "additionalProperties": false
+  }
+}
