@@ -1,4 +1,4 @@
-from time import timezone
+from datetime import timezone
 from sqlmodel import SQLModel, Field
 from datetime import datetime
 

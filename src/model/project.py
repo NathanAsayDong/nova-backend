@@ -12,3 +12,9 @@ class Project(SQLModel, table=True):
     description: str | None = None
 
     memory_chunks: list[MemoryChunk] = Relationship(back_populates="project")
+
+    def to_payload(self) -> dict:
+        return self.model_dump(
+            exclude={"id"},
+            exclude_none=True
+        )
