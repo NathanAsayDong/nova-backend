@@ -20,7 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(transcribe_router)
+app.include_router(transcribe_router) 
 
 
 @app.get("/")
