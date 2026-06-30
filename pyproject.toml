@@ -38,6 +38,7 @@ dependencies = [
     "numpy==2.4.4",
     "openai==2.30.0",
     "openai-whisper==20250625",
+    "pgvector>=0.4.2",
     "pydantic==2.12.5",
     "pydantic-core==2.41.5",
     "pydantic-extra-types==2.11.2",

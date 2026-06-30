@@ -9,7 +9,8 @@ from typing import Any
 
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
-from src.service.tool_service import ToolExecutionError, ToolService
+from src.service.tool_registry import ToolExecutionError
+from src.service.tool_service import ToolService
 
 DEFAULT_OPENAI_RESPONSE_MODEL = "gpt-5.4-mini-2026-03-17"
 DEFAULT_OPENAI_SYSTEM_PROMPT = (

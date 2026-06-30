@@ -10,12 +10,14 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from src.service.openai_service import OpenAIService
-from src.service.tool_service import ToolExecutionError, tool_service
+from src.service.tool_registry import ToolExecutionError
+from src.service.tool_service import ToolService
 from src.service.tts_service import TTSService
 from src.service.whisper_service import WhisperService
 
 router = APIRouter(tags=["transcribe"])
 whisper_service = WhisperService()
+tool_service = ToolService()
 openai_service = OpenAIService(tool_service=tool_service)
 tts_service = TTSService()
 

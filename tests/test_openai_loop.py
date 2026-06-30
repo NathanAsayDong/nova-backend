@@ -4,7 +4,7 @@ import unittest
 from dataclasses import dataclass
 
 from src.service.openai_service import OpenAIService
-from src.service.tool_service import ToolExecutionError
+from src.service.tool_registry import ToolExecutionError
 
 
 @dataclass

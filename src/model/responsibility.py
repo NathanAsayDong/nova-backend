@@ -14,3 +14,10 @@ class Responsibility(SQLModel, table=True):
         sa_column=Column(JSON),
     )
     last_run: datetime | None = None
+
+    def to_payload(self) -> dict:
+        return self.model_dump(
+            exclude={"id"},
+            exclude_none=True,
+            mode="json",
+        )

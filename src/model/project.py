@@ -15,6 +15,7 @@ class Project(SQLModel, table=True):
 
     def to_payload(self) -> dict:
         return self.model_dump(
-            exclude={"id"},
-            exclude_none=True
+            exclude={"id", "memory_chunks"},
+            exclude_none=True,
+            mode="json",
         )

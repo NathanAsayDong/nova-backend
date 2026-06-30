@@ -1,6 +1,11 @@
 import os
+from typing import TypeVar
 
+from sqlmodel import SQLModel
 from supabase import Client, create_client
+
+T = TypeVar("T", bound=SQLModel)
+
 
 class BaseDao:
     """
@@ -16,3 +21,6 @@ class BaseDao:
     @property
     def client(self) -> Client:
         return self.supabase
+
+    def _to_model(self, model_class: type[T], row: dict) -> T:
+        return model_class(**row)
