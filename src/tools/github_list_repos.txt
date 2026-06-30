@@ -1,7 +1,7 @@
 {
   "name": "github_list_repos",
   "description": "List GitHub repositories available to this Nova backend. Will return a list of repositories for Nate's personal repo's, and the RH Borden workspace repos that Nate also owns.",
-  "enabled": true,
+  "enabled": false,
   "handler_id": "github_list_repos_handler",
   "json_schema": {
     "type": "object",

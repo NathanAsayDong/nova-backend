@@ -2,8 +2,7 @@
 Manual smoke test for Nova agentic coding tools.
 
 Usage:
-  cd backend-python
-  ./venv/bin/python tests/manual_smoke_test_agentic_tools.py
+  uv run python tests/manual_smoke_test_agentic_tools.py
 
 Required env vars:
   OPENAI_API_KEY (or OPENAI_APIKEY)

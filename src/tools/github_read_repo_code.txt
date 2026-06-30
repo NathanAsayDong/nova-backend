@@ -1,7 +1,7 @@
 {
   "name": "github_read_repo_code",
   "description": "Read code from a GitHub repository file or list a repository directory.",
-  "enabled": true,
+  "enabled": false,
   "handler_id": "github_read_repo_code_handler",
   "json_schema": {
     "type": "object",

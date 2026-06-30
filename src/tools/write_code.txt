@@ -1,7 +1,7 @@
 {
   "name": "write_code",
   "description": "Launch a Cursor coding agent against a GitHub repository.",
-  "enabled": true,
+  "enabled": false,
   "handler_id": "write_code_handler",
   "json_schema": {
     "type": "object",

@@ -1,7 +1,7 @@
 {
   "name": "check_coding_agent",
   "description": "Get Cursor coding agent status and optional conversation history.",
-  "enabled": true,
+  "enabled": false,
   "handler_id": "check_coding_agent_handler",
   "json_schema": {
     "type": "object",

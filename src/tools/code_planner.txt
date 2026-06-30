@@ -1,7 +1,7 @@
 {
   "name": "code_planner",
   "description": "Generate an implementation plan and a Cursor-ready execution prompt.",
-  "enabled": true,
+  "enabled": false,
   "handler_id": "code_planner_handler",
   "json_schema": {
     "type": "object",

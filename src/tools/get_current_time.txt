@@ -1,7 +1,7 @@
 {
   "name": "get_current_time",
   "description": "Get the current date and time.",
-  "enabled": true,
+  "enabled": false,
   "handler_id": "get_current_time_handler",
   "json_schema": {
     "type": "object",
