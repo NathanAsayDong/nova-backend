@@ -4,7 +4,7 @@ import unittest
 from dataclasses import dataclass
 
 from src.service.openai_service import OpenAIService
-from src.service.tool_registry import ToolExecutionError
+from src.service.tool_service import ToolExecutionError
 
 
 @dataclass
@@ -20,6 +20,13 @@ class FakeResponse:
     id: str
     output: list
     output_text: str
+
+
+@dataclass
+class FakeTool:
+    name: str
+    description: str
+    config: dict
 
 
 class FakeResponsesAPI:
@@ -46,26 +53,28 @@ class FakeToolService:
     def __init__(self, unrecoverable: bool = False) -> None:
         self.unrecoverable = unrecoverable
 
-    def as_openai_tools(self):
+    def list_tools(self):
         return [
-            {
-                "type": "function",
-                "name": "demo_tool",
-                "description": "demo",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                    "additionalProperties": False,
+            FakeTool(
+                name="demo_tool",
+                description="demo",
+                config={
+                    "type": "service_method",
+                    "callable_path": "tests.test_openai_loop.FakeToolService.call_tool",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
                 },
-                "strict": True,
-            }
+            )
         ]
 
-    def execute(self, name, arguments):
+    def call_tool(self, tool, arguments):
         if self.unrecoverable:
             raise ToolExecutionError("boom", recoverable=False)
-        return {"ok": True, "name": name, "arguments": arguments}
+        return {"ok": True, "name": tool.name, "arguments": arguments}
 
 
 class OpenAILoopTests(unittest.TestCase):
@@ -73,12 +82,10 @@ class OpenAILoopTests(unittest.TestCase):
         os.environ["OPENAI_APIKEY"] = "test-key"
 
     def _build_service(self, fake_responses, max_iterations=5, tool_service=None):
-        service = OpenAIService()
+        service = OpenAIService(tool_service=tool_service or FakeToolService())
         service.client = FakeClient(fake_responses)
         service.max_iterations = max_iterations
         service.enable_dynamic_progress_updates = False
-        if tool_service is not None:
-            service.tool_service = tool_service
         return service
 
     def test_stops_when_no_tool_calls(self):

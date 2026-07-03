@@ -6,11 +6,9 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from src.service.openai_service import OpenAIService
-from src.service.tool_registry import ToolExecutionError
+from src.model.tool import Tool
 from src.service.tool_service import ToolService
 from src.service.tts_service import TTSService
 from src.service.whisper_service import WhisperService
@@ -18,12 +16,7 @@ from src.service.whisper_service import WhisperService
 router = APIRouter(tags=["transcribe"])
 whisper_service = WhisperService()
 tool_service = ToolService()
-openai_service = OpenAIService(tool_service=tool_service)
 tts_service = TTSService()
-
-
-class ToolToggleRequest(BaseModel):
-    enabled: bool
 
 
 def suffix_for_mime(mime_type: str) -> str:
@@ -165,18 +158,8 @@ async def stream_tts_audio(
 
 
 @router.get("/tools")
-async def list_tools() -> list[dict[str, object]]:
+async def list_tools() -> list[Tool]:
     return tool_service.list_tools()
-
-
-@router.patch("/tools/{name}")
-async def toggle_tool(name: str, request: ToolToggleRequest) -> dict[str, object]:
-    try:
-        return tool_service.set_enabled(name, request.enabled)
-    except ToolExecutionError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.websocket("/ws/transcribe")

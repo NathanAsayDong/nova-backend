@@ -5,7 +5,7 @@ import uvicorn
 
 load_dotenv()
 
-from src.controller.transcribe_controller import router as transcribe_router
+from src.controller.nova_controller import router as nova_router
 
 app = FastAPI(title="Nova Voice Backend")
 
@@ -20,7 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(transcribe_router) 
+app.include_router(nova_router) 
 
 
 @app.get("/")
