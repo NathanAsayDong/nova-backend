@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -5,9 +6,11 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from src.harness.agent_loop import AgentLoop
 from src.model.tool import Tool
 from src.service.tool_service import ToolService
 from src.service.tts_service import TTSService
@@ -17,6 +20,23 @@ router = APIRouter(tags=["transcribe"])
 whisper_service = WhisperService()
 tool_service = ToolService()
 tts_service = TTSService()
+agent_loop = AgentLoop()
+
+
+def parse_conversation_id(value: str | None) -> UUID | None:
+    if not value:
+        return None
+    return UUID(value)
+
+
+async def iter_in_thread(generator):
+    """Consume a sync generator without blocking the event loop."""
+    sentinel = object()
+    while True:
+        item = await asyncio.to_thread(next, generator, sentinel)
+        if item is sentinel:
+            return
+        yield item
 
 
 def suffix_for_mime(mime_type: str) -> str:
@@ -117,6 +137,25 @@ def has_stop_phrase(value: str) -> bool:
     )
 
 
+async def send_assistant_text(
+    websocket: WebSocket,
+    text: str,
+    *,
+    seq: int,
+    conversation_id: UUID,
+    markdown_display: str | None = None,
+) -> None:
+    event: dict[str, object] = {
+        "type": "assistant_text",
+        "text": text,
+        "seq": seq,
+        "conversationId": str(conversation_id),
+    }
+    if markdown_display is not None:
+        event["markdownDisplay"] = markdown_display
+    await websocket.send_json(event)
+
+
 async def stream_tts_audio(
     websocket: WebSocket,
     text: str,
@@ -176,6 +215,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
     language: str | None = None
     mime_type = "audio/webm"
     chunks: list[bytes] = []
+    conversation_id: UUID | None = None
 
     try:
         while True:
@@ -219,6 +259,15 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 chunks.clear()
                 language = payload.get("language")
                 mime_type = payload.get("mimeType", "audio/webm")
+                raw_conversation_id = payload.get("conversationId")
+                if raw_conversation_id:
+                    try:
+                        conversation_id = parse_conversation_id(raw_conversation_id)
+                    except ValueError:
+                        await websocket.send_json(
+                            {"type": "error", "message": "Invalid conversationId."}
+                        )
+                        continue
                 await websocket.send_json(
                     {
                         "type": "listening",
@@ -323,33 +372,41 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         chunks.clear()
                         continue
 
-                    async def emit_progress(progress_text: str, iteration: int) -> None:
-                        await websocket.send_json(
-                            {
-                                "type": "assistant_progress",
-                                "text": progress_text,
-                                "iteration": iteration,
-                            }
-                        )
-                        await stream_tts_audio(
-                            websocket,
-                            progress_text,
-                            role="progress",
-                            iteration=iteration,
-                        )
+                    raw_conversation_id = payload.get("conversationId")
+                    if raw_conversation_id:
+                        try:
+                            conversation_id = parse_conversation_id(raw_conversation_id)
+                        except ValueError:
+                            await websocket.send_json(
+                                {"type": "error", "message": "Invalid conversationId."}
+                            )
+                            recording_started = False
+                            chunks.clear()
+                            continue
 
-                    loop_result = await openai_service.run_agent_loop(
-                        transcript,
-                        progress_callback=emit_progress
+                    if conversation_id is None:
+                        conversation_id = agent_loop.new_conversation_id()
+
+                    sentence_stream = agent_loop.conversation_loop_stream(
+                        transcript, conversation_id
                     )
-
-                    await stream_tts_audio(websocket, loop_result.final_text, role="final")
+                    spoken_parts: list[str] = []
+                    async for sentence in iter_in_thread(sentence_stream):
+                        spoken_parts.append(sentence)
+                        await send_assistant_text(
+                            websocket,
+                            sentence,
+                            seq=len(spoken_parts),
+                            conversation_id=conversation_id,
+                        )
+                        await stream_tts_audio(websocket, sentence, role="final")
 
                     await websocket.send_json(
                         {
                             "type": "done",
                             "message": "Turn complete.",
-                            "iterationsUsed": loop_result.iterations_used,
+                            "conversationId": str(conversation_id),
+                            "assistantText": " ".join(spoken_parts),
                         }
                     )
                 except Exception as exc:
