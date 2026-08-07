@@ -1,0 +1,58 @@
+from uuid import UUID
+from src.dao.base_dao import BaseDao
+from src.model.conversation import Conversation
+
+class ConversationDao(BaseDao):
+    _table = "conversation"
+    _model_class = Conversation
+
+    def get_by_uuid(self, uuid: UUID) -> Conversation | None:
+        response = (
+            self.client.table(self._table)
+            .select("*")
+            .eq("uuid", str(uuid))
+            .maybe_single()
+            .execute()
+        )
+        if response is None or response.data is None:
+            return None
+        return self._to_model(self._model_class, response.data)
+
+    def _update_columns(self, uuid: UUID, columns: dict) -> Conversation | None:
+        response = (
+            self.client.table(self._table)
+            .update(columns)
+            .eq("uuid", str(uuid))
+            .execute()
+        )
+        if not response.data:
+            return None
+        return self._to_model(self._model_class, response.data[0])
+
+    def set_project(self, uuid: UUID, project_id: int) -> Conversation | None:
+        return self._update_columns(uuid, {"project_id": project_id})
+
+    def set_closed(self, uuid: UUID) -> Conversation | None:
+        return self._update_columns(uuid, {"is_closed": True})
+
+    def touch_last_message(self, uuid: UUID, timestamp_utc: str) -> Conversation | None:
+        return self._update_columns(uuid, {"last_message_timestamp_utc": timestamp_utc})
+
+    def create_conversation(self, conversation: Conversation) -> Conversation:
+        response = (
+            self.client.table(self._table)
+            .insert(conversation.to_payload())
+            .execute()
+        )
+        return self._to_model(self._model_class, response.data[0])
+
+    def update_conversation(self, uuid: UUID, conversation: Conversation) -> Conversation | None:
+        response = (
+            self.client.table(self._table)
+            .update(conversation.to_payload())
+            .eq("uuid", uuid)
+            .execute()
+        )
+        if not response.data:
+            return None
+        return self._to_model(self._model_class, response.data[0])

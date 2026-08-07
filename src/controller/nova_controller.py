@@ -8,10 +8,13 @@ import uuid
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Body, HTTPException
+from fastapi.responses import StreamingResponse
 
 from src.harness.agent_loop import AgentLoop
 from src.model.tool import Tool
+from src.service.conversation_service import ConversationClosedError, ConversationService
+from src.service.project_service import ProjectService
 from src.service.tool_service import ToolService
 from src.service.tts_service import TTSService
 from src.service.whisper_service import WhisperService
@@ -20,13 +23,161 @@ router = APIRouter(tags=["transcribe"])
 whisper_service = WhisperService()
 tool_service = ToolService()
 tts_service = TTSService()
+conversation_service = ConversationService()
+project_service = ProjectService()
 agent_loop = AgentLoop()
+agent_loop.conversation_service = conversation_service
 
 
 def parse_conversation_id(value: str | None) -> UUID | None:
     if not value:
         return None
     return UUID(value)
+
+
+def resolve_chat_request(payload: dict) -> tuple[str, UUID]:
+    """
+    Pull the message and conversation id out of a text-chat request body.
+
+    Accepts either camelCase or snake_case for the conversation id, and mints a
+    new one when the client hasn't started a conversation yet.
+    """
+    message = (payload.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="A non-empty 'message' is required.")
+
+    raw_conversation_id = payload.get("conversationId") or payload.get("conversation_id")
+    try:
+        conversation_id = parse_conversation_id(raw_conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversationId.")
+
+    return message, conversation_id or agent_loop.new_conversation_id()
+
+
+def sse_event(payload: dict[str, object]) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
+
+@router.post("/chat/stream")
+async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
+    """Text chat turn, emitting sentence chunks as server-sent events."""
+    message, conversation_id = resolve_chat_request(payload)
+
+    # Reject closed conversations with a real status code before the stream
+    # opens; the agent loop re-checks as a backstop.
+    existing = await asyncio.to_thread(conversation_service.get_conversation, conversation_id)
+    if existing is not None and existing.is_closed:
+        raise HTTPException(
+            status_code=409,
+            detail="This conversation is closed. Start a new conversation to continue.",
+        )
+
+    async def event_source():
+        yield sse_event({"type": "start", "conversationId": str(conversation_id)})
+
+        sentence_stream = agent_loop.conversation_loop_stream(message, conversation_id)
+        parts: list[str] = []
+        try:
+            async for sentence in iter_in_thread(sentence_stream):
+                parts.append(sentence)
+                yield sse_event(
+                    {"type": "delta", "text": sentence, "seq": len(parts)}
+                )
+        except ConversationClosedError:
+            yield sse_event(
+                {
+                    "type": "error",
+                    "code": "conversation_closed",
+                    "message": "This conversation is closed. Start a new conversation to continue.",
+                }
+            )
+            return
+        except Exception as exc:
+            yield sse_event({"type": "error", "message": f"Chat pipeline failed: {str(exc)}"})
+            return
+
+        # switch_project closes the conversation mid-turn and continues under
+        # a successor — point the client at the new conversation.
+        switched_to = conversation_service.pop_switch_target(conversation_id)
+        final_conversation_id = switched_to or conversation_id
+        if switched_to is not None:
+            agent_loop.conversations.pop(conversation_id, None)
+            yield sse_event(
+                {
+                    "type": "conversation_switched",
+                    "previousConversationId": str(conversation_id),
+                    "conversationId": str(switched_to),
+                }
+            )
+
+        yield sse_event(
+            {
+                "type": "done",
+                "conversationId": str(final_conversation_id),
+                "assistantText": " ".join(parts),
+            }
+        )
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str) -> dict:
+    """Current state of a conversation, including its attached project (if any)."""
+    try:
+        uuid_value = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversation id.")
+
+    conversation = await asyncio.to_thread(
+        conversation_service.get_conversation, uuid_value
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    project_payload = None
+    if conversation.project_id is not None:
+        project = await asyncio.to_thread(
+            project_service.get_project, conversation.project_id
+        )
+        if project is not None:
+            project_payload = {"id": project.id, **project.to_payload()}
+
+    return {
+        "conversationId": str(conversation.uuid),
+        "isClosed": conversation.is_closed,
+        "project": project_payload,
+    }
+
+
+@router.post("/conversations/{conversation_id}/close")
+async def close_conversation(conversation_id: str) -> dict:
+    """Close a conversation permanently. Closed conversations cannot be reopened."""
+    try:
+        uuid_value = UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversation id.")
+
+    conversation = await asyncio.to_thread(
+        conversation_service.close_conversation, uuid_value
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    # Drop the in-process LLM history so the closed conversation can't keep
+    # accumulating context if the same id is replayed.
+    agent_loop.conversations.pop(uuid_value, None)
+
+    return {"conversationId": str(uuid_value), "isClosed": True}
+
+
+@router.get("/projects")
+async def list_projects() -> list[dict]:
+    return await asyncio.to_thread(project_service.list_projects)
 
 
 async def iter_in_thread(generator):

@@ -11,6 +11,9 @@ class ServiceMethodToolConfig(BaseModel):
     input_schema: dict[str, Any]
     static_kwargs: dict[str, Any] = Field(default_factory=dict)
     argument_map: dict[str, str] = Field(default_factory=dict)
+    # Kwargs supplied by the harness at call time (e.g. conversation_uuid),
+    # never by the model. Keep these out of input_schema.
+    context_kwargs: list[str] = Field(default_factory=list)
 
     @field_validator("callable_path")
     @classmethod

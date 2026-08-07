@@ -1,0 +1,21 @@
+---
+description: Core guidelines for the Nova backend codebase
+alwaysApply: true
+---
+
+# Nova Backend Guidelines
+
+- Do not create new files.
+- Do not add new functions. Only modify or implement logic inside existing functions or function stubs (e.g. bodies that are `pass` or otherwise unimplemented).
+- Do not add new API endpoints. Only modify or implement existing routes.
+- All models belong in `src/model/`. Do not define request/response models in controllers or services.
+- Keep changes minimal and scoped to the requested task.
+- Follow the existing layered layout: `controller` → `service` → `dao` → `model`.
+- Use existing classes, DAOs, and services rather than introducing parallel abstractions.
+- Models use SQLModel; DAOs extend `BaseDao` and talk to Supabase.
+- Services own business logic and call DAOs or external APIs (Claude, Whisper, TTS, Twilio, etc.).
+- Match surrounding code style: Python 3.13+, type hints, and existing import patterns.
+- Tests use `unittest`; prefer fake DAOs/mocks over live external calls.
+- Load secrets and config from environment variables via `os.getenv`, not hardcoded values.
+- Do not add dependencies to `pyproject.toml` unless explicitly asked.
+- Do not add tests, docs, or commits unless explicitly asked.

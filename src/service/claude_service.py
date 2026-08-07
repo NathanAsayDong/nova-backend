@@ -1,6 +1,5 @@
 from anthropic import Anthropic
 import os
-from collections.abc import Iterator
 from typing import Optional
 from anthropic.types.message import Message
 
@@ -14,20 +13,22 @@ class ClaudeService:
         messages = []
         if context:
             messages.extend(context)
-        messages.append({"role": "user", "content": prompt})
+        if prompt:
+            messages.append({"role": "user", "content": prompt})
         return messages
 
-    def stream_response(self, prompt: str, role: Optional[str] = None, context: Optional[list] = None, tools: Optional[list] = None) -> Iterator[str]:
+    def stream_response(
+        self,
+        prompt: str,
+        role: Optional[str] = None,
+        context: Optional[list] = None,
+        tools: Optional[list] = None,
+    ) -> Message:
         """
-        Stream a response from the Claude API.
+        Stream a response from the Claude API and return the final Message.
 
-        Args:
-            prompt: The prompt to send to the Claude API.
-            role: The role of the user.
-            context: The context of the conversation.
-
-        Yields:
-            Text deltas as they are generated.
+        Uses the streaming endpoint so the connection stays open for longer
+        generations, then returns the complete message (including tool_use).
         """
         kwargs = {"tools": tools} if tools else {}
         with self.client.messages.stream(
@@ -36,7 +37,7 @@ class ClaudeService:
             max_tokens=self.max_tokens,
             **kwargs,
         ) as stream:
-            yield from stream.text_stream
+            return stream.get_final_message()
 
     def get_response(self, prompt: str, role: Optional[str] = None, context: Optional[list] = None, tools: Optional[list] = None) -> Message:
         """

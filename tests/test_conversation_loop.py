@@ -1,85 +1,72 @@
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
-from src.harness.agent_loop import AgentLoop, iter_sentence_chunks
+from src.harness.agent_loop import AgentLoop
+from src.model.conversation import Conversation
+from src.model.message import MessageRole
+from src.service.tool_service import ToolService
 
 
 @dataclass
 class FakeTextBlock:
     text: str
+    type: str = "text"
 
 
 @dataclass
 class FakeMessage:
-    content: list[FakeTextBlock]
+    content: list
 
 
-class ConversationLoopTests(unittest.TestCase):
-    def setUp(self):
-        self.agent_loop = AgentLoop()
-        self.conversation_id = uuid4()
-        self.responses: list[str] = ["First reply", "Second reply"]
-        self.prompts_seen: list[tuple[str, list | None]] = []
+class FakeToolDao:
+    def get_all(self):
+        return []
 
-        def fake_get_response(prompt, role=None, context=None, tools=None):
-            self.prompts_seen.append((prompt, list(context) if context is not None else None))
-            text = self.responses.pop(0)
-            return FakeMessage(content=[FakeTextBlock(text=text)])
 
-        self.agent_loop.claude_service.get_response = fake_get_response
+@dataclass
+class FakeConversationService:
+    """In-memory stand-in for the persistence layer."""
 
-    def test_returns_model_text(self):
-        result = self.agent_loop.conversation_loop("hello", self.conversation_id)
-        self.assertEqual(result, "First reply")
+    conversations: dict = field(default_factory=dict)
+    recorded: list = field(default_factory=list)
 
-    def test_history_grows_across_turns_with_same_uuid(self):
-        first = self.agent_loop.conversation_loop("hello", self.conversation_id)
-        second = self.agent_loop.conversation_loop("again", self.conversation_id)
-
-        self.assertEqual(first, "First reply")
-        self.assertEqual(second, "Second reply")
-        self.assertEqual(len(self.prompts_seen), 2)
-        self.assertEqual(self.prompts_seen[0][1], [])
-        self.assertEqual(
-            self.prompts_seen[1][1],
-            [
-                {"role": "user", "content": "hello"},
-                {"role": "assistant", "content": "First reply"},
-            ],
+    def ensure_open_conversation(self, conversation_uuid):
+        return self.conversations.setdefault(
+            conversation_uuid,
+            Conversation(id=1, uuid=conversation_uuid),
         )
 
-    def test_different_uuids_have_isolated_history(self):
-        other_id = uuid4()
-        self.agent_loop.conversation_loop("hello", self.conversation_id)
-        self.agent_loop.conversation_loop("other", other_id)
+    def load_history(self, conversation):
+        return []
 
-        history_a = self.agent_loop.conversations[self.conversation_id]
-        history_b = self.agent_loop.conversations[other_id]
-
-        self.assertEqual(len(history_a), 2)
-        self.assertEqual(len(history_b), 2)
-        self.assertEqual(history_a[0]["content"], "hello")
-        self.assertEqual(history_b[0]["content"], "other")
-
-    def test_new_conversation_id_returns_uuid(self):
-        new_id = self.agent_loop.new_conversation_id()
-        self.assertIsInstance(new_id, UUID)
+    def record_message(self, conversation, role, content):
+        self.recorded.append((conversation.uuid, role, content))
 
 
 class ConversationLoopStreamTests(unittest.TestCase):
     def setUp(self):
         self.agent_loop = AgentLoop()
         self.conversation_id = uuid4()
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.conversation_service = FakeConversationService()
+        self.agent_loop.conversation_service = self.conversation_service
 
-    def _set_stream(self, pieces: list[str]):
+    def test_new_conversation_id_returns_uuid(self):
+        new_id = self.agent_loop.new_conversation_id()
+        self.assertIsInstance(new_id, UUID)
+
+    def _set_stream(self, text: str):
         def fake_stream(prompt, role=None, context=None, tools=None):
-            yield from pieces
+            blocks = [FakeTextBlock(text=text)] if text else []
+            return FakeMessage(content=blocks)
 
         self.agent_loop.claude_service.stream_response = fake_stream
 
     def test_yields_full_text_and_updates_history(self):
-        self._set_stream(["Hello there. ", "How can I help you today?"])
+        self._set_stream("Hello there. How can I help you today?")
 
         chunks = list(
             self.agent_loop.conversation_loop_stream("hi", self.conversation_id)
@@ -95,19 +82,43 @@ class ConversationLoopStreamTests(unittest.TestCase):
             ],
         )
 
-    def test_empty_stream_leaves_history_untouched(self):
-        self._set_stream([])
+    def test_empty_stream_commits_user_and_empty_assistant(self):
+        self._set_stream("")
 
         chunks = list(
             self.agent_loop.conversation_loop_stream("hi", self.conversation_id)
         )
 
         self.assertEqual(chunks, [])
-        self.assertEqual(self.agent_loop.conversations[self.conversation_id], [])
+        history = self.agent_loop.conversations[self.conversation_id]
+        self.assertEqual(
+            history,
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": ""},
+            ],
+        )
 
-    def test_interrupted_stream_commits_partial_text(self):
+    def test_turn_persists_user_and_nova_messages(self):
+        self._set_stream("Hello there. How can I help you today?")
+
+        list(self.agent_loop.conversation_loop_stream("hi", self.conversation_id))
+
+        self.assertEqual(
+            self.conversation_service.recorded,
+            [
+                (self.conversation_id, MessageRole.USER, "hi"),
+                (
+                    self.conversation_id,
+                    MessageRole.NOVA,
+                    "Hello there. How can I help you today?",
+                ),
+            ],
+        )
+
+    def test_interrupted_stream_commits_assistant_text(self):
         self._set_stream(
-            ["This is the first full sentence right here. ", "Second sentence never finishes"]
+            "This is the first full sentence right here. Second sentence never finishes"
         )
 
         stream = self.agent_loop.conversation_loop_stream("hi", self.conversation_id)
@@ -124,19 +135,19 @@ class ConversationLoopStreamTests(unittest.TestCase):
 class SentenceChunkTests(unittest.TestCase):
     def test_chunks_on_sentence_boundaries(self):
         pieces = ["Hello there. How are", " you today? Great."]
-        chunks = list(iter_sentence_chunks(iter(pieces), min_chars=5))
+        chunks = list(AgentLoop.iter_sentence_chunks(iter(pieces), min_chars=5))
         self.assertEqual(chunks, ["Hello there.", "How are you today?", "Great."])
 
     def test_min_chars_merges_short_sentences(self):
         pieces = ["Hi. This is a longer sentence. And another one follows here."]
-        chunks = list(iter_sentence_chunks(iter(pieces), min_chars=10))
+        chunks = list(AgentLoop.iter_sentence_chunks(iter(pieces), min_chars=10))
         self.assertEqual(
             chunks,
             ["Hi. This is a longer sentence.", "And another one follows here."],
         )
 
     def test_trailing_text_without_punctuation_is_flushed(self):
-        chunks = list(iter_sentence_chunks(iter(["no punctuation here"]), min_chars=5))
+        chunks = list(AgentLoop.iter_sentence_chunks(iter(["no punctuation here"]), min_chars=5))
         self.assertEqual(chunks, ["no punctuation here"])
 
 
