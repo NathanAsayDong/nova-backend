@@ -21,3 +21,9 @@ class Responsibility(SQLModel, table=True):
             exclude_none=True,
             mode="json",
         )
+
+    def to_prompt(self) -> str:
+        return f"""
+        Agent, this responsibility is: {self.name}. Your job is to complete the responsibility.
+        {self.description}
+        """

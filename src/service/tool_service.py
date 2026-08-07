@@ -37,7 +37,12 @@ class ToolService:
             )
         )
 
-    def call_tool(self, tool: Tool, arguments: dict[str, Any]) -> Any:
+    def call_tool(
+        self,
+        tool: Tool,
+        arguments: dict[str, Any],
+        context: dict[str, Any] | None = None,
+    ) -> Any:
         if not isinstance(arguments, dict):
             raise ToolExecutionError("Tool arguments must be a JSON object.", recoverable=True)
 
@@ -45,6 +50,17 @@ class ToolService:
         method = self._resolve_callable(tool_config.callable_path)
         method_kwargs = self._build_call_kwargs(tool_config, arguments)
         tool_name = (tool.name or "").strip() or tool_config.callable_path
+
+        # Harness-supplied context (e.g. the active conversation) always wins
+        # over model-supplied arguments so the model can't spoof it.
+        for key in tool_config.context_kwargs:
+            if context is None or key not in context:
+                raise ToolExecutionError(
+                    f"Tool '{tool_name}' requires runtime context '{key}', which is "
+                    "not available here (e.g. no active conversation).",
+                    recoverable=True,
+                )
+            method_kwargs[key] = context[key]
 
         try:
             inspect.signature(method).bind(**method_kwargs)

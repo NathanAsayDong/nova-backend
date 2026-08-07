@@ -1,0 +1,2 @@
+#TODO: implement new entry point
+#NOTE: runs a scheduler. For first implementation it only runs the process_conversations() method every 30 minutes. But it needs to be built in a way that can handle the soon to come "Responsibilites" table.

@@ -1,7 +1,12 @@
+from typing import TYPE_CHECKING
 from sqlmodel import SQLModel, Field, Relationship
 from datetime import datetime
 
 from src.model.memory_chunk import MemoryChunk
+
+if TYPE_CHECKING:
+    from src.model.conversation import Conversation
+
 
 class Project(SQLModel, table=True):
     __tablename__ = "project"
@@ -12,6 +17,7 @@ class Project(SQLModel, table=True):
     description: str | None = None
 
     memory_chunks: list[MemoryChunk] = Relationship(back_populates="project")
+    conversations: list["Conversation"] = Relationship(back_populates="project")
 
     def to_payload(self) -> dict:
         return self.model_dump(
