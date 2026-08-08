@@ -19,5 +19,13 @@ class MemoryChunk(SQLModel, table=True):
     content: str | None = None
     embedding: list[float] | None = Field(default=None, sa_column=Column(Vector(1536)))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    project_id: int = Field(foreign_key="project.id")
+    # Nullable: chunks from conversations without a project are general memory.
+    project_id: int | None = Field(default=None, foreign_key="project.id")
     project: Project = Relationship(back_populates="memory_chunks")
+
+    def to_payload(self) -> dict:
+        return self.model_dump(
+            exclude={"id"},
+            exclude_none=True,
+            mode="json",
+        )

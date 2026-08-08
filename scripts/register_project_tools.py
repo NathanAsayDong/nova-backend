@@ -1,6 +1,6 @@
 """
-Register the project-management tools in the tool table so the agent loop
-can call them.
+Register the project-management and memory tools in the tool table so the
+agent loop can call them.
 
 Idempotent: existing tools (matched by name) are skipped unless --replace is
 passed, in which case their description/config are updated in place.
@@ -72,6 +72,43 @@ PROJECT_TOOLS: list[dict] = [
                     "description": {
                         "type": "string",
                         "description": "New project description. Omit to leave unchanged.",
+                    },
+                },
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "delete_project",
+        "description": (
+            "Permanently delete a project. This CASCADES: it also deletes the "
+            "project's conversations, all of their messages, and all of its "
+            "memory chunks. There is no undo. Call it first without force — if "
+            "the project still has anything attached, the call fails with the "
+            "exact counts of what would be destroyed. Report those counts to "
+            "the user verbatim and get their explicit confirmation before "
+            "retrying with force set to true. Never set force on the first "
+            "attempt, and never set it based on your own judgment that the data "
+            "looks unimportant."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.project_service.ProjectService.delete_project",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Id of the project to delete.",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": (
+                            "Set to true ONLY after the user has explicitly "
+                            "confirmed deletion of the attached conversations, "
+                            "messages, and memory. Defaults to false."
+                        ),
                     },
                 },
                 "required": ["project_id"],
@@ -153,6 +190,81 @@ PROJECT_TOOLS: list[dict] = [
             # Injected by the harness from the active conversation — the model
             # never supplies (and cannot spoof) this value.
             "context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "fetch_memory",
+        "description": (
+            "Search Nova's long-term memory for information relevant to a query. "
+            "Memory holds distilled facts, decisions, preferences, and outcomes "
+            "from past conversations. The search is automatically scoped to the "
+            "current conversation's project (plus general memory); conversations "
+            "without a project search all memory. Use this when the user refers "
+            "to something from the past, asks what you know or remember, or when "
+            "prior context would clearly improve your answer."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.memory_chunk_service.MemoryChunkService.fetch_memory_for_conversation",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "What to look for, phrased as a standalone query "
+                            "(e.g. 'user's preferences for deployment tooling')."
+                        ),
+                    },
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+            # Injected by the harness from the active conversation — the model
+            # never supplies (and cannot spoof) this value.
+            "context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "run_terminal_command",
+        "description": (
+            "Run a shell command on the local machine and return its exit code, "
+            "stdout, and stderr. Commands run with the backend's own privileges, "
+            "so treat this with care: prefer read-only commands, and do not run "
+            "destructive commands (deleting files, rewriting git history, "
+            "installing or removing software, changing system settings) unless "
+            "the user has explicitly asked for that specific action. A non-zero "
+            "exit code is returned as data, not an error. Output is truncated at "
+            "8000 characters and the command is killed if it exceeds its timeout."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.command_line_service.CommandLineService.run_terminal_command",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run.",
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path to run the command in. Defaults to the "
+                            "backend process's working directory."
+                        ),
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": (
+                            "Seconds before the command is killed. Defaults to 30, "
+                            "maximum 120."
+                        ),
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
         },
     },
 ]

@@ -16,6 +16,17 @@ class MessageDao(BaseDao):
         )
         return self._to_model(self._model_class, response.data[0])
 
+    def count_for_conversations(self, conversation_uuids: list[UUID]) -> int:
+        if not conversation_uuids:
+            return 0
+        response = (
+            self.client.table(self._table)
+            .select("id")
+            .in_("conversation_uuid", [str(uuid) for uuid in conversation_uuids])
+            .execute()
+        )
+        return len(response.data or [])
+
     def get_for_conversation(self, conversation_uuid: UUID) -> list[Message]:
         response = (
             self.client.table(self._table)

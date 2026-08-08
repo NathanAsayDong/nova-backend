@@ -84,6 +84,20 @@ class ConversationService:
         """Close a conversation. Idempotent; closed conversations stay closed."""
         return self.conversation_dao.set_closed(conversation_uuid)
 
+    def get_unprocessed_closed_conversations(self) -> list[Conversation]:
+        """Closed conversations awaiting memory-chunk processing."""
+        return self.conversation_dao.get_unprocessed_closed()
+
+    def check_for_stale_conversations(self) -> None:
+        """Check for conversations that have been open for too long and closes them."""
+        self.conversation_dao.check_for_stale_conversations()
+
+    def mark_processed(self, conversation_uuid: UUID) -> Conversation | None:
+        return self.conversation_dao.set_processed(conversation_uuid)
+
+    def get_messages(self, conversation_uuid: UUID) -> list[Message]:
+        return self.message_dao.get_for_conversation(conversation_uuid)
+
     def get_conversation(self, conversation_uuid: UUID) -> Conversation | None:
         return self.conversation_dao.get_by_uuid(conversation_uuid)
 

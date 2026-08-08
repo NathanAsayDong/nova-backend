@@ -17,6 +17,7 @@ class FakeTextBlock:
 @dataclass
 class FakeMessage:
     content: list
+    stop_reason: str = "end_turn"
 
 
 class FakeToolDao:
@@ -74,11 +75,18 @@ class ConversationLoopStreamTests(unittest.TestCase):
 
         self.assertEqual(" ".join(chunks), "Hello there. How can I help you today?")
         history = self.agent_loop.conversations[self.conversation_id]
+        # Assistant turns keep their content blocks so citations and server
+        # tool results survive into follow-up requests.
         self.assertEqual(
             history,
             [
                 {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "Hello there. How can I help you today?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Hello there. How can I help you today?"}
+                    ],
+                },
             ],
         )
 
@@ -98,6 +106,70 @@ class ConversationLoopStreamTests(unittest.TestCase):
                 {"role": "assistant", "content": ""},
             ],
         )
+
+    def test_server_tool_blocks_are_preserved_verbatim(self):
+        """
+        web_search_tool_result blocks carry encrypted_content that must go back
+        to the API unchanged, so history keeps whatever the SDK handed us.
+        """
+        search_result_block = {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_123",
+            "content": [
+                {
+                    "type": "web_search_result",
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "encrypted_content": "ENCRYPTED_BLOB",
+                }
+            ],
+        }
+        cited_text_block = {
+            "type": "text",
+            "text": "The answer is 42.",
+            "citations": [
+                {
+                    "type": "web_search_result_location",
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "encrypted_index": "ENCRYPTED_INDEX",
+                    "cited_text": "42",
+                }
+            ],
+        }
+
+        def fake_stream(prompt, role=None, context=None, tools=None):
+            return FakeMessage(content=[search_result_block, cited_text_block])
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        list(self.agent_loop.conversation_loop_stream("q", self.conversation_id))
+
+        blocks = self.agent_loop.conversations[self.conversation_id][1]["content"]
+        self.assertEqual(blocks, [search_result_block, cited_text_block])
+
+    def test_pause_turn_replays_assistant_message(self):
+        """A paused server-side search continues by replaying the message."""
+        responses = [
+            FakeMessage(content=[{"type": "text", "text": "searching"}]),
+            FakeMessage(content=[FakeTextBlock(text="All done now, here it is.")]),
+        ]
+        stop_reasons = ["pause_turn", "end_turn"]
+        calls = {"n": 0}
+
+        def fake_stream(prompt, role=None, context=None, tools=None):
+            index = calls["n"]
+            calls["n"] += 1
+            message = responses[index]
+            message.stop_reason = stop_reasons[index]
+            return message
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        chunks = list(self.agent_loop.conversation_loop_stream("q", self.conversation_id))
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(" ".join(chunks), "All done now, here it is.")
 
     def test_turn_persists_user_and_nova_messages(self):
         self._set_stream("Hello there. How can I help you today?")
@@ -129,7 +201,9 @@ class ConversationLoopStreamTests(unittest.TestCase):
         history = self.agent_loop.conversations[self.conversation_id]
         self.assertEqual(history[0], {"role": "user", "content": "hi"})
         self.assertEqual(history[1]["role"], "assistant")
-        self.assertTrue(history[1]["content"].startswith("This is the first full sentence"))
+        self.assertTrue(
+            history[1]["content"][0]["text"].startswith("This is the first full sentence")
+        )
 
 
 class SentenceChunkTests(unittest.TestCase):

@@ -47,6 +47,52 @@ class AgentLoop:
         except Exception as exc:
             print(f"Failed to persist {role} message for conversation {conversation.uuid}: {exc}")
 
+    @staticmethod
+    def _serialize_blocks(response: Message) -> list[dict[str, Any]]:
+        """
+        Serialize assistant content blocks for replay in history.
+
+        Server tool blocks (web_search_tool_result) carry encrypted_content
+        that the API decrypts on later turns, and cited text blocks carry
+        encrypted_index. Both must go back exactly as received or the next
+        request fails validation, so dump the blocks wholesale rather than
+        rebuilding the fields we happen to care about.
+        """
+        blocks: list[dict[str, Any]] = []
+        for block in response.content:
+            if hasattr(block, "model_dump"):
+                blocks.append(block.model_dump(exclude_none=True))
+            elif isinstance(block, dict):
+                blocks.append(block)
+            elif getattr(block, "type", None) == "tool_use":
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                )
+            elif getattr(block, "text", None):
+                blocks.append({"type": "text", "text": block.text})
+        return blocks
+
+    @staticmethod
+    def _describe_server_tool_uses(response: Message) -> list[dict[str, Any]]:
+        """Audit records for tools Anthropic ran server-side (e.g. web search)."""
+        records: list[dict[str, Any]] = []
+        for block in response.content:
+            if getattr(block, "type", None) != "server_tool_use":
+                continue
+            records.append(
+                {
+                    "tool": getattr(block, "name", "unknown"),
+                    "input": getattr(block, "input", {}),
+                    "server_side": True,
+                }
+            )
+        return records
+
     def conversation_loop_stream(self, prompt: str, conversation_uuid: UUID) -> Iterator[str]:
         """
         Run a single voice conversation turn as a bounded ReAct loop.
@@ -132,24 +178,27 @@ class AgentLoop:
                 yield fallback
                 return
 
-            tool_uses: list[Any] = []
-            assistant_blocks: list[dict[str, Any]] = []
-            for block in response.content:
-                block_type = getattr(block, "type", None)
-                if block_type == "tool_use":
-                    tool_uses.append(block)
-                    assistant_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input,
-                        }
-                    )
-                elif hasattr(block, "text") and block.text:
-                    assistant_blocks.append({"type": "text", "text": block.text})
+            # Only client-side tool_use blocks need execution here; anything
+            # Anthropic ran server-side (web search) already has its results
+            # inline in this same response.
+            tool_uses = [
+                block for block in response.content
+                if getattr(block, "type", None) == "tool_use"
+            ]
+            assistant_blocks = self._serialize_blocks(response)
+
+            for record in self._describe_server_tool_uses(response):
+                self._persist_message(
+                    conversation, MessageRole.TOOL, json.dumps(record)
+                )
 
             if not tool_uses:
+                # A long server-side search can pause the turn; replay the
+                # assistant message unchanged to let it finish.
+                if getattr(response, "stop_reason", None) == "pause_turn":
+                    history.append({"role": "assistant", "content": assistant_blocks})
+                    continue
+
                 text = self._extract_text(response)
                 # Persist before yielding so a client disconnect mid-stream
                 # can't lose the reply.
@@ -158,7 +207,12 @@ class AgentLoop:
                     if text:
                         yield from self.iter_sentence_chunks([text])
                 finally:
-                    history.append({"role": "assistant", "content": text})
+                    # Keep the full blocks (citations, search results) in
+                    # history so follow-up turns stay valid; fall back to raw
+                    # text when the model returned nothing to serialize.
+                    history.append(
+                        {"role": "assistant", "content": assistant_blocks or text}
+                    )
                 return
 
             history.append({"role": "assistant", "content": assistant_blocks})
@@ -299,24 +353,18 @@ class AgentLoop:
             except Exception as exc:
                 return f"Agent loop failed: {str(exc)}"
 
-            tool_uses: list[Any] = []
-            assistant_blocks: list[dict[str, Any]] = []
-            for block in response.content:
-                block_type = getattr(block, "type", None)
-                if block_type == "tool_use":
-                    tool_uses.append(block)
-                    assistant_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": block.id,
-                            "name": block.name,
-                            "input": block.input,
-                        }
-                    )
-                elif hasattr(block, "text") and block.text:
-                    assistant_blocks.append({"type": "text", "text": block.text})
+            tool_uses = [
+                block for block in response.content
+                if getattr(block, "type", None) == "tool_use"
+            ]
+            assistant_blocks = self._serialize_blocks(response)
 
             if not tool_uses:
+                # A long server-side search can pause the turn; replay the
+                # assistant message unchanged to let it finish.
+                if getattr(response, "stop_reason", None) == "pause_turn":
+                    history.append({"role": "assistant", "content": assistant_blocks})
+                    continue
                 return self._extract_text(response)
 
             history.append({"role": "assistant", "content": assistant_blocks})
