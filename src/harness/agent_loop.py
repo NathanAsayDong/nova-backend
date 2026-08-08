@@ -8,9 +8,9 @@ import uuid
 
 from anthropic.types.message import Message
 
+from src.dao.responsibility_dao import ResponsibilityDao
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
-from src.model.responsibility import Responsibility
 from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
 from src.service.tool_service import ToolExecutionError, ToolService
@@ -293,23 +293,32 @@ class AgentLoop:
 
     def run_agent(
         self,
-        prompt: str,
-        responsibility: Responsibility | None = None,
+        prompt: str | None = None,
+        responsibility_id: int | None = None,
     ) -> str:
         """
         Run a sub-agent as a bounded Claude + ToolService ReAct loop.
 
-        Context is isolated from the voice conversation history. Call from
+        Context is isolated from any conversation history, so this is how
+        background work runs: responsibilities are triggered here by id, and
+        the responsibility's own description leads the prompt. Call from
         FastAPI via asyncio.to_thread so the event loop stays free.
         """
         if self.tool_service is None:
             self.tool_service = ToolService()
 
-        task_prompt = (prompt or "").strip()
-        if responsibility is not None:
-            task_prompt = task_prompt + "\n" + responsibility.to_prompt()
+        parts: list[str] = []
+        if responsibility_id is not None:
+            responsibility = ResponsibilityDao().get(responsibility_id)
+            if responsibility is None:
+                raise ValueError(f"Responsibility with id {responsibility_id} not found")
+            parts.append(responsibility.to_prompt().strip())
+        if prompt and prompt.strip():
+            parts.append(prompt.strip())
+
+        task_prompt = "\n".join(parts).strip()
         if not task_prompt:
-            raise ValueError("A prompt or responsibility with name/description is required.")
+            raise ValueError("A prompt or responsibility_id is required.")
 
         started_at = time.monotonic()
 
@@ -415,12 +424,6 @@ class AgentLoop:
             history.append({"role": "user", "content": tool_results})
 
         return "I hit a loop limit while working on that and had to stop."
-
-    def preform_responsibility(self, responsibility: Responsibility):
-        """
-        Agent performs a responsibility.
-        """
-        pass
 
     @staticmethod
     def iter_sentence_chunks(

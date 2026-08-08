@@ -1,6 +1,13 @@
 from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field
 from datetime import datetime
+from enum import StrEnum
+
+class ResponsibilityReportType(StrEnum):
+    EMAIL = "email"
+    SMS = "sms"
+    CALL = "call"
+    CHAT = "chat"
 
 class Responsibility(SQLModel, table=True):
     __tablename__ = "responsibility"
@@ -15,6 +22,7 @@ class Responsibility(SQLModel, table=True):
     )
     last_run: datetime | None = None
     project_id: int | None = None
+    report_type: ResponsibilityReportType | None = None
 
     def to_payload(self) -> dict:
         return self.model_dump(
@@ -31,3 +39,14 @@ class Responsibility(SQLModel, table=True):
         if self.project_id:
             base += f"Project: {self.project_id}"
         return base
+
+    def report_type_prompt(self) -> str:
+        if self.report_type == ResponsibilityReportType.EMAIL:
+            return f"Report the result of the responsibility to the user by email."
+        elif self.report_type == ResponsibilityReportType.SMS:
+            return f"Report the result of the responsibility to the user by SMS."
+        elif self.report_type == ResponsibilityReportType.CALL:
+            return f"Report the result of the responsibility to the user by call."
+        elif self.report_type == ResponsibilityReportType.CHAT:
+            return f"Report the result of the responsibility to the user by chat."
+        return ""

@@ -44,5 +44,22 @@ class ResponsibilityDao(BaseDao):
             return None
         return self._to_model(self._model_class, response.data[0])
 
+    def set_last_run(self, id: int, timestamp_utc: str) -> Responsibility | None:
+        """
+        Stamp a responsibility as having run.
+
+        Targeted column update rather than a whole-entity update, so a
+        partially populated model can't blank out other columns.
+        """
+        response = (
+            self.client.table(self._table)
+            .update({"last_run": timestamp_utc})
+            .eq("id", id)
+            .execute()
+        )
+        if not response.data:
+            return None
+        return self._to_model(self._model_class, response.data[0])
+
     def delete(self, id: int) -> None:
         self.client.table(self._table).delete().eq("id", id).execute()
