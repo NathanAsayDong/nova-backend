@@ -1,10 +1,12 @@
 """
 Nova background worker.
 
-Entry point for scheduled jobs that run outside the request path. For now the
-only job distills closed conversations into memory chunks every 30 minutes;
-register future jobs (e.g. the upcoming Responsibilities scanner) by appending
-a ScheduledJob to build_jobs().
+Entry point for scheduled jobs that run outside the request path:
+
+  * process_conversations - distills closed conversations into memory chunks
+  * check_for_responsibilities - runs responsibilities that are due
+
+Register further jobs by appending a ScheduledJob to build_jobs().
 
 Run with:
     uv run python worker.py
@@ -44,6 +46,12 @@ def _run_process_conversations() -> None:
     MemoryChunkService().process_conversations()
 
 
+def _run_check_for_responsibilities() -> None:
+    from src.service.responsibility_service import ResponsibilityService
+
+    ResponsibilityService().check_for_responsibilities()
+
+
 def build_jobs() -> list[ScheduledJob]:
     return [
         ScheduledJob(
@@ -51,7 +59,14 @@ def build_jobs() -> list[ScheduledJob]:
             interval_seconds=30 * 60,
             run=_run_process_conversations,
         ),
-        # Future: ScheduledJob(name="responsibilities", ...)
+        # Checked more often than responsibilities actually run: the service
+        # decides what's due, so a short interval only means a due
+        # responsibility starts soon after its window opens.
+        ScheduledJob(
+            name="check_for_responsibilities",
+            interval_seconds=5 * 60,
+            run=_run_check_for_responsibilities,
+        ),
     ]
 
 

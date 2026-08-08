@@ -3,6 +3,7 @@ from src.dao.memory_chunk_dao import MemoryChunkDao
 from src.dao.message_dao import MessageDao
 from src.dao.project_dao import ProjectDao
 from src.model.project import Project
+from src.service.code_service import CodeService
 
 
 class ProjectService:
@@ -19,7 +20,8 @@ class ProjectService:
         self.conversation_dao = ConversationDao()
         self.memory_chunk_dao = MemoryChunkDao()
         self.message_dao = MessageDao()
-
+        self.code_service = CodeService()
+        
     @staticmethod
     def _to_dict(project: Project) -> dict:
         return {"id": project.id, **project.to_payload()}
@@ -95,6 +97,10 @@ class ProjectService:
 
         # Cascading fks handle conversations, messages, and memory chunks.
         self.project_dao.delete(project.id)
+
+
+        #delete project files
+        self.code_service.delete_project_files(project.id)
 
         return {
             "status": "deleted",

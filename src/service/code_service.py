@@ -106,6 +106,26 @@ class CodeService:
         root.mkdir(parents=True, exist_ok=True)
         return root
 
+    def delete_project_files(self, project_id: int) -> dict:
+        """
+        Delete a project's entire workspace folder.
+
+        Called when the project itself is deleted, so the path is derived from
+        the id rather than a Project row — by then the row is already gone.
+        Missing folders are not an error: a project may never have held code.
+        """
+        root = (self.workspace_root / f"project-{int(project_id)}").resolve()
+        if not root.exists():
+            return {"status": "no_workspace", "workspace": str(root), "files_deleted": 0}
+
+        file_count = sum(1 for item in root.rglob("*") if item.is_file())
+        shutil.rmtree(root)
+        return {
+            "status": "deleted",
+            "workspace": str(root),
+            "files_deleted": file_count,
+        }
+
     @staticmethod
     def _resolve_path(root: Path, relative_path: str) -> Path:
         """
