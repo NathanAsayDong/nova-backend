@@ -14,6 +14,12 @@ class ServiceMethodToolConfig(BaseModel):
     # Kwargs supplied by the harness at call time (e.g. conversation_uuid),
     # never by the model. Keep these out of input_schema.
     context_kwargs: list[str] = Field(default_factory=list)
+    # Same, but injected only when available — for tools that can still run
+    # outside a conversation (e.g. from a sub-agent) via other arguments.
+    optional_context_kwargs: list[str] = Field(default_factory=list)
+    # Kwargs supplied by the harness at call time (e.g. conversation_uuid),
+    # never by the model. Keep these out of input_schema.
+    context_kwargs: list[str] = Field(default_factory=list)
 
     @field_validator("callable_path")
     @classmethod

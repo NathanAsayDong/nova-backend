@@ -62,6 +62,11 @@ class ToolService:
                 )
             method_kwargs[key] = context[key]
 
+        # Injected when present; the tool is expected to cope without it.
+        for key in tool_config.optional_context_kwargs:
+            if context and context.get(key) is not None:
+                method_kwargs[key] = context[key]
+
         try:
             inspect.signature(method).bind(**method_kwargs)
         except TypeError as exc:

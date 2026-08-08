@@ -26,3 +26,6 @@ build/
 .idea/
 .vscode/
 
+# Agent-authored project workspaces (CodeService)
+project_files/
+

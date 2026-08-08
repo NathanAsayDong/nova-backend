@@ -24,16 +24,24 @@ class CommandLineService:
         command: str,
         working_directory: str | None = None,
         timeout_seconds: int | None = None,
+        conversation_uuid: str | None = None,
     ) -> dict:
         """
         Run a shell command and return a structured result the model can act on.
 
         Always returns exit_code/stdout/stderr rather than raising on non-zero
         exit — a failed command is information, not an error in the tool layer.
+
+        With no explicit working_directory, commands run in the active
+        conversation's project workspace when it has one, so shell work and the
+        code tools agree on where "here" is.
         """
         command = (command or "").strip()
         if not command:
             raise ValueError("A non-empty command is required.")
+
+        if not working_directory and conversation_uuid:
+            working_directory = self._project_workspace(conversation_uuid)
 
         timeout = _DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else int(timeout_seconds)
         timeout = max(1, min(timeout, _MAX_TIMEOUT_SECONDS))
@@ -69,6 +77,24 @@ class CommandLineService:
             "stdout": self._clip(result.stdout),
             "stderr": self._clip(result.stderr),
         }
+
+    @staticmethod
+    def _project_workspace(conversation_uuid: str) -> str | None:
+        """
+        Workspace of the conversation's project, if it has one.
+
+        Imported lazily to avoid a circular import, and failures are swallowed
+        — defaulting the working directory is a convenience, not a
+        precondition for running a command.
+        """
+        try:
+            from src.service.code_service import CodeService
+
+            code_service = CodeService()
+            project = code_service._resolve_project(conversation_uuid=conversation_uuid)
+            return str(code_service.project_workspace(project))
+        except Exception:
+            return None
 
     @staticmethod
     def _decode(stream: str | bytes | None) -> str:

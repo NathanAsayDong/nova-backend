@@ -14,6 +14,7 @@ class Responsibility(SQLModel, table=True):
         sa_column=Column(JSON),
     )
     last_run: datetime | None = None
+    project_id: int | None = None
 
     def to_payload(self) -> dict:
         return self.model_dump(
@@ -23,7 +24,10 @@ class Responsibility(SQLModel, table=True):
         )
 
     def to_prompt(self) -> str:
-        return f"""
+        base = f"""
         Agent, this responsibility is: {self.name}. Your job is to complete the responsibility.
         {self.description}
         """
+        if self.project_id:
+            base += f"Project: {self.project_id}"
+        return base

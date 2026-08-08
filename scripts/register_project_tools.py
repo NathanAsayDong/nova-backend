@@ -229,13 +229,20 @@ PROJECT_TOOLS: list[dict] = [
         "name": "run_terminal_command",
         "description": (
             "Run a shell command on the local machine and return its exit code, "
-            "stdout, and stderr. Commands run with the backend's own privileges, "
-            "so treat this with care: prefer read-only commands, and do not run "
-            "destructive commands (deleting files, rewriting git history, "
-            "installing or removing software, changing system settings) unless "
-            "the user has explicitly asked for that specific action. A non-zero "
-            "exit code is returned as data, not an error. Output is truncated at "
-            "8000 characters and the command is killed if it exceeds its timeout."
+            "stdout, and stderr. Use this for running and inspecting things — "
+            "tests, builds, git, checking versions. "
+            "NEVER use this to create, edit, or delete code files: all code must "
+            "belong to a project, so use write_project_file, edit_project_file, "
+            "and delete_project_file instead, which keep files inside the "
+            "project's workspace. Do not use shell redirection, heredocs, tee, "
+            "or editors to author files. "
+            "Commands run with the backend's own privileges, so prefer "
+            "read-only commands, and do not run destructive commands (deleting "
+            "files, rewriting git history, installing or removing software, "
+            "changing system settings) unless the user has explicitly asked for "
+            "that specific action. A non-zero exit code is returned as data, not "
+            "an error. Output is truncated at 8000 characters and the command is "
+            "killed if it exceeds its timeout."
         ),
         "config": {
             "type": "service_method",
@@ -265,9 +272,225 @@ PROJECT_TOOLS: list[dict] = [
                 "required": ["command"],
                 "additionalProperties": False,
             },
+            # Lets the command default to the active project's workspace.
+            "optional_context_kwargs": ["conversation_uuid"],
         },
     },
 ]
+
+# Code tools. All of them resolve a project first — from an explicit
+# project_id, otherwise from the active conversation — so code is always
+# attributed to a project and confined to that project's workspace folder.
+_PROJECT_ID_PROPERTY = {
+    "type": "integer",
+    "description": (
+        "Project whose workspace to operate in. Defaults to the current "
+        "conversation's project; only pass this to work on a different project."
+    ),
+}
+
+CODE_TOOLS: list[dict] = [
+    {
+        "name": "list_project_files",
+        "description": (
+            "List the code files in a project's workspace folder. Use this when "
+            "returning to a project to see what code already exists before "
+            "reading or writing anything."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.code_service.CodeService.list_project_files",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "subdirectory": {
+                        "type": "string",
+                        "description": (
+                            "Optional subdirectory to list, relative to the "
+                            "project workspace. Omit to list everything."
+                        ),
+                    },
+                    "project_id": _PROJECT_ID_PROPERTY,
+                },
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "read_project_file",
+        "description": (
+            "Read a file from a project's workspace folder. Paths are relative "
+            "to the workspace (e.g. 'src/main.py'). Read a file before editing "
+            "it so you know its current contents."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.code_service.CodeService.read_project_file",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to the project workspace.",
+                    },
+                    "project_id": _PROJECT_ID_PROPERTY,
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "write_project_file",
+        "description": (
+            "Write a file into a project's workspace folder, creating parent "
+            "directories as needed. Use this to create new files or to replace "
+            "a file's entire contents; for small changes to an existing file "
+            "prefer edit_project_file, which avoids rewriting the whole file."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.code_service.CodeService.write_project_file",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to the project workspace.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full contents to write to the file.",
+                    },
+                    "project_id": _PROJECT_ID_PROPERTY,
+                },
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "edit_project_file",
+        "description": (
+            "Edit an existing file in a project's workspace by running a shell "
+            "command against it, instead of rewriting the file. The command runs "
+            "with the project workspace as its working directory, so refer to "
+            "the file by its relative path — for example "
+            "\"sed -i '' 's/old/new/g' src/main.py\". Returns the command's exit "
+            "code and a diff of what actually changed, so verify the diff "
+            "matches your intent. Note that sed on macOS requires the empty "
+            "string argument after -i."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.code_service.CodeService.edit_project_file",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "File the command edits, relative to the project "
+                            "workspace. Used to produce the diff."
+                        ),
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command that modifies the file in place.",
+                    },
+                    "project_id": _PROJECT_ID_PROPERTY,
+                },
+                "required": ["path", "command"],
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "delete_project_file",
+        "description": (
+            "Delete a file from a project's workspace folder. This is "
+            "permanent. Deleting a directory requires recursive set to true — "
+            "confirm with the user before doing that, since it removes every "
+            "file inside it."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.code_service.CodeService.delete_project_file",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to the project workspace.",
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": (
+                            "Required to delete a directory and everything in "
+                            "it. Defaults to false."
+                        ),
+                    },
+                    "project_id": _PROJECT_ID_PROPERTY,
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+]
+
+COMMUNICATION_TOOLS: list[dict] = [
+    {
+        "name": "send_email",
+        "description": (
+            "Send an email from the user's configured Gmail account. This goes "
+            "out immediately and cannot be recalled, and it is sent as the user, "
+            "not as you. Before calling this, show the user the exact "
+            "recipients, subject, and body, and get their explicit approval to "
+            "send — never send on your own initiative, and never send to "
+            "recipients the user did not name. Returns true if the send "
+            "succeeded and false if it failed."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.email_service.EmailService.send_email",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Recipient email addresses.",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Subject line.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Body content of the email.",
+                    },
+                    "is_html": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true if the body is HTML. Defaults to false "
+                            "(plain text)."
+                        ),
+                    },
+                },
+                "required": ["to", "subject", "body"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+PROJECT_TOOLS = PROJECT_TOOLS + CODE_TOOLS + COMMUNICATION_TOOLS
 
 
 def main() -> None:
