@@ -1,7 +1,9 @@
+import json
 import unittest
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+from prompting.prompt_source_prompt import PromptSourceEnum
 from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
@@ -60,7 +62,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
         self.assertIsInstance(new_id, UUID)
 
     def _set_stream(self, text: str):
-        def fake_stream(prompt, role=None, context=None, tools=None):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
             blocks = [FakeTextBlock(text=text)] if text else []
             return FakeMessage(content=blocks)
 
@@ -138,7 +140,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
             ],
         }
 
-        def fake_stream(prompt, role=None, context=None, tools=None):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
             return FakeMessage(content=[search_result_block, cited_text_block])
 
         self.agent_loop.claude_service.stream_response = fake_stream
@@ -157,7 +159,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
         stop_reasons = ["pause_turn", "end_turn"]
         calls = {"n": 0}
 
-        def fake_stream(prompt, role=None, context=None, tools=None):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
             index = calls["n"]
             calls["n"] += 1
             message = responses[index]
@@ -204,6 +206,190 @@ class ConversationLoopStreamTests(unittest.TestCase):
         self.assertTrue(
             history[1]["content"][0]["text"].startswith("This is the first full sentence")
         )
+
+
+class PromptSourceTests(ConversationLoopStreamTests):
+    """The reply is steered for the medium it will be delivered in."""
+
+    def _capture_systems(self):
+        systems: list = []
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
+            systems.append(system)
+            return FakeMessage(content=[FakeTextBlock(text="Short answer.")])
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+        return systems
+
+    def test_chat_sends_no_steer(self):
+        systems = self._capture_systems()
+
+        list(
+            self.agent_loop.conversation_loop_events(
+                "hi", self.conversation_id, prompt_source=PromptSourceEnum.CHAT_PROMPT
+            )
+        )
+
+        # CHAT_PROMPT is empty, so nothing is sent rather than an empty system.
+        self.assertEqual(systems, [None])
+
+    def test_speech_sends_brevity_steer(self):
+        systems = self._capture_systems()
+
+        list(
+            self.agent_loop.conversation_loop_events(
+                "hi", self.conversation_id, prompt_source=PromptSourceEnum.SPEECH_PROMPT
+            )
+        )
+
+        self.assertEqual(len(systems), 1)
+        self.assertIn("voice mode", systems[0])
+        self.assertIn("brief", systems[0])
+
+    def test_voice_wrapper_defaults_to_speech(self):
+        systems = self._capture_systems()
+
+        list(self.agent_loop.conversation_loop_stream("hi", self.conversation_id))
+
+        self.assertIn("brief", systems[0])
+
+    def test_chat_default_is_unsteered(self):
+        systems = self._capture_systems()
+
+        list(self.agent_loop.conversation_loop_events("hi", self.conversation_id))
+
+        self.assertEqual(systems, [None])
+
+    def test_steer_never_enters_history(self):
+        """
+        Chat and speech share one conversation, so a spoken turn's brevity
+        instruction must not linger and shorten later typed replies.
+        """
+        self._capture_systems()
+
+        list(
+            self.agent_loop.conversation_loop_events(
+                "hi", self.conversation_id, prompt_source=PromptSourceEnum.SPEECH_PROMPT
+            )
+        )
+
+        history = self.agent_loop.conversations[self.conversation_id]
+        serialized = json.dumps(history)
+        self.assertNotIn("voice mode", serialized)
+        self.assertNotIn("brief", serialized)
+
+
+class ArtifactTests(unittest.TestCase):
+    def test_edit_produces_diff_artifact(self):
+        artifact = AgentLoop._artifact_for_tool(
+            "edit_project_file",
+            {"path": "app.py", "command": "sed ..."},
+            {"path": "app.py", "diff": "-a\n+b", "exit_code": 0},
+        )
+        self.assertEqual(artifact["kind"], "diff")
+        self.assertEqual(artifact["title"], "app.py")
+        self.assertEqual(artifact["content"], "-a\n+b")
+
+    def test_edit_without_changes_has_no_artifact(self):
+        self.assertIsNone(
+            AgentLoop._artifact_for_tool(
+                "edit_project_file", {"path": "app.py"}, {"diff": "", "exit_code": 1}
+            )
+        )
+
+    def test_write_uses_argument_content_and_infers_language(self):
+        artifact = AgentLoop._artifact_for_tool(
+            "write_project_file",
+            {"path": "src/main.ts", "content": "export const a = 1"},
+            {"path": "src/main.ts", "status": "created"},
+        )
+        self.assertEqual(artifact["kind"], "file")
+        self.assertEqual(artifact["language"], "typescript")
+        self.assertEqual(artifact["content"], "export const a = 1")
+
+    def test_read_uses_result_content(self):
+        artifact = AgentLoop._artifact_for_tool(
+            "read_project_file", {"path": "a.py"}, {"path": "a.py", "content": "x = 1"}
+        )
+        self.assertEqual(artifact["content"], "x = 1")
+        self.assertEqual(artifact["language"], "python")
+
+    def test_terminal_merges_streams_and_keeps_exit_code(self):
+        artifact = AgentLoop._artifact_for_tool(
+            "run_terminal_command",
+            {"command": "ls"},
+            {"stdout": "a.py\n", "stderr": "warn\n", "exit_code": 2},
+        )
+        self.assertEqual(artifact["kind"], "terminal")
+        self.assertIn("a.py", artifact["content"])
+        self.assertIn("warn", artifact["content"])
+        self.assertEqual(artifact["exitCode"], 2)
+
+    def test_silent_command_has_no_artifact(self):
+        self.assertIsNone(
+            AgentLoop._artifact_for_tool(
+                "run_terminal_command", {"command": "true"}, {"stdout": "", "stderr": ""}
+            )
+        )
+
+    def test_tool_without_visual_output_has_no_artifact(self):
+        self.assertIsNone(
+            AgentLoop._artifact_for_tool("list_projects", {}, [{"id": 1}])
+        )
+
+
+class EventStreamTests(ConversationLoopStreamTests):
+    def test_events_carry_text_type(self):
+        self._set_stream("Hello there. How can I help you today?")
+
+        events = list(
+            self.agent_loop.conversation_loop_events("hi", self.conversation_id)
+        )
+
+        chunks = [event for event in events if event["type"] == "text"]
+        self.assertEqual(
+            " ".join(event["text"] for event in chunks),
+            "Hello there. How can I help you today?",
+        )
+
+    def test_text_final_carries_unstripped_text(self):
+        """Sentence chunks lose newlines; text_final restores them for markdown."""
+        markdown = (
+            "Here is the summary of what happened today.\n"
+            "\n"
+            "- The first item is fairly long right here.\n"
+            "- The second item is also long enough to split.\n"
+        )
+        self._set_stream(markdown)
+
+        events = list(
+            self.agent_loop.conversation_loop_events("hi", self.conversation_id)
+        )
+
+        finals = [event for event in events if event["type"] == "text_final"]
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(finals[0]["text"], markdown)
+
+        # Chunking really does flatten the list into one line, which is the
+        # whole reason text_final exists.
+        chunked = " ".join(e["text"] for e in events if e["type"] == "text")
+        self.assertNotEqual(chunked, markdown)
+        self.assertNotIn("\n- The second item", chunked)
+
+    def test_text_wrapper_filters_non_text_events(self):
+        """The voice path must not try to speak tool calls or artifacts."""
+        events = [
+            {"type": "tool_call", "tool": "run_terminal_command", "input": {}},
+            {"type": "text", "text": "Spoken."},
+            {"type": "artifact", "kind": "diff", "content": "-a\n+b"},
+        ]
+        self.agent_loop.conversation_loop_events = lambda *_a, **_k: iter(events)
+
+        spoken = list(
+            self.agent_loop.conversation_loop_stream("hi", self.conversation_id)
+        )
+
+        self.assertEqual(spoken, ["Spoken."])
 
 
 class SentenceChunkTests(unittest.TestCase):

@@ -490,7 +490,259 @@ COMMUNICATION_TOOLS: list[dict] = [
     },
 ]
 
-PROJECT_TOOLS = PROJECT_TOOLS + CODE_TOOLS + COMMUNICATION_TOOLS
+# Responsibilities: recurring background work the worker runs on a schedule.
+_SCHEDULE_PROPERTY = {
+    "type": "array",
+    "items": {
+        "type": "string",
+        "enum": ["morning", "afternoon", "evening", "night"],
+    },
+    "description": (
+        "Time-of-day windows to run in. Runs at most once per window, so "
+        "['morning','evening'] means twice a day. morning=6-12, "
+        "afternoon=12-17, evening=17-21, night=21-6. Omit to run every window."
+    ),
+}
+_REPORT_TYPE_PROPERTY = {
+    "type": "string",
+    "enum": ["email", "sms", "call", "chat"],
+    "description": (
+        "How to report results. Only 'email' can actually be delivered today — "
+        "the others have no tool yet, so the responsibility runs but only "
+        "summarizes in its reply. Omit for no report."
+    ),
+}
+
+RESPONSIBILITY_TOOLS: list[dict] = [
+    {
+        "name": "list_responsibilities",
+        "description": (
+            "List all responsibilities — recurring background tasks that run "
+            "automatically on a schedule — with their ids, schedules, and when "
+            "each last ran. Use this to find a responsibility before updating "
+            "or deleting it."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.responsibility_service.ResponsibilityService.get_all_responsibilities",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_responsibility",
+        "description": "Get one responsibility by id, including its schedule and last run time.",
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.responsibility_service.ResponsibilityService.get_responsibility",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "responsibility_id": {
+                        "type": "integer",
+                        "description": "Id of the responsibility.",
+                    },
+                },
+                "required": ["responsibility_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "create_responsibility",
+        "description": (
+            "Create a recurring background task that runs on a schedule without "
+            "the user present. The description is the ONLY instruction the agent "
+            "receives when it runs later, so write it as a complete, standalone "
+            "brief — not a reminder note. Attach a project_id when the work "
+            "belongs to a project, so it can use that project's files and memory."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.responsibility_service.ResponsibilityService.create_responsibility",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short name, e.g. 'Morning inbox triage'.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Full standalone instructions for the agent to carry "
+                            "out unattended."
+                        ),
+                    },
+                    "schedule": _SCHEDULE_PROPERTY,
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Optional project this work belongs to.",
+                    },
+                    "report_type": _REPORT_TYPE_PROPERTY,
+                },
+                "required": ["name", "description"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "update_responsibility",
+        "description": (
+            "Update a responsibility's name, description, schedule, project, or "
+            "report type. Omitted fields are left unchanged. Use "
+            "list_responsibilities first to find the id."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.responsibility_service.ResponsibilityService.update_responsibility",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "responsibility_id": {
+                        "type": "integer",
+                        "description": "Id of the responsibility to update.",
+                    },
+                    "name": {"type": "string", "description": "New name."},
+                    "description": {
+                        "type": "string",
+                        "description": "New standalone instructions.",
+                    },
+                    "schedule": _SCHEDULE_PROPERTY,
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Project to attach this responsibility to.",
+                    },
+                    "report_type": _REPORT_TYPE_PROPERTY,
+                },
+                "required": ["responsibility_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "delete_responsibility",
+        "description": (
+            "Delete a responsibility so it stops running on its schedule. This "
+            "only removes the schedule entry — work it already did (files, "
+            "emails, memory) is unaffected. Confirm the correct id with the user "
+            "before deleting."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.responsibility_service.ResponsibilityService.delete_responsibility",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "responsibility_id": {
+                        "type": "integer",
+                        "description": "Id of the responsibility to delete.",
+                    },
+                },
+                "required": ["responsibility_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+# Updates: notifications produced by background work (sub-agents,
+# responsibilities) that the user hasn't seen yet.
+UPDATE_TOOLS: list[dict] = [
+    {
+        "name": "get_unviewed_updates",
+        "description": (
+            "List the updates the user has not seen yet, oldest first. Updates "
+            "are written when background work finishes — a sub-agent or "
+            "responsibility completes and its outcome is summarized into an "
+            "update. Each update may carry the project and/or conversation the "
+            "work came from, which explains why it ran. Call this when the "
+            "user asks what's new, to report on their updates, or about the "
+            "updates indicator. After you have reported the updates to the "
+            "user, call mark_all_updates_viewed so the indicator clears."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.update_service.UpdateService.get_unviewed_updates",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "mark_all_updates_viewed",
+        "description": (
+            "Mark every unviewed update as viewed, clearing the client's "
+            "updates indicator. Call this only after you have actually "
+            "reported the unviewed updates to the user."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.update_service.UpdateService.mark_all_updates_viewed",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+# Background agents: one-off sub-agents that run detached from the chat turn
+# and report back through the updates system.
+BACKGROUND_AGENT_TOOLS: list[dict] = [
+    {
+        "name": "run_background_agent",
+        "description": (
+            "Kick off a background sub-agent for work too long or too "
+            "self-contained for the current chat turn — multi-step research, "
+            "bulk file work, anything the user should not sit through. "
+            "Returns immediately; the agent runs on its own and its summary "
+            "is posted as an update linked to this conversation and its "
+            "project, which the user can read via get_unviewed_updates or "
+            "the updates UI. The prompt is the agent's ONLY instruction and "
+            "it cannot ask follow-up questions, so write a complete, "
+            "standalone brief. After calling this, tell the user the task "
+            "has started and that an update will appear when it is done. Do "
+            "not use this for quick work you could do inline, and if you are "
+            "already a background agent, do the work yourself instead of "
+            "spawning another agent."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.harness.agent_loop.AgentLoop.run_agent",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Complete, standalone instructions for the "
+                            "background agent to carry out unattended."
+                        ),
+                    },
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+            "static_kwargs": {"background": True},
+            # Injected by the harness when the call comes from a conversation
+            # so the resulting update links back to it; absent (and fine) when
+            # a background agent itself is the caller.
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+]
+
+PROJECT_TOOLS = (
+    PROJECT_TOOLS + CODE_TOOLS + COMMUNICATION_TOOLS + RESPONSIBILITY_TOOLS
+    + UPDATE_TOOLS + BACKGROUND_AGENT_TOOLS
+)
 
 
 def main() -> None:

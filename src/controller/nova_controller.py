@@ -11,22 +11,39 @@ from uuid import UUID
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Body, HTTPException
 from fastapi.responses import StreamingResponse
 
+from prompting.prompt_source_prompt import PromptSourceEnum
 from src.harness.agent_loop import AgentLoop
-from src.model.tool import Tool
 from src.service.conversation_service import ConversationClosedError, ConversationService
-from src.service.project_service import ProjectService
-from src.service.tool_service import ToolService
 from src.service.tts_service import TTSService
-from src.service.whisper_service import WhisperService
+from src.service.asr_service import ASRService
 
 router = APIRouter(tags=["transcribe"])
-whisper_service = WhisperService()
-tool_service = ToolService()
+asr_service = ASRService()
 tts_service = TTSService()
 conversation_service = ConversationService()
-project_service = ProjectService()
 agent_loop = AgentLoop()
 agent_loop.conversation_service = conversation_service
+
+
+# In-memory power state for the assistant. Single-user personal deployment,
+# so a module-level flag is sufficient — no need for per-session storage.
+_nova_power_state = {"enabled": True}
+
+
+@router.get("/nova/power")
+async def get_nova_power() -> dict[str, bool]:
+    """Report whether Nova is currently allowed to listen."""
+    return {"enabled": _nova_power_state["enabled"]}
+
+
+@router.post("/nova/power")
+async def set_nova_power(payload: dict = Body(...)) -> dict[str, bool]:
+    """Turn Nova's listening on or off from the UI toggle."""
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="'enabled' must be a boolean.")
+    _nova_power_state["enabled"] = enabled
+    return {"enabled": _nova_power_state["enabled"]}
 
 
 def parse_conversation_id(value: str | None) -> UUID | None:
@@ -75,14 +92,36 @@ async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
     async def event_source():
         yield sse_event({"type": "start", "conversationId": str(conversation_id)})
 
-        sentence_stream = agent_loop.conversation_loop_stream(message, conversation_id)
+        event_stream = agent_loop.conversation_loop_events(
+            message, conversation_id, prompt_source=PromptSourceEnum.CHAT_PROMPT
+        )
         parts: list[str] = []
+        final_text: str | None = None
         try:
-            async for sentence in iter_in_thread(sentence_stream):
-                parts.append(sentence)
-                yield sse_event(
-                    {"type": "delta", "text": sentence, "seq": len(parts)}
-                )
+            async for event in iter_in_thread(event_stream):
+                event_type = event.get("type")
+                if event_type == "text":
+                    parts.append(event["text"])
+                    # Assistant prose is markdown: the model writes it that way,
+                    # and the client renders it as such.
+                    yield sse_event(
+                        {
+                            "type": "delta",
+                            "text": event["text"],
+                            "format": "markdown",
+                            "seq": len(parts),
+                        }
+                    )
+                elif event_type == "text_final":
+                    # Whitespace-exact version of what was just streamed, so
+                    # markdown lists and fences survive sentence chunking.
+                    final_text = event["text"]
+                    yield sse_event(
+                        {"type": "text_final", "text": final_text, "format": "markdown"}
+                    )
+                else:
+                    # tool_call / artifact pass through untouched.
+                    yield sse_event(event)
         except ConversationClosedError:
             yield sse_event(
                 {
@@ -114,7 +153,7 @@ async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
             {
                 "type": "done",
                 "conversationId": str(final_conversation_id),
-                "assistantText": " ".join(parts),
+                "assistantText": final_text if final_text is not None else " ".join(parts),
             }
         )
 
@@ -123,61 +162,6 @@ async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@router.get("/conversations/{conversation_id}")
-async def get_conversation(conversation_id: str) -> dict:
-    """Current state of a conversation, including its attached project (if any)."""
-    try:
-        uuid_value = UUID(conversation_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid conversation id.")
-
-    conversation = await asyncio.to_thread(
-        conversation_service.get_conversation, uuid_value
-    )
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-
-    project_payload = None
-    if conversation.project_id is not None:
-        project = await asyncio.to_thread(
-            project_service.get_project, conversation.project_id
-        )
-        if project is not None:
-            project_payload = {"id": project.id, **project.to_payload()}
-
-    return {
-        "conversationId": str(conversation.uuid),
-        "isClosed": conversation.is_closed,
-        "project": project_payload,
-    }
-
-
-@router.post("/conversations/{conversation_id}/close")
-async def close_conversation(conversation_id: str) -> dict:
-    """Close a conversation permanently. Closed conversations cannot be reopened."""
-    try:
-        uuid_value = UUID(conversation_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid conversation id.")
-
-    conversation = await asyncio.to_thread(
-        conversation_service.close_conversation, uuid_value
-    )
-    if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found.")
-
-    # Drop the in-process LLM history so the closed conversation can't keep
-    # accumulating context if the same id is replayed.
-    agent_loop.conversations.pop(uuid_value, None)
-
-    return {"conversationId": str(uuid_value), "isClosed": True}
-
-
-@router.get("/projects")
-async def list_projects() -> list[dict]:
-    return await asyncio.to_thread(project_service.list_projects)
 
 
 async def iter_in_thread(generator):
@@ -313,7 +297,18 @@ async def stream_tts_audio(
     *,
     role: str,
     iteration: int | None = None,
-) -> None:
+) -> bool:
+    """
+    Speak `text` to the client as a chunked audio stream.
+
+    Returns True when the full clip was streamed, False when TTS failed.
+    TTS failures are contained here rather than raised: the stream-start
+    event has already been sent by the time the provider errors, so the
+    client must always receive the matching stream-end (or it waits forever
+    on a stream that will never arrive) plus an error message saying why
+    there is no audio. Websocket send failures still propagate — a dead
+    socket ends the turn either way.
+    """
     stream_id = str(uuid.uuid4())
     response_mime = tts_service.output_mime_type()
 
@@ -328,7 +323,19 @@ async def stream_tts_audio(
 
     await websocket.send_json(start_event)
 
-    for sequence, audio_chunk in enumerate(tts_service.stream_text_to_speech(text), start=1):
+    sequence = 0
+    tts_error: str | None = None
+    audio_chunks = tts_service.stream_text_to_speech(text)
+    while True:
+        try:
+            audio_chunk = next(audio_chunks)
+        except StopIteration:
+            break
+        except Exception as exc:
+            tts_error = str(exc)
+            break
+
+        sequence += 1
         chunk_b64 = base64.b64encode(audio_chunk).decode("ascii")
         await websocket.send_json(
             {
@@ -339,17 +346,23 @@ async def stream_tts_audio(
             }
         )
 
+    if tts_error is not None:
+        print(f"TTS stream {stream_id} failed after {sequence} chunks: {tts_error}")
+        preview = tts_error if len(tts_error) <= 300 else tts_error[:300] + "…"
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"Voice playback failed — continuing without audio. ({preview})",
+            }
+        )
+
     await websocket.send_json(
         {
             "type": "assistant_audio_stream_end",
             "streamId": stream_id,
         }
     )
-
-
-@router.get("/tools")
-async def list_tools() -> list[Tool]:
-    return tool_service.list_tools()
+    return tts_error is None
 
 
 @router.websocket("/ws/transcribe")
@@ -406,6 +419,16 @@ async def transcribe_socket(websocket: WebSocket) -> None:
             event = payload.get("event")
 
             if event == "start":
+                if not _nova_power_state["enabled"]:
+                    # Backstop: the UI toggle tears its own pipeline down, but
+                    # never record while Nova is powered off.
+                    await websocket.send_json(
+                        {
+                            "type": "follow_up_stopped",
+                            "message": "Nova is powered off.",
+                        }
+                    )
+                    continue
                 recording_started = True
                 chunks.clear()
                 language = payload.get("language")
@@ -428,6 +451,14 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 continue
 
             if event == "wake_greeting":
+                if not _nova_power_state["enabled"]:
+                    await websocket.send_json(
+                        {
+                            "type": "follow_up_stopped",
+                            "message": "Nova is powered off.",
+                        }
+                    )
+                    continue
                 try:
                     await stream_tts_audio(
                         websocket,
@@ -474,7 +505,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             temp.write(audio_chunk)
                         file_path = Path(temp.name)
 
-                    transcript = whisper_service.transcribe_file_path(file_path, language)
+                    transcript = asr_service.transcribe_file_path(file_path, language)
                     transcript = (transcript or "").strip()
 
                     if purpose == "wake_check":
@@ -538,35 +569,87 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     if conversation_id is None:
                         conversation_id = agent_loop.new_conversation_id()
 
-                    sentence_stream = agent_loop.conversation_loop_stream(
-                        transcript, conversation_id
+                    # Echo what was heard so the transcript shows the spoken
+                    # turn the same way it shows a typed one.
+                    await websocket.send_json(
+                        {
+                            "type": "user_transcript",
+                            "text": transcript,
+                            "conversationId": str(conversation_id),
+                        }
+                    )
+
+                    # Same event stream the chat endpoint consumes: speech and
+                    # chat are one conversation, so they see the same tool
+                    # calls and artifacts. Only text is spoken.
+                    event_stream = agent_loop.conversation_loop_events(
+                        transcript,
+                        conversation_id,
+                        prompt_source=PromptSourceEnum.SPEECH_PROMPT,
                     )
                     spoken_parts: list[str] = []
-                    async for sentence in iter_in_thread(sentence_stream):
-                        spoken_parts.append(sentence)
-                        await send_assistant_text(
-                            websocket,
-                            sentence,
-                            seq=len(spoken_parts),
-                            conversation_id=conversation_id,
-                        )
-                        await stream_tts_audio(websocket, sentence, role="final")
+                    final_text: str | None = None
+                    tts_available = True
+                    async for event in iter_in_thread(event_stream):
+                        event_type = event.get("type")
+
+                        if event_type == "text":
+                            spoken_parts.append(event["text"])
+                            await send_assistant_text(
+                                websocket,
+                                event["text"],
+                                seq=len(spoken_parts),
+                                conversation_id=conversation_id,
+                            )
+                            # One failure mutes TTS for the rest of the turn:
+                            # every remaining sentence would fail the same way
+                            # and spam the client with error toasts. The text
+                            # above was already sent, so the turn degrades to
+                            # text-only instead of dying.
+                            if tts_available:
+                                tts_available = await stream_tts_audio(
+                                    websocket, event["text"], role="final"
+                                )
+                        elif event_type == "text_final":
+                            final_text = event["text"]
+                            await websocket.send_json(
+                                {
+                                    "type": "text_final",
+                                    "text": final_text,
+                                    "format": "markdown",
+                                    "conversationId": str(conversation_id),
+                                }
+                            )
+                        else:
+                            # tool_call / artifact: rendered, never spoken.
+                            await websocket.send_json(
+                                {**event, "conversationId": str(conversation_id)}
+                            )
 
                     await websocket.send_json(
                         {
                             "type": "done",
                             "message": "Turn complete.",
                             "conversationId": str(conversation_id),
-                            "assistantText": " ".join(spoken_parts),
+                            "assistantText": (
+                                final_text
+                                if final_text is not None
+                                else " ".join(spoken_parts)
+                            ),
                         }
                     )
                 except Exception as exc:
-                    await websocket.send_json(
-                        {
-                            "type": "error",
-                            "message": f"Voice pipeline failed: {str(exc)}",
-                        }
-                    )
+                    try:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "message": f"Voice pipeline failed: {str(exc)}",
+                            }
+                        )
+                    except Exception:
+                        # Client powered off / disconnected mid-turn; the next
+                        # receive() will surface the disconnect and end the loop.
+                        pass
                 finally:
                     if file_path and file_path.exists():
                         os.remove(file_path)

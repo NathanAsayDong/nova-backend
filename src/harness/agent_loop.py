@@ -1,5 +1,6 @@
 import json
 import re
+import threading
 import time
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -9,11 +10,14 @@ import uuid
 from anthropic.types.message import Message
 
 from src.dao.responsibility_dao import ResponsibilityDao
+from prompting.prompt_enums import PromptEnums
+from prompting.prompt_source_prompt import PromptSourceEnum
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
 from src.service.tool_service import ToolExecutionError, ToolService
+from src.service.update_service import UpdateService
 
 _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
 _MIN_SENTENCE_CHARS = 30
@@ -31,6 +35,10 @@ class AgentLoop:
         self.conversations: dict[UUID, list] = {}
         self.tool_service: ToolService | None = None
         self.conversation_service: ConversationService | None = None
+        self.update_service: UpdateService | None = None
+        # Live handles to background=True runs, mostly for tests and
+        # observability; finished threads are pruned on the next spawn.
+        self.background_threads: list[threading.Thread] = []
 
     def new_conversation_id(self) -> UUID:
         return uuid.uuid4()
@@ -46,6 +54,107 @@ class AgentLoop:
             self.conversation_service.record_message(conversation, role, content)
         except Exception as exc:
             print(f"Failed to persist {role} message for conversation {conversation.uuid}: {exc}")
+
+    def conversation_loop_stream(
+        self,
+        prompt: str,
+        conversation_uuid: UUID,
+        prompt_source: PromptSourceEnum = PromptSourceEnum.SPEECH_PROMPT,
+    ) -> Iterator[str]:
+        """
+        Text-only view of a turn, for the voice path.
+
+        The websocket speaks whatever this yields, so tool calls and artifacts
+        are filtered out — they are UI concerns, not things to read aloud.
+        Defaults to the spoken steer since this view exists to feed TTS.
+        """
+        for event in self.conversation_loop_events(
+            prompt, conversation_uuid, prompt_source=prompt_source
+        ):
+            if event.get("type") == "text" and event.get("text"):
+                yield event["text"]
+
+    @staticmethod
+    def _language_for(path: str) -> str:
+        suffix = ("." + path.rsplit(".", 1)[-1].lower()) if "." in path else ""
+        return {
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "jsx",
+            ".ts": "typescript",
+            ".tsx": "tsx",
+            ".json": "json",
+            ".md": "markdown",
+            ".sh": "bash",
+            ".css": "css",
+            ".scss": "scss",
+            ".html": "html",
+            ".sql": "sql",
+            ".yml": "yaml",
+            ".yaml": "yaml",
+            ".toml": "toml",
+        }.get(suffix, "")
+
+    @classmethod
+    def _artifact_for_tool(
+        cls, tool_name: str, arguments: dict[str, Any], result: Any
+    ) -> dict[str, Any] | None:
+        """
+        Turn a tool result into something the UI can render.
+
+        Diffs, file contents, and terminal output are worth showing as their
+        own blocks rather than leaving the model to paraphrase them into prose.
+        Tools with nothing visual to show return None.
+        """
+        payload = result if isinstance(result, dict) else {}
+
+        if tool_name == "edit_project_file":
+            diff = payload.get("diff")
+            if not diff:
+                return None
+            return {
+                "type": "artifact",
+                "kind": "diff",
+                "title": payload.get("path") or arguments.get("path", ""),
+                "content": diff,
+                "language": "diff",
+                "tool": tool_name,
+            }
+
+        if tool_name in {"write_project_file", "read_project_file"}:
+            path = payload.get("path") or arguments.get("path", "")
+            content = (
+                arguments.get("content")
+                if tool_name == "write_project_file"
+                else payload.get("content")
+            )
+            if not content:
+                return None
+            return {
+                "type": "artifact",
+                "kind": "file",
+                "title": path,
+                "content": content,
+                "language": cls._language_for(path),
+                "tool": tool_name,
+            }
+
+        if tool_name == "run_terminal_command":
+            streams = [payload.get("stdout") or "", payload.get("stderr") or ""]
+            content = "\n".join(part for part in streams if part.strip())
+            if not content:
+                return None
+            return {
+                "type": "artifact",
+                "kind": "terminal",
+                "title": arguments.get("command", ""),
+                "content": content,
+                "language": "bash",
+                "tool": tool_name,
+                "exitCode": payload.get("exit_code"),
+            }
+
+        return None
 
     @staticmethod
     def _serialize_blocks(response: Message) -> list[dict[str, Any]]:
@@ -93,13 +202,29 @@ class AgentLoop:
             )
         return records
 
-    def conversation_loop_stream(self, prompt: str, conversation_uuid: UUID) -> Iterator[str]:
+    def conversation_loop_events(
+        self,
+        prompt: str,
+        conversation_uuid: UUID,
+        prompt_source: PromptSourceEnum = PromptSourceEnum.CHAT_PROMPT,
+    ) -> Iterator[dict[str, Any]]:
         """
-        Run a single voice conversation turn as a bounded ReAct loop.
+        Run a single conversation turn as a bounded ReAct loop, as an event stream.
 
-        Yields sentence-sized chunks of the final assistant text for TTS.
-        Tool calls (including run_sub_agent) are executed inline between Claude
-        rounds; only text from the terminal no-tool reply is spoken.
+        Yields dicts the transport layer renders however it likes:
+          {"type": "text", "text": ...}       sentence chunk of the reply
+          {"type": "tool_call", "tool": ...}  a tool is about to run
+          {"type": "artifact", "kind": ...}   renderable output of a tool
+                                              (diff, file, terminal)
+
+        Text chunks are sentence-sized because the voice path speaks them; the
+        chat path reassembles them. Tool calls run inline between Claude rounds,
+        and only text from the terminal no-tool reply is spoken.
+
+        `prompt_source` steers the reply for the medium it will be delivered
+        in — a spoken reply gets read aloud by TTS, so it should be short.
+        It is applied per request rather than appended to history, so a spoken
+        turn does not shorten later typed turns in the same conversation.
 
         Turns are persisted to the conversation/message tables. Raises
         ConversationClosedError before yielding anything if the conversation
@@ -156,7 +281,7 @@ class AgentLoop:
                 fallback = "I hit a time limit while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield fallback
+                yield {"type": "text", "text": fallback}
                 return
 
             try:
@@ -164,18 +289,19 @@ class AgentLoop:
                     "",
                     context=history,
                     tools=tools_arg,
+                    system=str(prompt_source) or None,
                 )
             except TimeoutError:
                 fallback = "I hit a backend timeout while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield fallback
+                yield {"type": "text", "text": fallback}
                 return
             except Exception as exc:
                 fallback = f"Agent loop failed: {str(exc)}"
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield fallback
+                yield {"type": "text", "text": fallback}
                 return
 
             # Only client-side tool_use blocks need execution here; anything
@@ -205,7 +331,12 @@ class AgentLoop:
                 self._persist_message(conversation, MessageRole.NOVA, text)
                 try:
                     if text:
-                        yield from self.iter_sentence_chunks([text])
+                        for chunk in self.iter_sentence_chunks([text]):
+                            yield {"type": "text", "text": chunk}
+                        # Sentence chunks are stripped for TTS, which destroys
+                        # the newlines markdown lists and code fences need.
+                        # Emit the raw text so a renderer can restore fidelity.
+                        yield {"type": "text_final", "text": text}
                 finally:
                     # Keep the full blocks (citations, search results) in
                     # history so follow-up turns stay valid; fall back to raw
@@ -237,6 +368,7 @@ class AgentLoop:
                     continue
 
                 arguments = block.input if isinstance(block.input, dict) else {}
+                yield {"type": "tool_call", "tool": block.name, "input": arguments}
                 try:
                     print(f"Calling tool: {tool.name} with arguments: {arguments}")
                     result = self.tool_service.call_tool(tool, arguments, context=tool_context)
@@ -254,6 +386,9 @@ class AgentLoop:
                             "content": content,
                         }
                     )
+                    artifact = self._artifact_for_tool(block.name, arguments, result)
+                    if artifact is not None:
+                        yield artifact
                     self._persist_message(
                         conversation,
                         MessageRole.TOOL,
@@ -273,7 +408,7 @@ class AgentLoop:
                         fallback = "I ran into a tool execution issue and had to stop."
                         history.append({"role": "assistant", "content": fallback})
                         self._persist_message(conversation, MessageRole.NOVA, fallback)
-                        yield fallback
+                        yield {"type": "text", "text": fallback}
                         return
                     tool_results.append(
                         {
@@ -289,12 +424,14 @@ class AgentLoop:
         fallback = "I hit a loop limit while working on that and had to stop."
         history.append({"role": "assistant", "content": fallback})
         self._persist_message(conversation, MessageRole.NOVA, fallback)
-        yield fallback
+        yield {"type": "text", "text": fallback}
 
     def run_agent(
         self,
         prompt: str | None = None,
         responsibility_id: int | None = None,
+        background: bool = False,
+        conversation_uuid: str | None = None,
     ) -> str:
         """
         Run a sub-agent as a bounded Claude + ToolService ReAct loop.
@@ -303,6 +440,14 @@ class AgentLoop:
         background work runs: responsibilities are triggered here by id, and
         the responsibility's own description leads the prompt. Call from
         FastAPI via asyncio.to_thread so the event loop stays free.
+
+        With background=False the caller awaits the loop and gets the agent's
+        final reply back. With background=True the loop runs on a daemon
+        thread and this returns an acknowledgment immediately; when the agent
+        finishes, its summary is recorded as an Update for the user to review
+        later. conversation_uuid (injected by the tool harness, never the
+        model) links that update to the conversation — and through it the
+        project — the work was kicked off from.
         """
         if self.tool_service is None:
             self.tool_service = ToolService()
@@ -319,6 +464,94 @@ class AgentLoop:
         task_prompt = "\n".join(parts).strip()
         if not task_prompt:
             raise ValueError("A prompt or responsibility_id is required.")
+
+        if background:
+            thread = threading.Thread(
+                target=self._run_background_agent,
+                args=(task_prompt, conversation_uuid),
+                name="nova-background-agent",
+                daemon=True,
+            )
+            self.background_threads = [
+                t for t in self.background_threads if t.is_alive()
+            ]
+            self.background_threads.append(thread)
+            thread.start()
+            return (
+                "Background agent started. When it finishes, its summary will "
+                "be posted as an update — there is nothing to wait for now; "
+                "the user can ask about their updates later."
+            )
+
+        return self._run_agent_loop(task_prompt)
+
+    def _run_background_agent(
+        self, task_prompt: str, conversation_uuid: str | None
+    ) -> None:
+        """
+        Body of a background=True run: do the work, then record an Update.
+
+        Runs on a daemon thread with nobody awaiting the result, so every
+        outcome — success, agent failure, even a crash in the loop — must end
+        in an update row; a background task that dies silently would simply
+        never be heard from again.
+        """
+        if self.conversation_service is None:
+            self.conversation_service = ConversationService()
+        if self.update_service is None:
+            self.update_service = UpdateService()
+
+        # Resolve where the work came from, both to tag the update and to let
+        # the sub-agent ground itself in the project it is serving.
+        conversation_id: int | None = None
+        project_id: int | None = None
+        context_lines: list[str] = []
+        try:
+            if conversation_uuid:
+                conversation = self.conversation_service.get_conversation(
+                    UUID(str(conversation_uuid))
+                )
+                if conversation is not None:
+                    conversation_id = conversation.id
+                    project_id = conversation.project_id
+                    context_lines.append(
+                        "This task was kicked off from a conversation with the user."
+                    )
+                    if project_id is not None:
+                        project = self.conversation_service.project_dao.get(project_id)
+                        if project is not None:
+                            context_lines.append(
+                                f"It belongs to the project '{project.name}' "
+                                f"(id {project.id}): "
+                                f"{project.description or 'no description'}"
+                            )
+        except Exception as exc:
+            # Context is a nicety; the task itself must still run.
+            print(f"Background agent could not resolve conversation context: {exc}")
+
+        full_prompt = "\n\n".join(context_lines + [task_prompt])
+
+        try:
+            summary = self._run_agent_loop(
+                full_prompt, system=PromptEnums.BACKGROUND_AGENT_PROMPT.load()
+            )
+        except Exception as exc:
+            summary = f"A background task failed before completing: {exc}"
+
+        try:
+            self.update_service.create_update(
+                update_message=summary.strip()
+                or "A background task finished but produced no summary.",
+                project_id=project_id,
+                conversation_id=conversation_id,
+            )
+        except Exception as exc:
+            print(f"Background agent failed to record its update: {exc}")
+
+    def _run_agent_loop(self, task_prompt: str, system: str | None = None) -> str:
+        """The bounded ReAct loop shared by foreground and background runs."""
+        if self.tool_service is None:
+            self.tool_service = ToolService()
 
         started_at = time.monotonic()
 
@@ -356,6 +589,7 @@ class AgentLoop:
                     "",
                     context=history,
                     tools=tools_arg,
+                    system=system,
                 )
             except TimeoutError:
                 return "I hit a backend timeout while working on that and had to stop."

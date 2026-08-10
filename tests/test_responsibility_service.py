@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest import mock
 
 from src.model.responsibility import Responsibility, ResponsibilityReportType
@@ -25,10 +26,35 @@ class FakeResponsibilityDao:
         self.last_run_calls.append((id, timestamp_utc))
         return self.responsibilities.get(int(id))
 
+    def create(self, entity):
+        entity.id = max(self.responsibilities, default=0) + 1
+        self.responsibilities[entity.id] = entity
+        return entity
+
+    def update(self, id, entity):
+        if int(id) not in self.responsibilities:
+            return None
+        self.responsibilities[int(id)] = entity
+        return entity
+
+    def delete(self, id):
+        self.responsibilities.pop(int(id), None)
+
+
+class FakeProjectDao:
+    def __init__(self, project_ids=(1, 7)):
+        self.project_ids = set(project_ids)
+
+    def get(self, id):
+        if int(id) not in self.project_ids:
+            return None
+        return SimpleNamespace(id=int(id), name=f"Project {id}")
+
 
 def build_service(responsibilities=()) -> ResponsibilityService:
     service = ResponsibilityService.__new__(ResponsibilityService)
     service.responsibility_dao = FakeResponsibilityDao(responsibilities)
+    service.project_dao = FakeProjectDao()
     return service
 
 
@@ -246,3 +272,106 @@ class CheckForResponsibilitiesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CrudTests(unittest.TestCase):
+    def setUp(self):
+        self.service = build_service()
+
+    def test_create_and_get(self):
+        created = self.service.create_responsibility(
+            name="Morning triage",
+            description="Review overnight email and summarize what needs a reply.",
+            schedule=["morning"],
+        )
+        self.assertEqual(created["name"], "Morning triage")
+        self.assertEqual(created["schedule"], ["morning"])
+
+        fetched = self.service.get_responsibility(created["id"])
+        self.assertEqual(fetched["id"], created["id"])
+
+    def test_create_requires_name_and_description(self):
+        with self.assertRaises(ValueError):
+            self.service.create_responsibility(name="  ", description="something")
+        with self.assertRaises(ValueError):
+            self.service.create_responsibility(name="Thing", description="   ")
+
+    def test_schedule_is_normalized_and_deduped(self):
+        created = self.service.create_responsibility(
+            name="R",
+            description="d",
+            schedule=["Morning", "morning", "EVENING"],
+        )
+        self.assertEqual(created["schedule"], ["morning", "evening"])
+
+    def test_bad_schedule_window_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.service.create_responsibility(
+                name="R", description="d", schedule=["lunchtime"]
+            )
+        self.assertIn("lunchtime", str(ctx.exception))
+
+    def test_unknown_project_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.service.create_responsibility(
+                name="R", description="d", project_id=999
+            )
+
+    def test_unknown_report_type_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.service.create_responsibility(
+                name="R", description="d", report_type="carrier_pigeon"
+            )
+
+    def test_undeliverable_report_type_warns_but_creates(self):
+        created = self.service.create_responsibility(
+            name="R", description="d", report_type="sms"
+        )
+        self.assertEqual(created["report_type"], "sms")
+        self.assertFalse(created["report_deliverable"])
+        self.assertIn("not deliverable", created["warning"])
+
+    def test_email_report_type_has_no_warning(self):
+        created = self.service.create_responsibility(
+            name="R", description="d", report_type="email"
+        )
+        self.assertTrue(created["report_deliverable"])
+        self.assertNotIn("warning", created)
+
+    def test_update_only_changes_given_fields(self):
+        created = self.service.create_responsibility(
+            name="Original", description="Original brief", schedule=["night"]
+        )
+        updated = self.service.update_responsibility(
+            created["id"], name="Renamed"
+        )
+        self.assertEqual(updated["name"], "Renamed")
+        self.assertEqual(updated["description"], "Original brief")
+        self.assertEqual(updated["schedule"], ["night"])
+
+    def test_update_validates_schedule(self):
+        created = self.service.create_responsibility(name="R", description="d")
+        with self.assertRaises(ValueError):
+            self.service.update_responsibility(created["id"], schedule=["whenever"])
+
+    def test_update_missing_responsibility_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.service.update_responsibility(999, name="x")
+
+    def test_list_returns_all(self):
+        self.service.create_responsibility(name="A", description="a")
+        self.service.create_responsibility(name="B", description="b")
+        self.assertEqual(len(self.service.get_all_responsibilities()), 2)
+
+    def test_delete_removes_it(self):
+        created = self.service.create_responsibility(name="R", description="d")
+        result = self.service.delete_responsibility(created["id"])
+
+        self.assertEqual(result["status"], "deleted")
+        self.assertEqual(self.service.get_all_responsibilities(), [])
+        with self.assertRaises(ValueError):
+            self.service.get_responsibility(created["id"])
+
+    def test_delete_missing_responsibility_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.service.delete_responsibility(999)

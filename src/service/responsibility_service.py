@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from src.dao.project_dao import ProjectDao
 from src.dao.responsibility_dao import ResponsibilityDao
 from src.model.responsibility import Responsibility, ResponsibilityReportType
 
@@ -29,6 +30,185 @@ _SUPPORTED_REPORT_TYPES = {ResponsibilityReportType.EMAIL}
 class ResponsibilityService:
     def __init__(self) -> None:
         self.responsibility_dao = ResponsibilityDao()
+        self.project_dao = ProjectDao()
+
+    # ---------- crud ----------
+
+    @staticmethod
+    def _to_dict(responsibility: Responsibility) -> dict:
+        """JSON-serializable view, including whether the report type works yet."""
+        report_type = responsibility.report_type
+        return {
+            "id": responsibility.id,
+            "name": responsibility.name,
+            "description": responsibility.description,
+            "schedule": responsibility.schedule,
+            "project_id": responsibility.project_id,
+            "report_type": str(report_type) if report_type else None,
+            "report_deliverable": report_type in _SUPPORTED_REPORT_TYPES
+            if report_type
+            else None,
+            "last_run": (
+                responsibility.last_run.isoformat()
+                if hasattr(responsibility.last_run, "isoformat")
+                else responsibility.last_run
+            ),
+        }
+
+    @staticmethod
+    def _validate_schedule(schedule: list[str] | None) -> list[str] | None:
+        if schedule is None:
+            return None
+        if isinstance(schedule, str):
+            schedule = [schedule]
+        if not isinstance(schedule, list) or not schedule:
+            raise ValueError(
+                "schedule must be a non-empty list of time-of-day windows: "
+                f"{sorted(_WINDOW_BOUNDS)}."
+            )
+
+        normalized: list[str] = []
+        for window in schedule:
+            candidate = str(window).strip().lower()
+            if candidate not in _WINDOW_BOUNDS:
+                raise ValueError(
+                    f"Unknown schedule window '{window}'. Valid windows are "
+                    f"{sorted(_WINDOW_BOUNDS)}."
+                )
+            if candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+    @staticmethod
+    def _validate_report_type(report_type: str | None) -> ResponsibilityReportType | None:
+        if report_type is None:
+            return None
+        candidate = str(report_type).strip().lower()
+        if not candidate:
+            return None
+        try:
+            return ResponsibilityReportType(candidate)
+        except ValueError:
+            raise ValueError(
+                f"Unknown report_type '{report_type}'. Valid types are "
+                f"{[str(t) for t in ResponsibilityReportType]}."
+            )
+
+    def _validate_project(self, project_id: int | None) -> int | None:
+        if project_id is None:
+            return None
+        project = self.project_dao.get(int(project_id))
+        if project is None:
+            raise ValueError(f"Project {project_id} does not exist.")
+        return project.id
+
+    def get_all_responsibilities(self) -> list[dict]:
+        return [self._to_dict(item) for item in self.responsibility_dao.get_all()]
+
+    def get_responsibility(self, responsibility_id: int) -> dict:
+        responsibility = self.responsibility_dao.get(int(responsibility_id))
+        if responsibility is None:
+            raise ValueError(f"Responsibility {responsibility_id} does not exist.")
+        return self._to_dict(responsibility)
+
+    def create_responsibility(
+        self,
+        name: str,
+        description: str,
+        schedule: list[str] | None = None,
+        project_id: int | None = None,
+        report_type: str | None = None,
+    ) -> dict:
+        """
+        Create a scheduled responsibility.
+
+        The description is the agent's entire brief when it runs later with no
+        user present, so it has to stand alone.
+        """
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A responsibility name is required.")
+
+        description = (description or "").strip()
+        if not description:
+            raise ValueError(
+                "A description is required — it is the only instruction the "
+                "agent gets when this runs unattended, so state the task fully."
+            )
+
+        validated_type = self._validate_report_type(report_type)
+        created = self.responsibility_dao.create(
+            Responsibility(
+                name=name,
+                description=description,
+                schedule=self._validate_schedule(schedule),
+                project_id=self._validate_project(project_id),
+                report_type=validated_type,
+            )
+        )
+
+        result = self._to_dict(created)
+        if validated_type is not None and validated_type not in _SUPPORTED_REPORT_TYPES:
+            result["warning"] = (
+                f"Reporting by {validated_type} is not deliverable yet — no tool "
+                "exists for it. The responsibility will still run and summarize "
+                "its outcome in its reply. Only email can be delivered today."
+            )
+        return result
+
+    def update_responsibility(
+        self,
+        responsibility_id: int,
+        name: str | None = None,
+        description: str | None = None,
+        schedule: list[str] | None = None,
+        project_id: int | None = None,
+        report_type: str | None = None,
+    ) -> dict:
+        """Update a responsibility. Omitted fields are left unchanged."""
+        responsibility = self.responsibility_dao.get(int(responsibility_id))
+        if responsibility is None:
+            raise ValueError(f"Responsibility {responsibility_id} does not exist.")
+
+        if name is not None:
+            name = name.strip()
+            if not name:
+                raise ValueError("A responsibility name cannot be blank.")
+            responsibility.name = name
+
+        if description is not None:
+            description = description.strip()
+            if not description:
+                raise ValueError("A responsibility description cannot be blank.")
+            responsibility.description = description
+
+        if schedule is not None:
+            responsibility.schedule = self._validate_schedule(schedule)
+
+        if project_id is not None:
+            responsibility.project_id = self._validate_project(project_id)
+
+        if report_type is not None:
+            responsibility.report_type = self._validate_report_type(report_type)
+
+        updated = self.responsibility_dao.update(responsibility.id, responsibility)
+        if updated is None:
+            raise ValueError(f"Responsibility {responsibility_id} could not be updated.")
+        return self._to_dict(updated)
+
+    def delete_responsibility(self, responsibility_id: int) -> dict:
+        """
+        Delete a responsibility so it stops running on its schedule.
+
+        Only the schedule entry goes away — anything it already did (files,
+        emails, memory) is untouched, so this needs no confirmation dance.
+        """
+        responsibility = self.responsibility_dao.get(int(responsibility_id))
+        if responsibility is None:
+            raise ValueError(f"Responsibility {responsibility_id} does not exist.")
+
+        self.responsibility_dao.delete(responsibility.id)
+        return {"status": "deleted", "responsibility": self._to_dict(responsibility)}
 
     # ---------- scheduling ----------
 

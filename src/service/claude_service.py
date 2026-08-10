@@ -56,12 +56,32 @@ class ClaudeService:
             messages.append({"role": "user", "content": prompt})
         return messages
 
+    def _build_kwargs(
+        self, tools: Optional[list], system: Optional[str]
+    ) -> dict[str, Any]:
+        """
+        Assemble optional request kwargs.
+
+        `system` steers a single request without entering the message history,
+        which matters because chat and speech share one conversation — a
+        "be brief" instruction meant for a spoken turn must not linger and
+        shorten later typed replies.
+        """
+        kwargs: dict[str, Any] = {}
+        combined_tools = self._build_tools(tools)
+        if combined_tools:
+            kwargs["tools"] = combined_tools
+        if system and system.strip():
+            kwargs["system"] = system
+        return kwargs
+
     def stream_response(
         self,
         prompt: str,
         role: Optional[str] = None,
         context: Optional[list] = None,
         tools: Optional[list] = None,
+        system: Optional[str] = None,
     ) -> Message:
         """
         Stream a response from the Claude API and return the final Message.
@@ -69,17 +89,22 @@ class ClaudeService:
         Uses the streaming endpoint so the connection stays open for longer
         generations, then returns the complete message (including tool_use).
         """
-        combined_tools = self._build_tools(tools)
-        kwargs = {"tools": combined_tools} if combined_tools else {}
         with self.client.messages.stream(
             model=self.MODEL,
             messages=self._build_messages(prompt, context),
             max_tokens=self.max_tokens,
-            **kwargs,
+            **self._build_kwargs(tools, system),
         ) as stream:
             return stream.get_final_message()
 
-    def get_response(self, prompt: str, role: Optional[str] = None, context: Optional[list] = None, tools: Optional[list] = None) -> Message:
+    def get_response(
+        self,
+        prompt: str,
+        role: Optional[str] = None,
+        context: Optional[list] = None,
+        tools: Optional[list] = None,
+        system: Optional[str] = None,
+    ) -> Message:
         """
         Get a response from the Claude API.
 
@@ -87,12 +112,12 @@ class ClaudeService:
             prompt: The prompt to send to the Claude API.
             role: The role of the user.
             context: The context of the conversation.
+            system: Per-request steering that stays out of message history.
         """
-        combined_tools = self._build_tools(tools)
-        kwargs = {"tools": combined_tools} if combined_tools else {}
         return self.client.messages.create(
             model=self.MODEL,
             messages=self._build_messages(prompt, context),
             max_tokens=self.max_tokens,
-            **kwargs,
+            cache_control={"type": "ephemeral"},
+            **self._build_kwargs(tools, system),
         )
