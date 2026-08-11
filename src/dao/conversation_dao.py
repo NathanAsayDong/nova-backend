@@ -19,18 +19,6 @@ class ConversationDao(BaseDao):
             return None
         return self._to_model(self._model_class, response.data)
 
-    def get_by_id(self, id: int) -> Conversation | None:
-        response = (
-            self.client.table(self._table)
-            .select("*")
-            .eq("id", id)
-            .maybe_single()
-            .execute()
-        )
-        if response is None or response.data is None:
-            return None
-        return self._to_model(self._model_class, response.data)
-
     def _update_columns(self, uuid: UUID, columns: dict) -> Conversation | None:
         response = (
             self.client.table(self._table)

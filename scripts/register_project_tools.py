@@ -739,10 +739,67 @@ BACKGROUND_AGENT_TOOLS: list[dict] = [
     },
 ]
 
+# Direct database access. Reads are free; writes are gated behind an
+# explicit flag and user confirmation; DDL is refused by the service.
+SQL_TOOLS: list[dict] = [
+    {
+        "name": "run_sql",
+        "description": (
+            "Run a raw SQL statement directly against Nova's Postgres "
+            "database (Supabase) — the same database behind projects, "
+            "conversations, messages, memory, responsibilities, and updates. "
+            "Read-only by default: SELECTs and introspection queries are "
+            "safe to run on your own initiative to answer questions the "
+            "other tools can't. To modify data (INSERT/UPDATE/DELETE) you "
+            "must set allow_writes to true, and you may only do that after "
+            "showing the user the exact statement and getting their "
+            "explicit confirmation — prefer the dedicated tools "
+            "(create_project, create_responsibility, ...) over raw writes "
+            "whenever one exists. Schema and privilege changes "
+            "(CREATE/ALTER/DROP/TRUNCATE/GRANT/...) are refused entirely; "
+            "ask the user to run those in the Supabase SQL editor. Results "
+            "are capped at 200 rows. Note the updates table is named "
+            '"update", a reserved word — quote it in queries.'
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.sql_service.SQLService.run_sql",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "The SQL statement to run.",
+                    },
+                    "allow_writes": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true only for an INSERT/UPDATE/DELETE the "
+                            "user has explicitly approved after seeing the "
+                            "statement. Defaults to false (read-only)."
+                        ),
+                    },
+                },
+                "required": ["sql"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 PROJECT_TOOLS = (
     PROJECT_TOOLS + CODE_TOOLS + COMMUNICATION_TOOLS + RESPONSIBILITY_TOOLS
-    + UPDATE_TOOLS + BACKGROUND_AGENT_TOOLS
+    + UPDATE_TOOLS + BACKGROUND_AGENT_TOOLS + SQL_TOOLS
 )
+
+# Superseded tools to remove from the tool table on every run. Registration
+# is the single source of truth for what the model can call, so retiring a
+# tool means listing it here — not editing the database by hand.
+DEPRECATED_TOOLS: list[str] = [
+    # Replaced by run_background_agent: it ran AgentLoop.run_agent awaited
+    # (blocking the chat turn) instead of detached with an update on finish.
+    "run_sub_agent",
+]
 
 
 def main() -> None:
@@ -758,6 +815,12 @@ def main() -> None:
     existing_by_name = {
         (tool.name or "").strip(): tool for tool in tool_service.list_tools()
     }
+
+    for name in DEPRECATED_TOOLS:
+        existing = existing_by_name.pop(name, None)
+        if existing is not None:
+            tool_service.tool_dao.delete(existing.id)
+            print(f"removed:    {name} (deprecated)")
 
     for definition in PROJECT_TOOLS:
         name = definition["name"]

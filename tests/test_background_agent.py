@@ -29,11 +29,11 @@ class FakeUpdateService:
     def __init__(self):
         self.created = []
 
-    def create_update(self, update_message, project_id=None, conversation_id=None):
+    def create_update(self, update_message, project_id=None, conversation_uuid=None):
         record = {
             "update_message": update_message,
             "project_id": project_id,
-            "conversation_id": conversation_id,
+            "conversation_uuid": conversation_uuid,
         }
         self.created.append(record)
         return record
@@ -100,7 +100,7 @@ class BackgroundAgentTests(unittest.TestCase):
         self.assertEqual(len(self.update_service.created), 1)
         update = self.update_service.created[0]
         self.assertEqual(update["update_message"], "All done: two files fixed.")
-        self.assertEqual(update["conversation_id"], 7)
+        self.assertEqual(update["conversation_uuid"], str(self.conversation_uuid))
         self.assertEqual(update["project_id"], 3)
 
     def test_background_uses_background_prompt_and_project_context(self):
@@ -122,7 +122,7 @@ class BackgroundAgentTests(unittest.TestCase):
         self._join_background()
 
         update = self.update_service.created[0]
-        self.assertIsNone(update["conversation_id"])
+        self.assertIsNone(update["conversation_uuid"])
         self.assertIsNone(update["project_id"])
 
     def test_background_failure_still_records_update(self):

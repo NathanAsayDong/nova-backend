@@ -7,6 +7,8 @@ agent loop exposes get_unviewed_updates / mark_all_updates_viewed as tools so
 the user can just ask Nova "what's new?" and have the badge clear afterwards.
 """
 
+from uuid import UUID
+
 from src.dao.conversation_dao import ConversationDao
 from src.dao.project_dao import ProjectDao
 from src.dao.update_dao import UpdateDao
@@ -21,21 +23,15 @@ class UpdateService:
 
     def _to_dict(self, update: Update) -> dict:
         """
-        JSON-serializable view with the project/conversation context resolved,
-        so a reader (model or client) can tell WHY the background work ran
-        without extra lookups.
+        JSON-serializable view with the project context resolved, so a reader
+        (model or client) can tell WHY the background work ran without extra
+        lookups.
         """
         project = None
         if update.project_id is not None:
             found = self.project_dao.get(update.project_id)
             if found is not None:
                 project = {"id": found.id, **found.to_payload()}
-
-        conversation_uuid = None
-        if update.conversation_id is not None:
-            conversation = self.conversation_dao.get_by_id(update.conversation_id)
-            if conversation is not None:
-                conversation_uuid = str(conversation.uuid)
 
         return {
             "id": update.id,
@@ -47,15 +43,16 @@ class UpdateService:
                 else update.created_at
             ),
             "project": project,
-            "conversation_id": update.conversation_id,
-            "conversation_uuid": conversation_uuid,
+            "conversation_uuid": (
+                str(update.conversation_uuid) if update.conversation_uuid else None
+            ),
         }
 
     def create_update(
         self,
         update_message: str,
         project_id: int | None = None,
-        conversation_id: int | None = None,
+        conversation_uuid: str | None = None,
     ) -> dict:
         """
         Record a new update for the user to see.
@@ -74,16 +71,17 @@ class UpdateService:
                 raise ValueError(f"Project {project_id} does not exist.")
             project_id = int(project_id)
 
-        if conversation_id is not None:
-            if self.conversation_dao.get_by_id(int(conversation_id)) is None:
-                raise ValueError(f"Conversation {conversation_id} does not exist.")
-            conversation_id = int(conversation_id)
+        if conversation_uuid is not None:
+            uuid_value = UUID(str(conversation_uuid))
+            if self.conversation_dao.get_by_uuid(uuid_value) is None:
+                raise ValueError(f"Conversation {conversation_uuid} does not exist.")
+            conversation_uuid = str(uuid_value)
 
         created = self.update_dao.create(
             Update(
                 update_message=update_message,
                 project_id=project_id,
-                conversation_id=conversation_id,
+                conversation_uuid=conversation_uuid,
             )
         )
         return self._to_dict(created)

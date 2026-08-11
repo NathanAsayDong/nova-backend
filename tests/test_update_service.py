@@ -62,8 +62,8 @@ class FakeConversationDao:
     def __init__(self, conversations=None):
         self.conversations = conversations or {}
 
-    def get_by_id(self, id):
-        return self.conversations.get(int(id))
+    def get_by_uuid(self, uuid):
+        return self.conversations.get(str(uuid))
 
 
 def make_update(id, message="did a thing", viewed=False, hour=12, **kwargs):
@@ -105,15 +105,19 @@ class CreateUpdateTests(unittest.TestCase):
     def test_unknown_conversation_rejected(self):
         service = build_service()
         with self.assertRaises(ValueError):
-            service.create_update("hello", conversation_id=42)
+            service.create_update("hello", conversation_uuid=str(uuid4()))
 
-    def test_resolves_conversation_uuid(self):
+    def test_invalid_conversation_uuid_rejected(self):
+        service = build_service()
+        with self.assertRaises(ValueError):
+            service.create_update("hello", conversation_uuid="not-a-uuid")
+
+    def test_links_conversation_uuid(self):
         uuid = uuid4()
         service = build_service(
-            conversations={42: SimpleNamespace(id=42, uuid=uuid)}
+            conversations={str(uuid): SimpleNamespace(id=42, uuid=uuid)}
         )
-        result = service.create_update("hello", conversation_id=42)
-        self.assertEqual(result["conversation_id"], 42)
+        result = service.create_update("hello", conversation_uuid=str(uuid))
         self.assertEqual(result["conversation_uuid"], str(uuid))
 
 

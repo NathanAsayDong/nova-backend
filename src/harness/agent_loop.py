@@ -503,7 +503,7 @@ class AgentLoop:
 
         # Resolve where the work came from, both to tag the update and to let
         # the sub-agent ground itself in the project it is serving.
-        conversation_id: int | None = None
+        linked_conversation_uuid: str | None = None
         project_id: int | None = None
         context_lines: list[str] = []
         try:
@@ -512,7 +512,7 @@ class AgentLoop:
                     UUID(str(conversation_uuid))
                 )
                 if conversation is not None:
-                    conversation_id = conversation.id
+                    linked_conversation_uuid = str(conversation.uuid)
                     project_id = conversation.project_id
                     context_lines.append(
                         "This task was kicked off from a conversation with the user."
@@ -543,7 +543,7 @@ class AgentLoop:
                 update_message=summary.strip()
                 or "A background task finished but produced no summary.",
                 project_id=project_id,
-                conversation_id=conversation_id,
+                conversation_uuid=linked_conversation_uuid,
             )
         except Exception as exc:
             print(f"Background agent failed to record its update: {exc}")
