@@ -4,12 +4,13 @@ Raw SQL access to Nova's Postgres database (Supabase).
 The supabase client the DAOs use speaks PostgREST, which cannot run
 arbitrary SQL, so this service connects straight to Postgres through
 Supabase's connection pooler. It is exposed to the agent loop as the
-run_sql tool, with the blast radius kept small:
+run_sql tool. The full SQL surface is allowed — including DDL, so Nova
+can create and evolve tables — with the blast radius kept small:
 
-- queries run in a READ ONLY transaction unless the caller explicitly
-  opts into writes (enforced by Postgres, not by parsing);
-- schema/privilege statements (CREATE/ALTER/DROP/...) are refused
-  outright — those belong in the Supabase SQL editor with a human;
+- statements run in a READ ONLY transaction unless the caller explicitly
+  opts into writes. Postgres enforces this, not string parsing, and it
+  covers DDL too — CREATE/ALTER/DROP are writes as far as the
+  transaction is concerned;
 - results are capped so a huge table can't flood the model's context.
 """
 
@@ -22,16 +23,6 @@ from sqlalchemy.engine import Engine
 
 _ROW_LIMIT = 200
 _STATEMENT_TIMEOUT_MS = 15_000
-
-# Statements that change schema or privileges. run_sql is a data tool;
-# anything structural should be reviewed and run by the user in the
-# Supabase SQL editor instead. Word-boundary match, so column names like
-# created_at don't trip it (a string literal containing one of these words
-# can — rephrase the query or run it manually in that rare case).
-_DDL_PATTERN = re.compile(
-    r"\b(create|alter|drop|truncate|grant|revoke|reindex|vacuum)\b",
-    re.IGNORECASE,
-)
 
 
 def _jsonable(value: Any) -> Any:
@@ -92,20 +83,14 @@ class SQLService:
         Run one SQL statement and return its result.
 
         Read-only unless allow_writes is True; Postgres itself rejects any
-        write attempted in the read-only transaction, so there is no SQL
-        parsing to sneak past. SELECTs return {columns, rows, row_count,
-        truncated}; writes return {status, rows_affected}.
+        write attempted in the read-only transaction — DML and DDL alike —
+        so there is no SQL parsing to sneak past. SELECTs return {columns,
+        rows, row_count, truncated}; writes and DDL return {status,
+        rows_affected}.
         """
         sql = (sql or "").strip().rstrip(";")
         if not sql:
             raise ValueError("A SQL statement is required.")
-
-        if _DDL_PATTERN.search(sql):
-            raise ValueError(
-                "run_sql does not execute schema or privilege statements "
-                "(CREATE/ALTER/DROP/TRUNCATE/GRANT/REVOKE/REINDEX/VACUUM). "
-                "Ask the user to run those in the Supabase SQL editor."
-            )
 
         engine = self._get_engine()
         with engine.connect() as conn:

@@ -71,7 +71,7 @@ class BackgroundAgentTests(unittest.TestCase):
 
         self.captured = []
 
-        def fake_get_response(prompt, role=None, context=None, tools=None, system=None):
+        def fake_get_response(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             self.captured.append({"context": list(context or []), "system": system})
             return FakeMessage(content=[FakeTextBlock("All done: two files fixed.")])
 
@@ -126,7 +126,7 @@ class BackgroundAgentTests(unittest.TestCase):
         self.assertIsNone(update["project_id"])
 
     def test_background_failure_still_records_update(self):
-        def broken(prompt, role=None, context=None, tools=None, system=None):
+        def broken(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             raise RuntimeError("api down")
 
         self.agent_loop.claude_service.get_response = broken

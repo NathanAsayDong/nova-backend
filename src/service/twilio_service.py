@@ -7,6 +7,7 @@ load_dotenv()
 class TwilioService:
     def __init__(self):
         self.client = Client(os.getenv("TWILIO_ACCOUNT_SID"), os.getenv("TWILIO_AUTH_TOKEN"))
+        self.target_number = os.getenv("TWILIO_TARGET_NUMBER")
 
     def make_call(self, to):
         self.client.calls.create(

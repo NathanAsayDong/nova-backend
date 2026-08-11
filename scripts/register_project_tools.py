@@ -739,27 +739,32 @@ BACKGROUND_AGENT_TOOLS: list[dict] = [
     },
 ]
 
-# Direct database access. Reads are free; writes are gated behind an
-# explicit flag and user confirmation; DDL is refused by the service.
+# Direct database access. Reads and introspection are free; anything that
+# changes data or schema (DML and DDL alike) is gated behind an explicit
+# flag and user confirmation — Postgres's read-only transaction enforces
+# the gate, not string parsing.
 SQL_TOOLS: list[dict] = [
     {
         "name": "run_sql",
         "description": (
-            "Run a raw SQL statement directly against Nova's Postgres "
+            "Run any SQL statement directly against Nova's Postgres "
             "database (Supabase) — the same database behind projects, "
             "conversations, messages, memory, responsibilities, and updates. "
-            "Read-only by default: SELECTs and introspection queries are "
-            "safe to run on your own initiative to answer questions the "
-            "other tools can't. To modify data (INSERT/UPDATE/DELETE) you "
-            "must set allow_writes to true, and you may only do that after "
-            "showing the user the exact statement and getting their "
-            "explicit confirmation — prefer the dedicated tools "
-            "(create_project, create_responsibility, ...) over raw writes "
-            "whenever one exists. Schema and privilege changes "
-            "(CREATE/ALTER/DROP/TRUNCATE/GRANT/...) are refused entirely; "
-            "ask the user to run those in the Supabase SQL editor. Results "
-            "are capped at 200 rows. Note the updates table is named "
-            '"update", a reserved word — quote it in queries.'
+            "Read-only by default: SELECTs and schema introspection "
+            "(information_schema.tables, information_schema.columns) are "
+            "safe to run on your own initiative — use them to understand a "
+            "table's shape before changing anything. Every statement that "
+            "modifies data OR schema (INSERT/UPDATE/DELETE/CREATE/ALTER/"
+            "DROP/TRUNCATE/...) requires allow_writes set to true, and you "
+            "may only set it after showing the user the exact statement and "
+            "getting their explicit confirmation. Be especially careful "
+            "with destructive statements (DROP, TRUNCATE, DELETE without "
+            "WHERE, ALTER ... DROP COLUMN): state plainly what will be "
+            "lost, and never run one on your own judgment. Prefer the "
+            "dedicated tools (create_project, create_responsibility, ...) "
+            "over raw writes whenever one exists. Results are capped at "
+            '200 rows. Note the updates table is named "update", a '
+            "reserved word — quote it in queries."
         ),
         "config": {
             "type": "service_method",
@@ -774,9 +779,10 @@ SQL_TOOLS: list[dict] = [
                     "allow_writes": {
                         "type": "boolean",
                         "description": (
-                            "Set true only for an INSERT/UPDATE/DELETE the "
-                            "user has explicitly approved after seeing the "
-                            "statement. Defaults to false (read-only)."
+                            "Set true only for a data- or schema-changing "
+                            "statement (INSERT/UPDATE/DELETE/CREATE/ALTER/"
+                            "DROP/...) the user has explicitly approved "
+                            "after seeing it. Defaults to false (read-only)."
                         ),
                     },
                 },

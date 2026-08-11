@@ -16,12 +16,13 @@ from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
+from src.service.mcp_server_service import McpServerService
 from src.service.tool_service import ToolExecutionError, ToolService
 from src.service.update_service import UpdateService
 
 _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
 _MIN_SENTENCE_CHARS = 30
-_AGENT_MAX_ITERATIONS = 10
+_AGENT_MAX_ITERATIONS = 50
 _AGENT_LOOP_TIMEOUT_SECONDS = 120.0
 
 
@@ -36,9 +37,35 @@ class AgentLoop:
         self.tool_service: ToolService | None = None
         self.conversation_service: ConversationService | None = None
         self.update_service: UpdateService | None = None
+        self.mcp_server_service: McpServerService | None = None
+        # Nova's identity — WHO the assistant is and HOW it behaves. Loaded
+        # once per process; fails fast at startup if the file is missing.
+        self.persona_prompt = PromptEnums.NOVA_PERSONA_PROMPT.load()
         # Live handles to background=True runs, mostly for tests and
         # observability; finished threads are pruned on the next spawn.
         self.background_threads: list[threading.Thread] = []
+
+    def _system_blocks(self, steer: str = "") -> list[dict[str, Any]]:
+        """
+        Assemble the system prompt for one conversation request.
+
+        The persona is the stable prefix and carries the cache breakpoint —
+        tools render before system in the prompt, so this one marker caches
+        the tool list and persona together. The per-medium steer (e.g. the
+        spoken-reply brevity instruction) changes between chat and voice
+        turns, so it must come AFTER the breakpoint or every switch of
+        medium would invalidate the cache.
+        """
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": self.persona_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        if steer and steer.strip():
+            blocks.append({"type": "text", "text": steer})
+        return blocks
 
     def new_conversation_id(self) -> UUID:
         return uuid.uuid4()
@@ -66,12 +93,14 @@ class AgentLoop:
 
         The websocket speaks whatever this yields, so tool calls and artifacts
         are filtered out — they are UI concerns, not things to read aloud.
+        The pre-tool acknowledgment (status_text) IS spoken: it exists so the
+        user hears something before a long tool run goes quiet.
         Defaults to the spoken steer since this view exists to feed TTS.
         """
         for event in self.conversation_loop_events(
             prompt, conversation_uuid, prompt_source=prompt_source
         ):
-            if event.get("type") == "text" and event.get("text"):
+            if event.get("type") in ("text", "status_text") and event.get("text"):
                 yield event["text"]
 
     @staticmethod
@@ -186,6 +215,22 @@ class AgentLoop:
                 blocks.append({"type": "text", "text": block.text})
         return blocks
 
+    def _load_mcp_servers(self) -> list[dict[str, Any]]:
+        """
+        Enabled MCP servers for this request, or [] when none are registered.
+
+        Best-effort by design: the registry living in the DB must never take
+        a conversation down, so lookup failures degrade to "no MCP tools this
+        turn" rather than raising.
+        """
+        try:
+            if self.mcp_server_service is None:
+                self.mcp_server_service = McpServerService()
+            return self.mcp_server_service.connector_servers()
+        except Exception as exc:
+            print(f"MCP server lookup failed (continuing without MCP): {exc}")
+            return []
+
     @staticmethod
     def _describe_server_tool_uses(response: Message) -> list[dict[str, Any]]:
         """Audit records for tools Anthropic ran server-side (e.g. web search)."""
@@ -202,6 +247,31 @@ class AgentLoop:
             )
         return records
 
+    @staticmethod
+    def _describe_mcp_tool_uses(response: Message) -> list[dict[str, Any]]:
+        """
+        Audit records for MCP tools Anthropic ran through the connector.
+
+        Like server_tool_use blocks, the calls already happened and their
+        results are inline in the same response — these records exist for
+        persistence and for the UI, not for execution.
+        """
+        records: list[dict[str, Any]] = []
+        for block in response.content:
+            if getattr(block, "type", None) != "mcp_tool_use":
+                continue
+            server_name = getattr(block, "server_name", "mcp")
+            tool_name = getattr(block, "name", "unknown")
+            records.append(
+                {
+                    "tool": f"{server_name}.{tool_name}",
+                    "input": getattr(block, "input", {}),
+                    "server_side": True,
+                    "mcp_server": server_name,
+                }
+            )
+        return records
+
     def conversation_loop_events(
         self,
         prompt: str,
@@ -212,10 +282,12 @@ class AgentLoop:
         Run a single conversation turn as a bounded ReAct loop, as an event stream.
 
         Yields dicts the transport layer renders however it likes:
-          {"type": "text", "text": ...}       sentence chunk of the reply
-          {"type": "tool_call", "tool": ...}  a tool is about to run
-          {"type": "artifact", "kind": ...}   renderable output of a tool
-                                              (diff, file, terminal)
+          {"type": "text", "text": ...}        sentence chunk of the reply
+          {"type": "status_text", "text": ...} spoken acknowledgment emitted
+                                               before tool work starts
+          {"type": "tool_call", "tool": ...}   a tool is about to run
+          {"type": "artifact", "kind": ...}    renderable output of a tool
+                                               (diff, file, terminal)
 
         Text chunks are sentence-sized because the voice path speaks them; the
         chat path reassembles them. Tool calls run inline between Claude rounds,
@@ -274,7 +346,24 @@ class AgentLoop:
                     "input_schema": input_schema,
                 }
             )
+        # Deterministic order: tools render at the very front of the prompt
+        # cache prefix, and the DB returns them unordered — an order flip
+        # would silently invalidate the whole cache.
+        claude_tools.sort(key=lambda entry: entry["name"])
         tools_arg = claude_tools or None
+
+        # Persona (cached) + per-medium steer (uncached), built once per turn.
+        system_blocks = self._system_blocks(str(prompt_source))
+
+        # Remote MCP servers, resolved once per turn so a registry change
+        # mid-turn can't flip the tool list between iterations.
+        mcp_servers = self._load_mcp_servers() or None
+
+        # At most one spoken acknowledgment per turn: the text Claude writes
+        # before its first tool call is real feedback ("Let me pull that up"),
+        # but text on later tool rounds is play-by-play narration — it stays
+        # in history for the model and is never surfaced to the user.
+        status_emitted = False
 
         for _ in range(_AGENT_MAX_ITERATIONS):
             if time.monotonic() - started_at > _AGENT_LOOP_TIMEOUT_SECONDS:
@@ -289,7 +378,8 @@ class AgentLoop:
                     "",
                     context=history,
                     tools=tools_arg,
-                    system=str(prompt_source) or None,
+                    system=system_blocks,
+                    mcp_servers=mcp_servers,
                 )
             except TimeoutError:
                 fallback = "I hit a backend timeout while working on that and had to stop."
@@ -317,6 +407,18 @@ class AgentLoop:
                 self._persist_message(
                     conversation, MessageRole.TOOL, json.dumps(record)
                 )
+
+            # MCP calls already ran server-side; surface them to the UI the
+            # same way client tool calls are surfaced, and keep an audit row.
+            for record in self._describe_mcp_tool_uses(response):
+                self._persist_message(
+                    conversation, MessageRole.TOOL, json.dumps(record)
+                )
+                yield {
+                    "type": "tool_call",
+                    "tool": record["tool"],
+                    "input": record["input"],
+                }
 
             if not tool_uses:
                 # A long server-side search can pause the turn; replay the
@@ -347,6 +449,12 @@ class AgentLoop:
                 return
 
             history.append({"role": "assistant", "content": assistant_blocks})
+
+            if not status_emitted:
+                status = self._extract_text(response).strip()
+                if status:
+                    status_emitted = True
+                    yield {"type": "status_text", "text": status}
 
             tool_results: list[dict[str, Any]] = []
             for block in tool_uses:
@@ -576,7 +684,13 @@ class AgentLoop:
                     "input_schema": input_schema,
                 }
             )
+        # Same determinism rule as the conversation loop: stable tool order
+        # keeps the prompt cache prefix valid across requests.
+        claude_tools.sort(key=lambda entry: entry["name"])
         tools_arg = claude_tools or None
+
+        # Background agents get the same MCP tool surface as conversations.
+        mcp_servers = self._load_mcp_servers() or None
 
         history: list[dict[str, Any]] = [{"role": "user", "content": task_prompt}]
 
@@ -590,6 +704,7 @@ class AgentLoop:
                     context=history,
                     tools=tools_arg,
                     system=system,
+                    mcp_servers=mcp_servers,
                 )
             except TimeoutError:
                 return "I hit a backend timeout while working on that and had to stop."

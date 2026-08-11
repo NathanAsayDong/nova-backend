@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from uuid import UUID
@@ -28,6 +29,21 @@ agent_loop.conversation_service = conversation_service
 # In-memory power state for the assistant. Single-user personal deployment,
 # so a module-level flag is sufficient — no need for per-session storage.
 _nova_power_state = {"enabled": True}
+
+# Whisper runs on one local GPU; a live-caption pass overlapping the final
+# pass would contend for it, so all ASR calls are serialized.
+_asr_lock = threading.Lock()
+
+# Live captions re-transcribe the whole buffer each pass, so wait for enough
+# audio to be worth decoding (~0.9s at the client's 450ms chunk cadence) and
+# require that much NEW audio before running again.
+_PARTIAL_MIN_CHUNKS = 2
+_PARTIAL_NEW_CHUNKS = 2
+
+
+def _transcribe_serialized(file_path: Path, language: str | None) -> str:
+    with _asr_lock:
+        return asr_service.transcribe_file_path(file_path, language)
 
 
 @router.get("/nova/power")
@@ -120,7 +136,8 @@ async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
                         {"type": "text_final", "text": final_text, "format": "markdown"}
                     )
                 else:
-                    # tool_call / artifact pass through untouched.
+                    # status_text / tool_call / artifact pass through untouched;
+                    # the client renders the acknowledgment as a status bubble.
                     yield sse_event(event)
         except ConversationClosedError:
             yield sse_event(
@@ -380,6 +397,53 @@ async def transcribe_socket(websocket: WebSocket) -> None:
     mime_type = "audio/webm"
     chunks: list[bytes] = []
     conversation_id: UUID | None = None
+    capture_purpose = "turn"
+
+    # Live-caption state. `generation` invalidates in-flight partials when a
+    # recording stops or restarts; `chunks_done` is how much audio the last
+    # completed partial covered; `seq` orders the captions client-side.
+    partial_task: asyncio.Task | None = None
+    partial_state = {"generation": 0, "chunks_done": 0, "seq": 0}
+
+    async def emit_partial_transcript(
+        audio_bytes: bytes, chunk_count: int, generation: int
+    ) -> None:
+        """
+        Best-effort live caption for the recording in progress.
+
+        Re-transcribes the accumulated buffer (webm chunks only decode from
+        the start) and emits the whole partial text; the client replaces its
+        draft rather than appending. Failures are logged and swallowed — the
+        final transcription on stop is the one that matters.
+        """
+        file_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=suffix_for_mime(mime_type)
+            ) as temp:
+                temp.write(audio_bytes)
+                file_path = Path(temp.name)
+
+            text = await asyncio.to_thread(_transcribe_serialized, file_path, language)
+            text = (text or "").strip()
+
+            if generation != partial_state["generation"]:
+                return  # recording stopped or restarted while transcribing
+            partial_state["chunks_done"] = chunk_count
+            if text:
+                partial_state["seq"] += 1
+                await websocket.send_json(
+                    {
+                        "type": "partial_transcript",
+                        "text": text,
+                        "seq": partial_state["seq"],
+                    }
+                )
+        except Exception as exc:
+            print(f"Partial transcription failed (ignored): {exc}")
+        finally:
+            if file_path and file_path.exists():
+                os.remove(file_path)
 
     try:
         while True:
@@ -403,6 +467,23 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         "bytes": len(chunk),
                     }
                 )
+
+                # Live caption: re-transcribe the buffer whenever enough new
+                # audio arrived and no partial pass is already running. Only
+                # for real turns — wake checks are too short to bother.
+                if (
+                    capture_purpose == "turn"
+                    and (partial_task is None or partial_task.done())
+                    and len(chunks) >= _PARTIAL_MIN_CHUNKS
+                    and len(chunks) - partial_state["chunks_done"] >= _PARTIAL_NEW_CHUNKS
+                ):
+                    partial_task = asyncio.create_task(
+                        emit_partial_transcript(
+                            b"".join(chunks),
+                            len(chunks),
+                            partial_state["generation"],
+                        )
+                    )
                 continue
 
             if text_data is None:
@@ -433,6 +514,10 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 chunks.clear()
                 language = payload.get("language")
                 mime_type = payload.get("mimeType", "audio/webm")
+                capture_purpose = payload.get("purpose", "turn")
+                partial_state["generation"] += 1
+                partial_state["chunks_done"] = 0
+                partial_state["seq"] = 0
                 raw_conversation_id = payload.get("conversationId")
                 if raw_conversation_id:
                     try:
@@ -481,6 +566,10 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 continue
 
             if event == "stop":
+                # Whatever partial is in flight is now stale; the final
+                # transcription below supersedes it.
+                partial_state["generation"] += 1
+
                 purpose = payload.get("purpose", "turn")
                 if not chunks:
                     if purpose == "wake_check":
@@ -505,7 +594,11 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             temp.write(audio_chunk)
                         file_path = Path(temp.name)
 
-                    transcript = asr_service.transcribe_file_path(file_path, language)
+                    # Off the event loop, and serialized behind any in-flight
+                    # partial pass so two whisper runs never share the GPU.
+                    transcript = await asyncio.to_thread(
+                        _transcribe_serialized, file_path, language
+                    )
                     transcript = (transcript or "").strip()
 
                     if purpose == "wake_check":
@@ -568,6 +661,17 @@ async def transcribe_socket(websocket: WebSocket) -> None:
 
                     if conversation_id is None:
                         conversation_id = agent_loop.new_conversation_id()
+                    else:
+                        # Stale client state can hand us a conversation that
+                        # was since closed (e.g. the New Conversation button).
+                        # Closed conversations are terminal, so continue in a
+                        # fresh one — the user_transcript echo below carries
+                        # the replacement id and the client re-syncs to it.
+                        existing = await asyncio.to_thread(
+                            conversation_service.get_conversation, conversation_id
+                        )
+                        if existing is not None and existing.is_closed:
+                            conversation_id = agent_loop.new_conversation_id()
 
                     # Echo what was heard so the transcript shows the spoken
                     # turn the same way it shows a typed one.
@@ -610,6 +714,22 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                                 tts_available = await stream_tts_audio(
                                     websocket, event["text"], role="final"
                                 )
+                        elif event_type == "status_text":
+                            # Pre-tool acknowledgment: spoken so the user gets
+                            # feedback before tool work goes quiet, but kept
+                            # out of spoken_parts — the turn's assistantText
+                            # is the final answer, not the "on it" line.
+                            await websocket.send_json(
+                                {
+                                    "type": "status_text",
+                                    "text": event["text"],
+                                    "conversationId": str(conversation_id),
+                                }
+                            )
+                            if tts_available:
+                                tts_available = await stream_tts_audio(
+                                    websocket, event["text"], role="status"
+                                )
                         elif event_type == "text_final":
                             final_text = event["text"]
                             await websocket.send_json(
@@ -638,6 +758,20 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             ),
                         }
                     )
+                except ConversationClosedError as exc:
+                    # Should be prevented by the pre-turn check above; kept as
+                    # a backstop for races. The code lets the client drop its
+                    # stored conversation id instead of retrying it forever.
+                    try:
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": "conversation_closed",
+                                "message": str(exc),
+                            }
+                        )
+                    except Exception:
+                        pass
                 except Exception as exc:
                     try:
                         await websocket.send_json(

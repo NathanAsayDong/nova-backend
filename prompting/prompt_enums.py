@@ -7,7 +7,7 @@ _PROMPTING_DIR = Path(__file__).resolve().parent
 class PromptEnums(StrEnum):
     """Prompt files shipped in this package; call .load() to read one."""
 
-    NOVA_PERSONA_PROMPT = "nova_persona_prompt.txt"
+    NOVA_PERSONA_PROMPT = "nova_persona_prompt.md"
     TTS_CONVERSION_ENHANCER_PROMPT = "tts_conversion_enhancer_prompt.txt"
     BACKGROUND_AGENT_PROMPT = "background_agent_prompt.txt"
 

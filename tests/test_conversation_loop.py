@@ -22,6 +22,14 @@ class FakeMessage:
     stop_reason: str = "end_turn"
 
 
+@dataclass
+class FakeToolUseBlock:
+    id: str
+    name: str
+    input: dict
+    type: str = "tool_use"
+
+
 class FakeToolDao:
     def get_all(self):
         return []
@@ -62,7 +70,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
         self.assertIsInstance(new_id, UUID)
 
     def _set_stream(self, text: str):
-        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             blocks = [FakeTextBlock(text=text)] if text else []
             return FakeMessage(content=blocks)
 
@@ -140,7 +148,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
             ],
         }
 
-        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             return FakeMessage(content=[search_result_block, cited_text_block])
 
         self.agent_loop.claude_service.stream_response = fake_stream
@@ -159,7 +167,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
         stop_reasons = ["pause_turn", "end_turn"]
         calls = {"n": 0}
 
-        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             index = calls["n"]
             calls["n"] += 1
             message = responses[index]
@@ -209,19 +217,22 @@ class ConversationLoopStreamTests(unittest.TestCase):
 
 
 class PromptSourceTests(ConversationLoopStreamTests):
-    """The reply is steered for the medium it will be delivered in."""
+    """
+    Every turn carries Nova's persona as the cached system prefix; the reply
+    is additionally steered for the medium it will be delivered in.
+    """
 
     def _capture_systems(self):
         systems: list = []
 
-        def fake_stream(prompt, role=None, context=None, tools=None, system=None):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             systems.append(system)
             return FakeMessage(content=[FakeTextBlock(text="Short answer.")])
 
         self.agent_loop.claude_service.stream_response = fake_stream
         return systems
 
-    def test_chat_sends_no_steer(self):
+    def test_chat_sends_persona_without_steer(self):
         systems = self._capture_systems()
 
         list(
@@ -230,10 +241,15 @@ class PromptSourceTests(ConversationLoopStreamTests):
             )
         )
 
-        # CHAT_PROMPT is empty, so nothing is sent rather than an empty system.
-        self.assertEqual(systems, [None])
+        # CHAT_PROMPT is empty, so only the persona block is sent.
+        self.assertEqual(len(systems), 1)
+        blocks = systems[0]
+        self.assertEqual(len(blocks), 1)
+        self.assertIn("Nova", blocks[0]["text"])
+        # The stable persona carries the cache breakpoint.
+        self.assertEqual(blocks[0]["cache_control"], {"type": "ephemeral"})
 
-    def test_speech_sends_brevity_steer(self):
+    def test_speech_appends_brevity_steer_after_persona(self):
         systems = self._capture_systems()
 
         list(
@@ -243,22 +259,29 @@ class PromptSourceTests(ConversationLoopStreamTests):
         )
 
         self.assertEqual(len(systems), 1)
-        self.assertIn("voice mode", systems[0])
-        self.assertIn("brief", systems[0])
+        blocks = systems[0]
+        self.assertEqual(len(blocks), 2)
+        self.assertIn("Nova", blocks[0]["text"])
+        self.assertIn("voice mode", blocks[1]["text"])
+        self.assertIn("brief", blocks[1]["text"])
+        # The steer varies per medium, so it must sit AFTER the cache
+        # breakpoint — a cached steer would invalidate the prefix whenever
+        # the user switches between chat and voice.
+        self.assertNotIn("cache_control", blocks[1])
 
     def test_voice_wrapper_defaults_to_speech(self):
         systems = self._capture_systems()
 
         list(self.agent_loop.conversation_loop_stream("hi", self.conversation_id))
 
-        self.assertIn("brief", systems[0])
+        self.assertIn("brief", systems[0][-1]["text"])
 
     def test_chat_default_is_unsteered(self):
         systems = self._capture_systems()
 
         list(self.agent_loop.conversation_loop_events("hi", self.conversation_id))
 
-        self.assertEqual(systems, [None])
+        self.assertEqual(len(systems[0]), 1)
 
     def test_steer_never_enters_history(self):
         """
@@ -377,8 +400,9 @@ class EventStreamTests(ConversationLoopStreamTests):
         self.assertNotIn("\n- The second item", chunked)
 
     def test_text_wrapper_filters_non_text_events(self):
-        """The voice path must not try to speak tool calls or artifacts."""
+        """The voice path speaks text and status, never tool calls or artifacts."""
         events = [
+            {"type": "status_text", "text": "Let me check."},
             {"type": "tool_call", "tool": "run_terminal_command", "input": {}},
             {"type": "text", "text": "Spoken."},
             {"type": "artifact", "kind": "diff", "content": "-a\n+b"},
@@ -389,7 +413,117 @@ class EventStreamTests(ConversationLoopStreamTests):
             self.agent_loop.conversation_loop_stream("hi", self.conversation_id)
         )
 
-        self.assertEqual(spoken, ["Spoken."])
+        self.assertEqual(spoken, ["Let me check.", "Spoken."])
+
+
+class StatusTextTests(ConversationLoopStreamTests):
+    """
+    The text Claude writes before its first tool call is surfaced once as a
+    status_text event (the spoken "on it" acknowledgment); text on later tool
+    rounds is narration and must stay silent.
+    """
+
+    def _set_responses(self, responses: list[FakeMessage]):
+        queue = list(responses)
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            return queue.pop(0)
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+    @staticmethod
+    def _tool_round(text: str | None, call_id: str) -> FakeMessage:
+        blocks: list = []
+        if text:
+            blocks.append(FakeTextBlock(text=text))
+        # The tool is unknown to ToolService, so the loop records an error
+        # result and continues — enough to drive multi-round turns without
+        # real tools.
+        blocks.append(FakeToolUseBlock(id=call_id, name="missing_tool", input={}))
+        return FakeMessage(content=blocks)
+
+    def test_pre_tool_text_is_yielded_once_as_status(self):
+        self._set_responses(
+            [
+                self._tool_round("Let me pull that up for you.", "t1"),
+                FakeMessage(content=[FakeTextBlock(text="Here is your answer, sir.")]),
+            ]
+        )
+
+        events = list(
+            self.agent_loop.conversation_loop_events("do the thing", self.conversation_id)
+        )
+
+        statuses = [e for e in events if e["type"] == "status_text"]
+        self.assertEqual(statuses, [
+            {"type": "status_text", "text": "Let me pull that up for you."}
+        ])
+        # The acknowledgment precedes the final spoken text.
+        types = [e["type"] for e in events]
+        self.assertLess(types.index("status_text"), types.index("text"))
+
+    def test_later_tool_rounds_stay_silent(self):
+        self._set_responses(
+            [
+                self._tool_round("Checking that now.", "t1"),
+                self._tool_round("Now cross-referencing the results.", "t2"),
+                FakeMessage(content=[FakeTextBlock(text="All done, here it is.")]),
+            ]
+        )
+
+        events = list(
+            self.agent_loop.conversation_loop_events("do the thing", self.conversation_id)
+        )
+
+        statuses = [e["text"] for e in events if e["type"] == "status_text"]
+        self.assertEqual(statuses, ["Checking that now."])
+
+    def test_silent_first_round_can_speak_on_a_later_round(self):
+        """One acknowledgment per turn — not necessarily from round one."""
+        self._set_responses(
+            [
+                self._tool_round(None, "t1"),
+                self._tool_round("Still digging into this one.", "t2"),
+                FakeMessage(content=[FakeTextBlock(text="Found it, here you go.")]),
+            ]
+        )
+
+        events = list(
+            self.agent_loop.conversation_loop_events("do the thing", self.conversation_id)
+        )
+
+        statuses = [e["text"] for e in events if e["type"] == "status_text"]
+        self.assertEqual(statuses, ["Still digging into this one."])
+
+    def test_no_tools_means_no_status(self):
+        self._set_responses(
+            [FakeMessage(content=[FakeTextBlock(text="Doing great, thanks for asking.")])]
+        )
+
+        events = list(
+            self.agent_loop.conversation_loop_events("hey how are you", self.conversation_id)
+        )
+
+        self.assertEqual([e for e in events if e["type"] == "status_text"], [])
+
+    def test_status_text_stays_in_history_for_the_model(self):
+        self._set_responses(
+            [
+                self._tool_round("Let me pull that up for you.", "t1"),
+                FakeMessage(content=[FakeTextBlock(text="Here is your answer, sir.")]),
+            ]
+        )
+
+        list(
+            self.agent_loop.conversation_loop_events("do the thing", self.conversation_id)
+        )
+
+        history = self.agent_loop.conversations[self.conversation_id]
+        first_assistant = next(m for m in history if m["role"] == "assistant")
+        self.assertEqual(
+            first_assistant["content"][0],
+            {"type": "text", "text": "Let me pull that up for you."},
+        )
 
 
 class SentenceChunkTests(unittest.TestCase):
