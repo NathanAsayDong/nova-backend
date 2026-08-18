@@ -4,7 +4,6 @@ import json
 import os
 import re
 import tempfile
-import threading
 import uuid
 from pathlib import Path
 from uuid import UUID
@@ -14,14 +13,20 @@ from fastapi.responses import StreamingResponse
 
 from prompting.prompt_source_prompt import PromptSourceEnum
 from src.harness.agent_loop import AgentLoop
+from src.harness.streaming import iter_in_thread
+from src.controller.audio_ws import (
+    asr_service,
+    suffix_for_mime,
+    transcribe_serialized,
+)
 from src.service.conversation_service import ConversationClosedError, ConversationService
+from src.service.meeting_service import MeetingService
 from src.service.tts_service import TTSService
-from src.service.asr_service import ASRService
 
 router = APIRouter(tags=["transcribe"])
-asr_service = ASRService()
 tts_service = TTSService()
 conversation_service = ConversationService()
+meeting_service = MeetingService()
 agent_loop = AgentLoop()
 agent_loop.conversation_service = conversation_service
 
@@ -30,10 +35,6 @@ agent_loop.conversation_service = conversation_service
 # so a module-level flag is sufficient — no need for per-session storage.
 _nova_power_state = {"enabled": True}
 
-# Whisper runs on one local GPU; a live-caption pass overlapping the final
-# pass would contend for it, so all ASR calls are serialized.
-_asr_lock = threading.Lock()
-
 # Live captions re-transcribe the whole buffer each pass, so wait for enough
 # audio to be worth decoding (~0.9s at the client's 450ms chunk cadence) and
 # require that much NEW audio before running again.
@@ -41,15 +42,23 @@ _PARTIAL_MIN_CHUNKS = 2
 _PARTIAL_NEW_CHUNKS = 2
 
 
-def _transcribe_serialized(file_path: Path, language: str | None) -> str:
-    with _asr_lock:
-        return asr_service.transcribe_file_path(file_path, language)
-
-
 @router.get("/nova/power")
 async def get_nova_power() -> dict[str, bool]:
     """Report whether Nova is currently allowed to listen."""
     return {"enabled": _nova_power_state["enabled"]}
+
+
+@router.get("/nova/state")
+async def get_nova_state() -> dict:
+    """
+    Power plus mode, in one call for the client's header.
+
+    Mode is derived from whether a meeting is recording rather than held
+    alongside the power flag: a meeting row is the only source of truth for
+    it, so the two can never drift apart.
+    """
+    state = await asyncio.to_thread(meeting_service.get_state)
+    return {"enabled": _nova_power_state["enabled"], **state}
 
 
 @router.post("/nova/power")
@@ -166,6 +175,13 @@ async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
                 }
             )
 
+        # Typed chat has no listening loop to stop, but the flag must still be
+        # cleared here: left set, it would fire on the next spoken turn of this
+        # conversation and cut the user off mid-sentence.
+        stop_reason = conversation_service.pop_stop_request(conversation_id)
+        if stop_reason is not None:
+            yield sse_event({"type": "session_ended", "reason": stop_reason})
+
         yield sse_event(
             {
                 "type": "done",
@@ -181,25 +197,6 @@ async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
     )
 
 
-async def iter_in_thread(generator):
-    """Consume a sync generator without blocking the event loop."""
-    sentinel = object()
-    while True:
-        item = await asyncio.to_thread(next, generator, sentinel)
-        if item is sentinel:
-            return
-        yield item
-
-
-def suffix_for_mime(mime_type: str) -> str:
-    mime = (mime_type or "").lower()
-    if "wav" in mime:
-        return ".wav"
-    if "ogg" in mime:
-        return ".ogg"
-    if "mp4" in mime or "mpeg" in mime:
-        return ".mp4"
-    return ".webm"
 
 
 def normalize_wake_text(value: str) -> str:
@@ -424,7 +421,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 temp.write(audio_bytes)
                 file_path = Path(temp.name)
 
-            text = await asyncio.to_thread(_transcribe_serialized, file_path, language)
+            text = await asyncio.to_thread(transcribe_serialized, file_path, language)
             text = (text or "").strip()
 
             if generation != partial_state["generation"]:
@@ -510,6 +507,27 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         }
                     )
                     continue
+                # Backstop for meeting mode, mirroring the power check above.
+                # While a meeting is recording, Nova transcribes the room and
+                # answers nobody — without this, any voice in the meeting
+                # would open a turn and get a spoken reply.
+                if payload.get("purpose", "turn") == "turn":
+                    active_meeting = await asyncio.to_thread(
+                        meeting_service.get_active_meeting
+                    )
+                    if active_meeting is not None:
+                        await websocket.send_json(
+                            {
+                                "type": "meeting_mode",
+                                "meeting": active_meeting,
+                                "message": (
+                                    "Nova is in meeting mode and is not taking "
+                                    "turns. Stop the meeting to talk to Nova."
+                                ),
+                            }
+                        )
+                        continue
+
                 recording_started = True
                 chunks.clear()
                 language = payload.get("language")
@@ -597,7 +615,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     # Off the event loop, and serialized behind any in-flight
                     # partial pass so two whisper runs never share the GPU.
                     transcript = await asyncio.to_thread(
-                        _transcribe_serialized, file_path, language
+                        transcribe_serialized, file_path, language
                     )
                     transcript = (transcript or "").strip()
 
@@ -758,6 +776,20 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             ),
                         }
                     )
+
+                    # Nova decided the user was finished (end_session tool).
+                    # Sent after "done" so the goodbye is spoken first, and
+                    # deliberately the same event the stop-phrase path emits,
+                    # so the client needs no new handling.
+                    stop_reason = conversation_service.pop_stop_request(conversation_id)
+                    if stop_reason is not None:
+                        print(f"Nova ended the session: {stop_reason}")
+                        await websocket.send_json(
+                            {
+                                "type": "follow_up_stopped",
+                                "message": "Stopped. Returning to idle.",
+                            }
+                        )
                 except ConversationClosedError as exc:
                     # Should be prevented by the pre-turn check above; kept as
                     # a backstop for races. The code lets the client drop its

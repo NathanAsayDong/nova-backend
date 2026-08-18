@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
+from src.model.report_type import DeliveryStatus
 from src.model.update import Update
 from src.service.update_service import UpdateService
 
@@ -119,6 +120,51 @@ class CreateUpdateTests(unittest.TestCase):
         )
         result = service.create_update("hello", conversation_uuid=str(uuid))
         self.assertEqual(result["conversation_uuid"], str(uuid))
+
+
+class ReportTypeTests(unittest.TestCase):
+    def test_no_report_type_is_badge_only(self):
+        service = build_service()
+        result = service.create_update("Deploy finished.")
+
+        self.assertIsNone(result["report_type"])
+        self.assertEqual(result["delivery_status"], DeliveryStatus.NOT_REQUIRED)
+        self.assertNotIn("warning", result)
+
+    def test_deliverable_types_are_queued(self):
+        for report_type in ("email", "call", "sms"):
+            with self.subTest(report_type=report_type):
+                service = build_service()
+                result = service.create_update("Deploy finished.", report_type=report_type)
+
+                self.assertEqual(result["report_type"], report_type)
+                self.assertEqual(result["delivery_status"], DeliveryStatus.PENDING)
+                self.assertNotIn("warning", result)
+
+    def test_known_but_undeliverable_types_are_recorded_not_rejected(self):
+        # Losing the update because its channel isn't built yet would be worse
+        # than not delivering it, so these are kept and flagged.
+        service = build_service()
+        result = service.create_update("Deploy finished.", report_type="chat")
+
+        self.assertEqual(result["report_type"], "chat")
+        self.assertEqual(result["delivery_status"], DeliveryStatus.NOT_REQUIRED)
+        self.assertIn("not deliverable yet", result["warning"])
+
+    def test_unknown_report_type_rejected(self):
+        service = build_service()
+        with self.assertRaises(ValueError):
+            service.create_update("hello", report_type="carrier-pigeon")
+
+    def test_blank_report_type_treated_as_unset(self):
+        service = build_service()
+        result = service.create_update("hello", report_type="  ")
+        self.assertIsNone(result["report_type"])
+
+    def test_report_type_is_case_insensitive(self):
+        service = build_service()
+        result = service.create_update("hello", report_type="Call")
+        self.assertEqual(result["report_type"], "call")
 
 
 class ViewingTests(unittest.TestCase):

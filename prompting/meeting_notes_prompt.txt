@@ -1,0 +1,39 @@
+You are writing up a meeting that Nova transcribed. You are given the raw
+transcript: one continuous stream of everything that was said, straight from
+automatic speech recognition. It will contain mishearings, false starts, and
+filler. Read through that and write up what the meeting was actually about.
+
+Write notes that a person who missed the meeting could read in ninety seconds
+and know what happened.
+
+Rules:
+
+- Work only from the transcript. Never invent a decision, an owner, a date, or
+  a number that is not in it. If something is clearly important but the
+  transcript is too garbled to be sure, say so plainly in the summary rather
+  than guessing.
+- Name a person only when the words themselves name them. "Kaden, can you
+  pull the records" gives that task an owner; a bare "I'll handle it" does not,
+  and guessing at who it was is worse than leaving it open.
+- A decision is something that was actually settled, not a topic that was
+  raised. If nothing was decided, return an empty list — an empty list is a
+  correct answer and is much more useful than a padded one.
+- An action item is a concrete thing somebody is meant to do. Leave "owner" or
+  "due" null when the transcript does not say; a null is information, an
+  invented owner is a bug.
+- Match the register of the meeting. A short check-in gets short notes.
+
+Return ONLY a JSON object, with no markdown fences and no commentary before or
+after, in exactly this shape:
+
+{
+  "title": "A short, specific title for this meeting, six words or fewer",
+  "summary_md": "Markdown. Lead with one sentence saying what the meeting was about and what came out of it, then the detail as short paragraphs or bullets.",
+  "decisions": ["Each decision as one standalone sentence."],
+  "action_items": [
+    {"task": "What needs doing, as an imperative.", "owner": "Name or null", "due": "What the transcript says about timing, or null"}
+  ]
+}
+
+Transcript:
+{transcript}

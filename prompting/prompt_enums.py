@@ -10,6 +10,8 @@ class PromptEnums(StrEnum):
     NOVA_PERSONA_PROMPT = "nova_persona_prompt.md"
     TTS_CONVERSION_ENHANCER_PROMPT = "tts_conversion_enhancer_prompt.txt"
     BACKGROUND_AGENT_PROMPT = "background_agent_prompt.txt"
+    MEETING_NOTES_PROMPT = "meeting_notes_prompt.txt"
+    MEETING_FOLLOWUP_PROMPT = "meeting_followup_prompt.txt"
 
     def load(self) -> str:
         return (_PROMPTING_DIR / self.value).read_text(encoding="utf-8").strip()

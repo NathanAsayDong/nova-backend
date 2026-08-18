@@ -1,10 +1,11 @@
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.dao.project_dao import ProjectDao
 from src.dao.responsibility_dao import ResponsibilityDao
-from src.model.responsibility import Responsibility, ResponsibilityReportType
+from src.model.report_type import SUPPORTED_REPORT_TYPES, ReportType
+from src.model.responsibility import Responsibility
+from src.service.update_service import UpdateService
 
 # Time-of-day windows a responsibility can be scheduled into. A responsibility
 # runs at most once per window, so ["morning", "evening"] means twice a day.
@@ -21,16 +22,12 @@ _WINDOW_BOUNDS = {
     WINDOW_NIGHT: (21, 6),
 }
 
-# Report types Nova can actually deliver today. SMS, call, and chat have no
-# tool behind them yet, so a responsibility asking for one still does its work
-# and reports in its final reply instead of silently failing.
-_SUPPORTED_REPORT_TYPES = {ResponsibilityReportType.EMAIL}
-
 
 class ResponsibilityService:
     def __init__(self) -> None:
         self.responsibility_dao = ResponsibilityDao()
         self.project_dao = ProjectDao()
+        self.update_service = UpdateService()
 
     # ---------- crud ----------
 
@@ -45,7 +42,7 @@ class ResponsibilityService:
             "schedule": responsibility.schedule,
             "project_id": responsibility.project_id,
             "report_type": str(report_type) if report_type else None,
-            "report_deliverable": report_type in _SUPPORTED_REPORT_TYPES
+            "report_deliverable": report_type in SUPPORTED_REPORT_TYPES
             if report_type
             else None,
             "last_run": (
@@ -80,18 +77,18 @@ class ResponsibilityService:
         return normalized
 
     @staticmethod
-    def _validate_report_type(report_type: str | None) -> ResponsibilityReportType | None:
+    def _validate_report_type(report_type: str | None) -> ReportType | None:
         if report_type is None:
             return None
         candidate = str(report_type).strip().lower()
         if not candidate:
             return None
         try:
-            return ResponsibilityReportType(candidate)
+            return ReportType(candidate)
         except ValueError:
             raise ValueError(
                 f"Unknown report_type '{report_type}'. Valid types are "
-                f"{[str(t) for t in ResponsibilityReportType]}."
+                f"{[str(t) for t in ReportType]}."
             )
 
     def _validate_project(self, project_id: int | None) -> int | None:
@@ -148,11 +145,12 @@ class ResponsibilityService:
         )
 
         result = self._to_dict(created)
-        if validated_type is not None and validated_type not in _SUPPORTED_REPORT_TYPES:
+        if validated_type is not None and validated_type not in SUPPORTED_REPORT_TYPES:
             result["warning"] = (
-                f"Reporting by {validated_type} is not deliverable yet — no tool "
-                "exists for it. The responsibility will still run and summarize "
-                "its outcome in its reply. Only email can be delivered today."
+                f"Reporting by {validated_type} is not deliverable yet — no "
+                "channel exists for it. The responsibility will still run and "
+                "post its outcome as an update. Only email and call can be "
+                "delivered today."
             )
         return result
 
@@ -276,51 +274,17 @@ class ResponsibilityService:
 
     # ---------- execution ----------
 
-    @staticmethod
-    def _report_instruction(responsibility: Responsibility) -> str:
-        """
-        Tell the agent how to report, and authorize it to do so.
-
-        A responsibility with report_type=email is standing permission from the
-        user for this specific report, which is why it overrides send_email's
-        usual "ask before sending" rule.
-        """
-        report_type = responsibility.report_type
-        if report_type is None:
-            return ""
-
-        if report_type not in _SUPPORTED_REPORT_TYPES:
-            return (
-                f"This responsibility is configured to report by {report_type}, "
-                "but no tool for that exists yet. Do not attempt it and do not "
-                "substitute another channel — complete the work and summarize "
-                "the outcome in your final reply instead."
-            )
-
-        recipient = os.getenv("NOVA_REPORT_EMAIL") or os.getenv("EMAIL_SENDER")
-        if not recipient:
-            return (
-                "This responsibility is configured to report by email, but no "
-                "recipient is configured (set NOVA_REPORT_EMAIL or "
-                "EMAIL_SENDER). Summarize the outcome in your final reply "
-                "instead of sending anything."
-            )
-
-        return (
-            f"{responsibility.report_type_prompt()} "
-            f"Send it with the send_email tool to {recipient}. The user set up "
-            "this responsibility to be reported by email, so that email is "
-            "already authorized — send it without asking for confirmation, "
-            "since this runs in the background with nobody to ask. Use a "
-            f"subject line identifying the responsibility ('{responsibility.name}') "
-            "and keep the body to what you actually did and found."
-        )
-
     def preform_responsibility(
         self, responsibility_id: int, prompt: Optional[str] = None
     ) -> str:
         """
-        Run one responsibility to completion and stamp it as run.
+        Run one responsibility to completion, record its outcome, stamp it as run.
+
+        The run's summary becomes an Update carrying the responsibility's
+        report_type, and delivery happens from there — the agent is never asked
+        to email or call anyone itself. That split is what lets a report be
+        retried, rate-limited, or held until morning without the agent (which
+        is long gone by then) being involved.
 
         last_run is stamped even when the agent reports a failure: the run did
         happen, and re-firing it every tick of the same window would spam the
@@ -330,23 +294,56 @@ class ResponsibilityService:
         if responsibility is None:
             raise ValueError(f"Responsibility with id {responsibility_id} not found")
 
-        instructions = [part for part in [prompt, self._report_instruction(responsibility)] if part]
-
         # Imported here so the module-level import graph stays acyclic: the
         # agent loop reaches back into responsibilities to build its prompt.
         from src.harness.agent_loop import AgentLoop
 
         try:
             result = AgentLoop().run_agent(
-                prompt="\n".join(instructions) or None,
+                prompt=prompt,
                 responsibility_id=responsibility_id,
+                report_type=(
+                    str(responsibility.report_type)
+                    if responsibility.report_type
+                    else None
+                ),
             )
         finally:
             self.responsibility_dao.set_last_run(
                 responsibility_id, datetime.now(timezone.utc).isoformat()
             )
 
+        self._record_outcome(responsibility, result)
         return result
+
+    def _record_outcome(self, responsibility: Responsibility, result: str) -> None:
+        """
+        Turn a finished run into an Update, queued for delivery if one was asked for.
+
+        Best-effort: the work already happened, so failing to file the update
+        must not turn a successful run into a raised exception that the worker
+        logs as a failure and retries.
+        """
+        summary = (result or "").strip()
+        if not summary:
+            summary = (
+                f"Responsibility '{responsibility.name}' ran but produced no summary."
+            )
+
+        try:
+            self.update_service.create_update(
+                update_message=summary,
+                project_id=responsibility.project_id,
+                report_type=(
+                    str(responsibility.report_type)
+                    if responsibility.report_type
+                    else None
+                ),
+            )
+        except Exception as exc:
+            print(
+                f"Responsibility {responsibility.id} could not record its update: {exc}"
+            )
 
     def check_for_responsibilities(self, now: datetime | None = None) -> dict:
         """

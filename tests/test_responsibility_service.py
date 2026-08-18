@@ -51,10 +51,32 @@ class FakeProjectDao:
         return SimpleNamespace(id=int(id), name=f"Project {id}")
 
 
+class FakeUpdateService:
+    def __init__(self):
+        self.created = []
+
+    def create_update(
+        self,
+        update_message,
+        project_id=None,
+        conversation_uuid=None,
+        report_type=None,
+    ):
+        record = {
+            "update_message": update_message,
+            "project_id": project_id,
+            "conversation_uuid": conversation_uuid,
+            "report_type": report_type,
+        }
+        self.created.append(record)
+        return record
+
+
 def build_service(responsibilities=()) -> ResponsibilityService:
     service = ResponsibilityService.__new__(ResponsibilityService)
     service.responsibility_dao = FakeResponsibilityDao(responsibilities)
     service.project_dao = FakeProjectDao()
+    service.update_service = FakeUpdateService()
     return service
 
 
@@ -154,37 +176,36 @@ class DueTests(unittest.TestCase):
         self.assertFalse(self.service.is_due(r, at(9)))
 
 
-class ReportInstructionTests(unittest.TestCase):
-    def test_no_report_type_gives_no_instruction(self):
+class ReportMediumTests(unittest.TestCase):
+    """
+    Reporting is system-delivered: a responsibility's report_type shapes how
+    the agent writes its summary and is stamped onto the resulting update, but
+    the agent is never told to send anything itself.
+    """
+
+    def test_no_report_type_gives_no_medium_brief(self):
         r = Responsibility(id=1, name="x", report_type=None)
-        self.assertEqual(ResponsibilityService._report_instruction(r), "")
+        self.assertEqual(r.report_type_prompt(), "")
 
-    @mock.patch.dict("os.environ", {"NOVA_REPORT_EMAIL": "me@example.com"})
-    def test_email_instruction_authorizes_send(self):
-        r = Responsibility(id=1, name="Daily digest", report_type=ResponsibilityReportType.EMAIL)
-        instruction = ResponsibilityService._report_instruction(r)
-        self.assertIn("me@example.com", instruction)
-        self.assertIn("send_email", instruction)
-        self.assertIn("without asking for confirmation", instruction)
-        self.assertIn("Daily digest", instruction)
+    def test_call_brief_asks_for_speakable_summary(self):
+        r = Responsibility(id=1, name="x", report_type=ResponsibilityReportType.CALL)
+        brief = r.report_type_prompt()
+        self.assertIn("spoken", brief)
+        self.assertIn("phone", brief)
 
-    @mock.patch.dict("os.environ", {}, clear=True)
-    def test_email_without_recipient_falls_back_to_reply(self):
+    def test_email_brief_asks_for_email_body(self):
         r = Responsibility(id=1, name="x", report_type=ResponsibilityReportType.EMAIL)
-        instruction = ResponsibilityService._report_instruction(r)
-        self.assertIn("no recipient is configured", instruction)
+        self.assertIn("email", r.report_type_prompt())
 
-    def test_unsupported_report_type_is_not_attempted(self):
-        for report_type in (
-            ResponsibilityReportType.SMS,
-            ResponsibilityReportType.CALL,
-            ResponsibilityReportType.CHAT,
-        ):
+    def test_no_report_type_instructs_the_agent_to_send_anything(self):
+        # The old behavior injected send_email into the prompt and authorized
+        # it. Nothing should do that any more, for any report type.
+        for report_type in ResponsibilityReportType:
             with self.subTest(report_type=report_type):
                 r = Responsibility(id=1, name="x", report_type=report_type)
-                instruction = ResponsibilityService._report_instruction(r)
-                self.assertIn("no tool for that exists yet", instruction)
-                self.assertIn("Do not attempt it", instruction)
+                brief = r.report_type_prompt()
+                self.assertNotIn("send_email", brief)
+                self.assertNotIn("without asking for confirmation", brief)
 
 
 class PerformTests(unittest.TestCase):
@@ -325,18 +346,20 @@ class CrudTests(unittest.TestCase):
 
     def test_undeliverable_report_type_warns_but_creates(self):
         created = self.service.create_responsibility(
-            name="R", description="d", report_type="sms"
+            name="R", description="d", report_type="chat"
         )
-        self.assertEqual(created["report_type"], "sms")
+        self.assertEqual(created["report_type"], "chat")
         self.assertFalse(created["report_deliverable"])
         self.assertIn("not deliverable", created["warning"])
 
-    def test_email_report_type_has_no_warning(self):
-        created = self.service.create_responsibility(
-            name="R", description="d", report_type="email"
-        )
-        self.assertTrue(created["report_deliverable"])
-        self.assertNotIn("warning", created)
+    def test_deliverable_report_types_have_no_warning(self):
+        for report_type in ("email", "call", "sms"):
+            with self.subTest(report_type=report_type):
+                created = self.service.create_responsibility(
+                    name="R", description="d", report_type=report_type
+                )
+                self.assertTrue(created["report_deliverable"])
+                self.assertNotIn("warning", created)
 
     def test_update_only_changes_given_fields(self):
         created = self.service.create_responsibility(

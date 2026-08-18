@@ -45,6 +45,26 @@ class ConversationDao(BaseDao):
     def set_closed(self, uuid: UUID) -> Conversation | None:
         return self._update_columns(uuid, {"is_closed": True})
 
+    def get_latest_open_for_sms(self, phone_number: str) -> Conversation | None:
+        """
+        The open SMS conversation for a number, newest first, or None.
+
+        Ordering by last message rather than creation date is what makes a
+        reply land in the thread the user was actually just in.
+        """
+        response = (
+            self.client.table(self._table)
+            .select("*")
+            .eq("sms_phone_number", phone_number)
+            .eq("is_closed", False)
+            .order("last_message_timestamp_utc", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        return self._to_model(self._model_class, response.data[0])
+
     def set_processed(self, uuid: UUID) -> Conversation | None:
         return self._update_columns(uuid, {"is_processed": True})
 

@@ -14,6 +14,7 @@ from prompting.prompt_enums import PromptEnums
 from prompting.prompt_source_prompt import PromptSourceEnum
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
+from src.model.report_type import ReportType
 from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
 from src.service.mcp_server_service import McpServerService
@@ -540,6 +541,7 @@ class AgentLoop:
         responsibility_id: int | None = None,
         background: bool = False,
         conversation_uuid: str | None = None,
+        report_type: str | None = None,
     ) -> str:
         """
         Run a sub-agent as a bounded Claude + ToolService ReAct loop.
@@ -556,9 +558,17 @@ class AgentLoop:
         later. conversation_uuid (injected by the tool harness, never the
         model) links that update to the conversation — and through it the
         project — the work was kicked off from.
+
+        `report_type` says how the user wants to hear about the result: it is
+        stamped onto the update this run produces, and the dispatcher delivers
+        from there. The sub-agent never delivers anything itself — it is told
+        which medium its summary is headed for so it can write for that
+        medium, and nothing more.
         """
         if self.tool_service is None:
             self.tool_service = ToolService()
+
+        validated_report_type = self._validate_report_type(report_type)
 
         parts: list[str] = []
         if responsibility_id is not None:
@@ -568,6 +578,8 @@ class AgentLoop:
             parts.append(responsibility.to_prompt().strip())
         if prompt and prompt.strip():
             parts.append(prompt.strip())
+        if validated_report_type is not None:
+            parts.append(self._report_medium_brief(validated_report_type))
 
         task_prompt = "\n".join(parts).strip()
         if not task_prompt:
@@ -576,7 +588,7 @@ class AgentLoop:
         if background:
             thread = threading.Thread(
                 target=self._run_background_agent,
-                args=(task_prompt, conversation_uuid),
+                args=(task_prompt, conversation_uuid, validated_report_type),
                 name="nova-background-agent",
                 daemon=True,
             )
@@ -585,6 +597,17 @@ class AgentLoop:
             ]
             self.background_threads.append(thread)
             thread.start()
+            if validated_report_type == ReportType.CALL:
+                return (
+                    "Background agent started. When it finishes, Nova will "
+                    "phone the user to report the result. Tell the user to "
+                    "expect a call rather than to watch for an update."
+                )
+            if validated_report_type == ReportType.EMAIL:
+                return (
+                    "Background agent started. When it finishes, its summary "
+                    "will be emailed to the user and also posted as an update."
+                )
             return (
                 "Background agent started. When it finishes, its summary will "
                 "be posted as an update — there is nothing to wait for now; "
@@ -593,8 +616,56 @@ class AgentLoop:
 
         return self._run_agent_loop(task_prompt)
 
+    @staticmethod
+    def _validate_report_type(report_type: str | None) -> "ReportType | None":
+        if report_type is None:
+            return None
+        candidate = str(report_type).strip().lower()
+        if not candidate:
+            return None
+        try:
+            return ReportType(candidate)
+        except ValueError:
+            raise ToolExecutionError(
+                f"Unknown report_type '{report_type}'. Valid types are "
+                f"{[str(t) for t in ReportType]}.",
+                recoverable=True,
+            )
+
+    @staticmethod
+    def _report_medium_brief(report_type: "ReportType") -> str:
+        """
+        Tell the agent what its summary is going to become.
+
+        Deliberately not permission to deliver: delivery happens system-side
+        after the run, so this only shapes how the final summary is written.
+        """
+        if report_type == ReportType.CALL:
+            return (
+                "When you finish, Nova will phone the user and report your "
+                "summary out loud, so write that summary to be spoken. Lead "
+                "with the outcome in one sentence, keep the whole thing to a "
+                "few sentences, and leave out code, file paths, URLs, and "
+                "anything else that cannot be read aloud. Do not try to place "
+                "the call yourself — that is handled for you."
+            )
+        if report_type == ReportType.EMAIL:
+            return (
+                "When you finish, your summary will be emailed to the user "
+                "verbatim, so write it as the body of that email. Do not send "
+                "any email yourself — that is handled for you."
+            )
+        return (
+            f"When you finish, your summary is intended to reach the user by "
+            f"{report_type}. Write it accordingly, and do not try to send it "
+            "yourself."
+        )
+
     def _run_background_agent(
-        self, task_prompt: str, conversation_uuid: str | None
+        self,
+        task_prompt: str,
+        conversation_uuid: str | None,
+        report_type: "ReportType | None" = None,
     ) -> None:
         """
         Body of a background=True run: do the work, then record an Update.
@@ -652,6 +723,7 @@ class AgentLoop:
                 or "A background task finished but produced no summary.",
                 project_id=project_id,
                 conversation_uuid=linked_conversation_uuid,
+                report_type=str(report_type) if report_type else None,
             )
         except Exception as exc:
             print(f"Background agent failed to record its update: {exc}")

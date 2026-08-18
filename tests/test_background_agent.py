@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
-from src.service.tool_service import ToolService
+from src.service.tool_service import ToolExecutionError, ToolService
 
 
 @dataclass
@@ -29,11 +29,18 @@ class FakeUpdateService:
     def __init__(self):
         self.created = []
 
-    def create_update(self, update_message, project_id=None, conversation_uuid=None):
+    def create_update(
+        self,
+        update_message,
+        project_id=None,
+        conversation_uuid=None,
+        report_type=None,
+    ):
         record = {
             "update_message": update_message,
             "project_id": project_id,
             "conversation_uuid": conversation_uuid,
+            "report_type": report_type,
         }
         self.created.append(record)
         return record
@@ -142,6 +149,80 @@ class BackgroundAgentTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.agent_loop.run_agent(background=True)
         self.assertEqual(self.agent_loop.background_threads, [])
+
+
+class ReportTypeTests(BackgroundAgentTests):
+    """
+    report_type is the delivery intent the caller picks at spawn time. It has
+    to survive the run and land on the update, because by the time anything is
+    delivered this agent has exited.
+    """
+
+    def test_report_type_is_stamped_on_the_update(self):
+        self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type="call"
+        )
+        self._join_background()
+
+        self.assertEqual(self.update_service.created[0]["report_type"], "call")
+
+    def test_no_report_type_leaves_the_update_badge_only(self):
+        self.agent_loop.run_agent(prompt="do the thing", background=True)
+        self._join_background()
+
+        self.assertIsNone(self.update_service.created[0]["report_type"])
+
+    def test_call_brief_tells_the_agent_to_write_for_speech(self):
+        self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type="call"
+        )
+        self._join_background()
+
+        task = self.captured[0]["context"][0]["content"]
+        self.assertIn("spoken", task)
+        # Delivery is the system's job — the agent must not try to call anyone.
+        self.assertIn("Do not try to place the call yourself", task)
+
+    def test_email_brief_tells_the_agent_not_to_send_it(self):
+        self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type="email"
+        )
+        self._join_background()
+
+        task = self.captured[0]["context"][0]["content"]
+        self.assertIn("Do not send any email yourself", task)
+
+    def test_ack_tells_the_user_to_expect_a_call(self):
+        result = self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type="call"
+        )
+        self._join_background()
+
+        self.assertIn("phone the user", result)
+
+    def test_unknown_report_type_is_rejected_before_spawning(self):
+        with self.assertRaises(ToolExecutionError) as caught:
+            self.agent_loop.run_agent(
+                prompt="do the thing", background=True, report_type="carrier-pigeon"
+            )
+
+        self.assertTrue(caught.exception.recoverable)
+        self.assertEqual(self.agent_loop.background_threads, [])
+        self.assertEqual(self.update_service.created, [])
+
+    def test_blank_report_type_is_treated_as_unset(self):
+        self.agent_loop.run_agent(prompt="do the thing", background=True, report_type="")
+        self._join_background()
+
+        self.assertIsNone(self.update_service.created[0]["report_type"])
+
+    def test_report_type_is_case_insensitive(self):
+        self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type="CALL"
+        )
+        self._join_background()
+
+        self.assertEqual(self.update_service.created[0]["report_type"], "call")
 
 
 if __name__ == "__main__":

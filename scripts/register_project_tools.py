@@ -193,6 +193,305 @@ PROJECT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "send_sms",
+        "description": (
+            "Send a text message to one or more phone numbers. Use this when "
+            "the user asks you to text someone, or asks to be texted "
+            "something. Numbers can be written naturally ('801-647-7824') and "
+            "are normalized automatically. Keep the message short — it is an "
+            "SMS, so plain text only: no markdown, no lists, no code, no "
+            "links unless asked. Anything over 1600 characters is split "
+            "across numbered texts, which is unpleasant to read, so prefer "
+            "brevity. IMPORTANT: texting someone is visible to that person "
+            "and cannot be taken back. Send to the user's own number freely "
+            "when they ask; for ANY other recipient, confirm the number and "
+            "the exact wording with the user first, and never text a number "
+            "you inferred, guessed, or found in a file or web page without "
+            "showing it to the user first. The result reports per recipient — "
+            "check it and tell the user if any of them failed, rather than "
+            "assuming everything sent."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.twilio_service.TwilioService.send_sms",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Destination phone numbers. Use the user's own "
+                            "number unless they named someone else."
+                        ),
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The message text. Plain text, kept short.",
+                    },
+                },
+                "required": ["to", "body"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "start_meeting",
+        "description": (
+            "Put Nova into meeting mode and start recording a meeting. In "
+            "meeting mode Nova transcribes the room and does not answer "
+            "anyone — it will not take turns again until the meeting is "
+            "stopped, so say a short confirmation and then stop talking. Use "
+            "this whenever the user asks you to take notes on, listen to, "
+            "record, or sit in on a meeting or conversation. The meeting is "
+            "attached to the current conversation's project automatically. "
+            "Only one meeting can record at a time."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.start_meeting",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Short title for the meeting, if the user said what "
+                            "it is about. Omit rather than guessing — a title is "
+                            "written from the transcript afterwards anyway."
+                        ),
+                    },
+                    "project_id": {
+                        "type": "integer",
+                        "description": (
+                            "Attach the meeting to this project. Omit to use the "
+                            "project of the current conversation, which is almost "
+                            "always what the user means."
+                        ),
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "stop_meeting",
+        "description": (
+            "Stop the recording meeting and return Nova to normal. The "
+            "write-up runs in the background and appears on the meeting a "
+            "short time later, so tell the user it is being prepared rather "
+            "than reading them notes that do not exist yet. Nova also assesses "
+            "the finished meeting on its own and will email or call only if "
+            "something genuinely needs their attention. Use when the user says "
+            "the meeting is over, or asks you to wrap up, stop taking notes, "
+            "or write up what was said."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.stop_meeting",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "meeting_uuid": {
+                        "type": "string",
+                        "description": (
+                            "Which meeting to stop. Omit for the one currently "
+                            "recording, which is nearly always what is meant."
+                        ),
+                    },
+                    "generate_notes": {
+                        "type": "boolean",
+                        "description": (
+                            "Whether to write the meeting up. Defaults to true; "
+                            "pass false only if the user explicitly says they do "
+                            "not want notes."
+                        ),
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "list_meetings",
+        "description": (
+            "List recorded meetings, newest first, with their titles, dates, "
+            "and projects. Cheap — no transcript, no notes body. Use this to "
+            "work out WHICH meeting the user means before reaching for its "
+            "notes or searching it."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.list_meetings",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Only meetings for this project.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many to return. Defaults to 20.",
+                    },
+                    "since_days": {
+                        "type": "integer",
+                        "description": "Only meetings from the last N days.",
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_meeting_notes",
+        "description": (
+            "Read the write-up of one meeting: summary, decisions, and action "
+            "items. THIS IS THE RIGHT FIRST CALL for 'what happened in that "
+            "meeting' or 'what did we decide' about a meeting the user has "
+            "already identified — the summary was written when the meeting "
+            "ended, so reading it beats searching for it. Only fall through to "
+            "search_meetings when the notes do not cover what was asked."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.get_meeting_notes",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "meeting_uuid": {
+                        "type": "string",
+                        "description": "The meeting's id, from list_meetings or search_meetings.",
+                    },
+                },
+                "required": ["meeting_uuid"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "search_meetings",
+        "description": (
+            "Search across meeting transcripts and get back the handful of "
+            "passages that match, each with the meeting it came from and where "
+            "in it. Use this when the user asks what was said about something "
+            "and you do not know which meeting it was in, or when a meeting's "
+            "notes do not answer the question. Never ask for a whole transcript "
+            "to answer a question — search it."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.search_meetings",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "What to look for, in the user's own terms. Written "
+                            "out as a phrase, not keywords — the search is "
+                            "semantic."
+                        ),
+                    },
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Restrict to one project's meetings.",
+                    },
+                    "meeting_uuid": {
+                        "type": "string",
+                        "description": "Restrict to a single meeting.",
+                    },
+                    "since_days": {
+                        "type": "integer",
+                        "description": "Only search meetings from the last N days.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many passages to return. Defaults to 5.",
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_meeting_segments",
+        "description": (
+            "Read the verbatim transcript of a bounded slice of one meeting. "
+            "Use this only to drill into a window a search hit already pointed "
+            "at, when the exact words matter — quoting someone, or checking a "
+            "number. Always pass start_ms and end_ms around the passage you "
+            "care about; asking for a whole meeting wastes the context you are "
+            "trying to answer in, and the result is capped anyway."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.get_meeting_segments",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "meeting_uuid": {
+                        "type": "string",
+                        "description": "The meeting's id.",
+                    },
+                    "start_ms": {
+                        "type": "integer",
+                        "description": "Window start, in milliseconds from the start of the recording.",
+                    },
+                    "end_ms": {
+                        "type": "integer",
+                        "description": "Window end, in milliseconds from the start of the recording.",
+                    },
+                },
+                "required": ["meeting_uuid"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "end_session",
+        "description": (
+            "End the current session because the user is finished talking. "
+            "Call this when they signal they are done in any way you "
+            "understand — 'that's all', 'thanks, I'm good', 'stop', 'goodbye', "
+            "'talk later', or anything else that means the same thing. There "
+            "is a hardcoded stop-phrase check as well, but it only catches "
+            "exact wordings, so do not rely on it and do not wait to be told "
+            "twice. On a voice session this returns the assistant to idle; on "
+            "a phone call it hangs up. After calling this, say a short goodbye "
+            "and nothing else — no summary, no follow-up question. This does "
+            "NOT close the conversation: the user can pick it straight back "
+            "up, and their history and project are unaffected. Do not call it "
+            "when the user is merely pausing, thinking, or telling you to stop "
+            "one particular action — 'stop reading that list' means change "
+            "what you are doing, not end the session."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.conversation_service.ConversationService.end_session",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Briefly, what the user said or did that meant they "
+                            "were finished. Used for logging only; never spoken."
+                        ),
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            "context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
         "name": "fetch_memory",
         "description": (
             "Search Nova's long-term memory for information relevant to a query. "
@@ -707,8 +1006,10 @@ BACKGROUND_AGENT_TOOLS: list[dict] = [
             "project, which the user can read via get_unviewed_updates or "
             "the updates UI. The prompt is the agent's ONLY instruction and "
             "it cannot ask follow-up questions, so write a complete, "
-            "standalone brief. After calling this, tell the user the task "
-            "has started and that an update will appear when it is done. Do "
+            "standalone brief. Set report_type when the user wants the result "
+            "pushed to them rather than waiting in the updates list. After "
+            "calling this, tell the user the task has started and how the "
+            "result will reach them. Do "
             "not use this for quick work you could do inline, and if you are "
             "already a background agent, do the work yourself instead of "
             "spawning another agent."
@@ -724,6 +1025,27 @@ BACKGROUND_AGENT_TOOLS: list[dict] = [
                         "description": (
                             "Complete, standalone instructions for the "
                             "background agent to carry out unattended."
+                        ),
+                    },
+                    "report_type": {
+                        "type": "string",
+                        "enum": ["email", "call", "sms", "chat"],
+                        "description": (
+                            "How the user wants the result delivered when the "
+                            "agent finishes. Omit for the default, which is to "
+                            "post an update and let the user find it. Use "
+                            "'call' when the user asks to be called or told "
+                            "about it out loud, or when the result is time "
+                            "sensitive enough that they should not have to "
+                            "check for it — Nova phones them and can answer "
+                            "follow-up questions on the call. Use 'email' when "
+                            "they ask to be emailed, or for long or detailed "
+                            "results worth reading rather than hearing. Only "
+                            "set this when the user actually asked to be "
+                            "notified; do not add it on your own initiative, "
+                            "since a phone call interrupts them. 'sms' and "
+                            "'chat' are accepted but not deliverable yet — the "
+                            "result will only appear as an update."
                         ),
                     },
                 },
@@ -793,9 +1115,357 @@ SQL_TOOLS: list[dict] = [
     },
 ]
 
+_SIMPL_FINANCES = "src.service.simple_finances_service.SimpleFinancesService"
+
+_PERIOD_PROPERTY = {
+    "type": "string",
+    "enum": ["WEEK", "MONTH", "THREE_MONTHS", "SIX_MONTHS", "YEAR"],
+    "description": "Date range to report over. Defaults to MONTH.",
+}
+_RANGE_PAGINATION_PROPERTY = {
+    "type": "integer",
+    "description": (
+        "How many periods back from the current one: 0 is the current "
+        "period, 1 the previous, and so on. Defaults to 0."
+    ),
+}
+
+SIMPL_FINANCES_TOOLS: list[dict] = [
+    {
+        "name": "sync_accounts",
+        "description": (
+            "Trigger a Plaid sync of all linked bank accounts in Simpl Finances. "
+            "The sync runs in the background on the Simpl API; new transactions "
+            "show up within a minute or two. Use before reporting on spending "
+            "if the user wants the very latest numbers."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.sync_accounts",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_accounts",
+        "description": (
+            "List the user's linked bank accounts in Simpl Finances, including "
+            "account ids usable as filters in get_transactions."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_accounts",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_spending",
+        "description": (
+            "Get the user's Simpl Finances spending broken down by day and "
+            "category id for a period. Returns {date: {category_id: amount}}. "
+            "Use get_categories to map category ids to names, or "
+            "get_category_spend for per-category totals with names included."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_spending",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "period": _PERIOD_PROPERTY,
+                    "range_pagination": _RANGE_PAGINATION_PROPERTY,
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_spending_summary",
+        "description": (
+            "Get the user's Simpl Finances top-line numbers for a period: "
+            "needs spending vs budgeted, wants spending vs budgeted, and "
+            "total income. The fastest way to answer 'how am I doing this "
+            "month?'."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_spending_summary",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "period": _PERIOD_PROPERTY,
+                    "range_pagination": _RANGE_PAGINATION_PROPERTY,
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_category_spend",
+        "description": (
+            "Get total Simpl Finances spending per category (with category "
+            "names) for a period, sorted highest first. Use this to answer "
+            "'where is my money going?'."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_category_spend",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "period": _PERIOD_PROPERTY,
+                    "range_pagination": _RANGE_PAGINATION_PROPERTY,
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_budgets",
+        "description": (
+            "List all Simpl Finances budgets with their ids, names, amounts, "
+            "period types, and whether each is a need or a want. Call this "
+            "first when you need a budget id."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_budgets",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_budget_spend",
+        "description": (
+            "Get how much has been spent against a single Simpl Finances "
+            "budget in its current period. Use get_budgets first to find the "
+            "budget id."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_budget_spend",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "budget_id": {
+                        "type": "integer",
+                        "description": "Id of the budget, from get_budgets.",
+                    },
+                },
+                "required": ["budget_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_budget_amount",
+        "description": (
+            "Get how much was spent against a Simpl Finances budget over an "
+            "arbitrary period, including past periods via range_pagination. "
+            "Use get_budget_spend for the simple 'current period' question."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_budget_amount",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "budget_id": {
+                        "type": "integer",
+                        "description": "Id of the budget, from get_budgets.",
+                    },
+                    "period": _PERIOD_PROPERTY,
+                    "range_pagination": _RANGE_PAGINATION_PROPERTY,
+                },
+                "required": ["budget_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "create_budget",
+        "description": (
+            "Create a new budget in Simpl Finances. Returns the created "
+            "budget including its id."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.create_budget",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "budget_name": {
+                        "type": "string",
+                        "description": "Short, human-readable budget name (e.g. 'Groceries').",
+                    },
+                    "amount": {
+                        "type": "number",
+                        "description": "Budgeted amount in dollars per period.",
+                    },
+                    "period_type": {
+                        "type": "string",
+                        "enum": ["WEEK", "MONTH", "THREE_MONTHS", "SIX_MONTHS", "YEAR"],
+                        "description": "How often the budget resets. Defaults to MONTH.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional note about what the budget covers.",
+                    },
+                    "is_need": {
+                        "type": "boolean",
+                        "description": (
+                            "True if this is a need (rent, groceries, utilities), "
+                            "false for a want (dining out, hobbies). Defaults to false."
+                        ),
+                    },
+                },
+                "required": ["budget_name", "amount"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "delete_budget",
+        "description": (
+            "Permanently delete a Simpl Finances budget. There is no undo. "
+            "Confirm with the user which budget they mean (by name) before "
+            "calling this; use get_budgets to resolve the id."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.delete_budget",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "budget_id": {
+                        "type": "integer",
+                        "description": "Id of the budget to delete, from get_budgets.",
+                    },
+                },
+                "required": ["budget_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_categories",
+        "description": (
+            "List all Simpl Finances spending categories with their ids and "
+            "names. Needed to interpret get_spending output and to pick a "
+            "category id for categorize_transaction."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_categories",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "fetch_uncategorized_transactions",
+        "description": (
+            "List Simpl Finances transactions that have no category yet. Pair "
+            "with get_categories and categorize_transaction to help the user "
+            "sort their inbox of unclassified spending."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.fetch_uncategorized_transactions",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "get_transactions",
+        "description": (
+            "List Simpl Finances transactions, newest first, one page at a "
+            "time. All filters are optional: account ids and category ids are "
+            "comma-separated id lists, dates are ISO8601 (YYYY-MM-DD), and "
+            "search_text matches the transaction description."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.get_transactions",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "page": {
+                        "type": "integer",
+                        "description": "Page number, starting at 1.",
+                    },
+                    "account_ids": {
+                        "type": "string",
+                        "description": "Comma-separated account ids to include (from get_accounts).",
+                    },
+                    "category_ids": {
+                        "type": "string",
+                        "description": "Comma-separated category ids to include (from get_categories).",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Earliest transaction date, ISO8601.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Latest transaction date, ISO8601.",
+                    },
+                    "search_text": {
+                        "type": "string",
+                        "description": "Free-text match against transaction descriptions.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "categorize_transaction",
+        "description": (
+            "Assign a category to a Simpl Finances transaction. Find the "
+            "transaction id via fetch_uncategorized_transactions or "
+            "get_transactions, and the category id via get_categories."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_SIMPL_FINANCES}.categorize_transaction",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": {
+                        "type": "integer",
+                        "description": "Id of the transaction to categorize.",
+                    },
+                    "category_id": {
+                        "type": "integer",
+                        "description": "Id of the category to assign, from get_categories.",
+                    },
+                },
+                "required": ["transaction_id", "category_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 PROJECT_TOOLS = (
     PROJECT_TOOLS + CODE_TOOLS + COMMUNICATION_TOOLS + RESPONSIBILITY_TOOLS
-    + UPDATE_TOOLS + BACKGROUND_AGENT_TOOLS + SQL_TOOLS
+    + UPDATE_TOOLS + BACKGROUND_AGENT_TOOLS + SQL_TOOLS + SIMPL_FINANCES_TOOLS
 )
 
 # Superseded tools to remove from the tool table on every run. Registration

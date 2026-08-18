@@ -1,13 +1,34 @@
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import TYPE_CHECKING, BinaryIO
 
 import requests
+
+if TYPE_CHECKING:
+    import numpy as np
 
 ELEVEN_LABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVEN_LABS_STT_MODEL_ID = "scribe_v2"
 DEFAULT_WHISPER_MODEL_SIZE = "distil-large-v3" #NOTE: Options are base, and distil-large-v3
 DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
+
+SAMPLE_RATE = 16000
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
+    """A span of transcript, timed in seconds from the start of the audio given."""
+
+    start: float
+    end: float
+    text: str
+
+    def shifted(self, seconds: float) -> "TranscriptSegment":
+        """Same segment expressed relative to a different origin."""
+        return TranscriptSegment(
+            start=self.start + seconds, end=self.end + seconds, text=self.text
+        )
 
 
 class ASRService:
@@ -66,15 +87,164 @@ class ASRService:
             return self._transcribe_mlx(audio, language)
         return self._transcribe_whisper(audio, language)
 
+    # ---------- timed transcription ----------
+
+    @staticmethod
+    def decode_audio(audio: "str | Path | BinaryIO") -> "np.ndarray":
+        """
+        Decode anything ffmpeg-free into 16 kHz mono float32 samples.
+
+        Exposed so callers that need the raw timeline — meeting capture slices
+        the tail off a growing recording — can decode once and reuse it rather
+        than handing a path to each method separately.
+        """
+        from faster_whisper.audio import decode_audio
+
+        return decode_audio(audio, sampling_rate=SAMPLE_RATE)
+
+    def transcribe_segments(
+        self,
+        audio: "str | Path | BinaryIO | np.ndarray",
+        language: str | None = None,
+    ) -> list[TranscriptSegment]:
+        """
+        Transcribe to timed segments rather than one flat string.
+
+        Timestamps are relative to the start of the audio passed in and account
+        for VAD trimming: the local providers transcribe speech-only audio with
+        the silence removed, so raw Whisper timestamps are in *trimmed* time and
+        would drift further out of true with every silent gap. They are mapped
+        back before returning.
+        """
+        if self.provider == "elevenlabs":
+            return self._segments_eleven_labs(audio, language)
+        if self.provider == "mlx_whisper":
+            return self._segments_mlx(audio, language)
+        return self._segments_whisper(audio, language)
+
+    def _segments_mlx(
+        self, audio: "str | Path | BinaryIO | np.ndarray", language: str | None
+    ) -> list[TranscriptSegment]:
+        import mlx_whisper
+        import numpy as np
+        from faster_whisper.vad import (
+            SpeechTimestampsMap,
+            VadOptions,
+            collect_chunks,
+            get_speech_timestamps,
+        )
+
+        samples = audio if isinstance(audio, np.ndarray) else self.decode_audio(audio)
+        speech_chunks = get_speech_timestamps(samples, VadOptions())
+        if not speech_chunks:
+            return []
+        audio_chunks, _ = collect_chunks(samples, speech_chunks)
+        trimmed = np.concatenate(audio_chunks)
+
+        result = mlx_whisper.transcribe(
+            trimmed,
+            path_or_hf_repo=self.mlx_model_repo,
+            language=language,
+            condition_on_previous_text=False,
+        )
+
+        # Undo the VAD trimming so the times mean something to the caller.
+        timestamps = SpeechTimestampsMap(speech_chunks, SAMPLE_RATE)
+        segments: list[TranscriptSegment] = []
+        for raw in result.get("segments") or []:
+            text = (raw.get("text") or "").strip()
+            if not text:
+                continue
+            segments.append(
+                TranscriptSegment(
+                    start=timestamps.get_original_time(float(raw.get("start", 0.0))),
+                    end=timestamps.get_original_time(
+                        float(raw.get("end", 0.0)), is_end=True
+                    ),
+                    text=text,
+                )
+            )
+        return segments
+
+    def _segments_whisper(
+        self, audio: "str | Path | BinaryIO | np.ndarray", language: str | None
+    ) -> list[TranscriptSegment]:
+        # faster-whisper restores timestamps itself when vad_filter is on, so
+        # this path must NOT map them a second time.
+        segments, _ = self.whisper.transcribe(
+            audio, language=language, beam_size=5, vad_filter=True
+        )
+        return [
+            TranscriptSegment(
+                start=float(segment.start),
+                end=float(segment.end),
+                text=segment.text.strip(),
+            )
+            for segment in segments
+            if segment.text and segment.text.strip()
+        ]
+
+    def _segments_eleven_labs(
+        self, audio: "str | Path | BinaryIO | np.ndarray", language: str | None
+    ) -> list[TranscriptSegment]:
+        """
+        Scribe returns word-level times; group them into sentence-ish segments.
+
+        Splits on a pause longer than _WORD_GAP_SECONDS or on sentence-ending
+        punctuation, which is close enough to what the local providers emit for
+        the callers that consume these.
+        """
+        handle = audio
+        opened = None
+        if isinstance(audio, (str, Path)):
+            opened = open(audio, "rb")
+            handle = opened
+        try:
+            payload = self._eleven_labs_request(handle, language)
+        finally:
+            if opened is not None:
+                opened.close()
+
+        words = payload.get("words") or []
+        if not words:
+            text = (payload.get("text") or "").strip()
+            return [TranscriptSegment(0.0, 0.0, text)] if text else []
+
+        segments: list[TranscriptSegment] = []
+        buffer: list[str] = []
+        start = end = 0.0
+        for word in words:
+            if word.get("type") not in (None, "word"):
+                continue
+            token = (word.get("text") or "").strip()
+            if not token:
+                continue
+            word_start = float(word.get("start", 0.0))
+            word_end = float(word.get("end", word_start))
+            if not buffer:
+                start = word_start
+            elif word_start - end > _WORD_GAP_SECONDS:
+                segments.append(TranscriptSegment(start, end, " ".join(buffer)))
+                buffer, start = [], word_start
+            buffer.append(token)
+            end = word_end
+            if token.endswith((".", "?", "!")):
+                segments.append(TranscriptSegment(start, end, " ".join(buffer)))
+                buffer = []
+        if buffer:
+            segments.append(TranscriptSegment(start, end, " ".join(buffer)))
+        return segments
+
+    # ---------- flat transcription ----------
+
     def _transcribe_mlx(self, audio: str | BinaryIO, language: str | None) -> str:
         import mlx_whisper
         import numpy as np
-        from faster_whisper.audio import decode_audio
         from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
 
         # mlx_whisper has no built-in VAD and hallucinates text on silence/noise,
         # so reuse faster-whisper's bundled Silero VAD to keep only speech samples.
-        samples = decode_audio(audio, sampling_rate=16000)
+        samples = audio if isinstance(audio, np.ndarray) else self.decode_audio(audio)
         speech_chunks = get_speech_timestamps(samples, VadOptions())
         if not speech_chunks:
             return ""
@@ -100,6 +270,9 @@ class ASRService:
         return " ".join(segment.text.strip() for segment in segments).strip()
 
     def _transcribe_eleven_labs(self, audio: BinaryIO, language: str | None) -> str:
+        return (self._eleven_labs_request(audio, language).get("text") or "").strip()
+
+    def _eleven_labs_request(self, audio: BinaryIO, language: str | None) -> dict:
         data: dict[str, str] = {
             "model_id": self.eleven_labs_model_id,
             "tag_audio_events": "false",
@@ -119,4 +292,9 @@ class ASRService:
                 f"ElevenLabs STT failed ({response.status_code}). "
                 f"Check ELEVEN_LABS_API_KEY. Response: {response.text[:1000]}"
             )
-        return (response.json().get("text") or "").strip()
+        return response.json()
+
+
+# Pause long enough to read as a new sentence when the provider gives us words
+# but no segment boundaries.
+_WORD_GAP_SECONDS = 0.8

@@ -5,6 +5,7 @@ Entry point for scheduled jobs that run outside the request path:
 
   * process_conversations - distills closed conversations into memory chunks
   * check_for_responsibilities - runs responsibilities that are due
+  * deliver_pending_updates - emails or phones out updates flagged for it
 
 Register further jobs by appending a ScheduledJob to build_jobs().
 
@@ -52,6 +53,12 @@ def _run_check_for_responsibilities() -> None:
     ResponsibilityService().check_for_responsibilities()
 
 
+def _run_deliver_pending_updates() -> None:
+    from src.service.update_delivery_service import UpdateDeliveryService
+
+    UpdateDeliveryService().deliver_pending()
+
+
 def build_jobs() -> list[ScheduledJob]:
     return [
         ScheduledJob(
@@ -66,6 +73,15 @@ def build_jobs() -> list[ScheduledJob]:
             name="check_for_responsibilities",
             interval_seconds=5 * 60,
             run=_run_check_for_responsibilities,
+        ),
+        # Runs often because the latency the user feels is the gap between
+        # "the agent finished" and "the phone rings". The service itself
+        # decides what is actually due, caps how many calls one pass may
+        # place, and holds calls during quiet hours.
+        ScheduledJob(
+            name="deliver_pending_updates",
+            interval_seconds=60,
+            run=_run_deliver_pending_updates,
         ),
     ]
 

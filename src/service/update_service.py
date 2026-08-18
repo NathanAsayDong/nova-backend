@@ -12,6 +12,11 @@ from uuid import UUID
 from src.dao.conversation_dao import ConversationDao
 from src.dao.project_dao import ProjectDao
 from src.dao.update_dao import UpdateDao
+from src.model.report_type import (
+    SUPPORTED_REPORT_TYPES,
+    DeliveryStatus,
+    ReportType,
+)
 from src.model.update import Update
 
 
@@ -46,13 +51,33 @@ class UpdateService:
             "conversation_uuid": (
                 str(update.conversation_uuid) if update.conversation_uuid else None
             ),
+            "report_type": str(update.report_type) if update.report_type else None,
+            "delivery_status": str(update.delivery_status)
+            if update.delivery_status
+            else None,
         }
+
+    @staticmethod
+    def _validate_report_type(report_type: str | None) -> ReportType | None:
+        if report_type is None:
+            return None
+        candidate = str(report_type).strip().lower()
+        if not candidate:
+            return None
+        try:
+            return ReportType(candidate)
+        except ValueError:
+            raise ValueError(
+                f"Unknown report_type '{report_type}'. Valid types are "
+                f"{[str(t) for t in ReportType]}."
+            )
 
     def create_update(
         self,
         update_message: str,
         project_id: int | None = None,
         conversation_uuid: str | None = None,
+        report_type: str | None = None,
     ) -> dict:
         """
         Record a new update for the user to see.
@@ -61,6 +86,13 @@ class UpdateService:
         work has been summarized. Attach the project and/or conversation the
         work came from whenever they are known — that context is what tells
         the user why the agent ran at all.
+
+        `report_type` is the delivery intent chosen when the work was spawned.
+        With one set, the update is queued for UpdateDeliveryService to hand
+        off to the matching channel; without one it is badge-only. An
+        unsupported-but-known type (sms, chat) is recorded on the row and left
+        undelivered rather than rejected, so flagging one never costs the user
+        the update itself.
         """
         update_message = (update_message or "").strip()
         if not update_message:
@@ -77,14 +109,82 @@ class UpdateService:
                 raise ValueError(f"Conversation {conversation_uuid} does not exist.")
             conversation_uuid = str(uuid_value)
 
+        validated_type = self._validate_report_type(report_type)
+        deliverable = validated_type in SUPPORTED_REPORT_TYPES if validated_type else False
+
         created = self.update_dao.create(
             Update(
                 update_message=update_message,
                 project_id=project_id,
                 conversation_uuid=conversation_uuid,
+                report_type=validated_type,
+                delivery_status=(
+                    DeliveryStatus.PENDING if deliverable else DeliveryStatus.NOT_REQUIRED
+                ),
             )
         )
-        return self._to_dict(created)
+
+        result = self._to_dict(created)
+        if validated_type is not None and not deliverable:
+            result["warning"] = (
+                f"Reporting by {validated_type} is not deliverable yet — the "
+                "update was recorded and will appear in the updates list, but "
+                "nothing was sent. Only email and call can be delivered today."
+            )
+        return result
+
+    # ---------- delivery ----------
+
+    def get_pending_deliveries(self) -> list[Update]:
+        """Updates queued for delivery, oldest first. Read by the dispatcher."""
+        return self.update_dao.get_pending_deliveries()
+
+    def claim_for_delivery(self, update_id: int) -> Update | None:
+        """Take ownership of a pending update, or None if already claimed."""
+        return self.update_dao.claim_for_delivery(int(update_id))
+
+    def mark_delivered(self, update_id: int) -> Update | None:
+        """
+        Record a successful delivery.
+
+        Also marks the update viewed: the user has now been emailed it or
+        heard it read out on the phone, so leaving it lit in the badge would
+        be asking them to read the same thing twice.
+        """
+        return self.update_dao.set_delivery_state(
+            int(update_id), DeliveryStatus.DELIVERED, mark_viewed=True
+        )
+
+    def mark_delivery_failed(
+        self, update_id: int, error: str, attempts: int | None = None
+    ) -> Update | None:
+        """Record a terminal delivery failure; the update stays unviewed."""
+        return self.update_dao.set_delivery_state(
+            int(update_id), DeliveryStatus.FAILED, error=str(error), attempts=attempts
+        )
+
+    def requeue_delivery(
+        self, update_id: int, error: str | None = None, attempts: int | None = None
+    ) -> Update | None:
+        """
+        Put a claimed update back on the queue for a later attempt.
+
+        Used when a delivery didn't happen but is still worth trying — an
+        unanswered call, a transient SMTP error — as opposed to one that
+        failed for good.
+        """
+        return self.update_dao.set_delivery_state(
+            int(update_id),
+            DeliveryStatus.PENDING,
+            error=str(error) if error else None,
+            attempts=attempts,
+        )
+
+    def get_update(self, update_id: int) -> Update | None:
+        return self.update_dao.get(int(update_id))
+
+    def get_update_by_call_sid(self, call_sid: str) -> Update | None:
+        return self.update_dao.get_by_call_sid(call_sid)
 
     def get_unviewed_updates(self) -> list[dict]:
         """

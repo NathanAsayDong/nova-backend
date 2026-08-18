@@ -20,6 +20,13 @@ class ConversationService:
     # controller pops entries after each turn to redirect the client.
     _switch_targets: ClassVar[dict[UUID, UUID]] = {}
 
+    # Conversations where Nova decided the user is done talking this turn,
+    # mapping uuid -> the reason it gave. Same lifecycle as _switch_targets:
+    # the tool layer writes it, the controller pops it at the end of the turn
+    # and acts on it in whatever way its transport calls "stop" — going idle
+    # on the browser socket, hanging up on a phone call.
+    _stop_requests: ClassVar[dict[UUID, str]] = {}
+
     def __init__(self):
         self.conversation_dao = ConversationDao()
         self.message_dao = MessageDao()
@@ -211,3 +218,37 @@ class ConversationService:
     def pop_switch_target(self, conversation_uuid: UUID) -> UUID | None:
         """Successor of a conversation closed by switch_project this turn, if any."""
         return ConversationService._switch_targets.pop(conversation_uuid, None)
+
+    def end_session(self, conversation_uuid: str, reason: str | None = None) -> dict:
+        """
+        Signal that the user is finished talking for now.
+
+        Exposed to the agent loop as a tool so Nova can end a session by
+        understanding what the user meant rather than by matching a phrase.
+        The spoken paths have a hardcoded stop-phrase list as a fast path, but
+        it only catches the exact wordings someone thought of in advance —
+        "alright I'm good", "cool, later", or a simple "that's it" all sail
+        past it and leave Nova listening.
+
+        This ends the *session*, not the conversation: the conversation stays
+        open and the user can pick it straight back up. What "end" means is
+        left to the transport — the browser socket returns to idle, a phone
+        call hangs up. conversation_uuid is injected by the harness, not the
+        model.
+        """
+        uuid = UUID(str(conversation_uuid))
+        ConversationService._stop_requests[uuid] = (reason or "").strip() or (
+            "The user indicated they were finished."
+        )
+        return {
+            "status": "ending",
+            "note": (
+                "Say a short goodbye and nothing else. The session ends as soon "
+                "as this turn finishes; the conversation stays open, so the user "
+                "can start talking again whenever they like."
+            ),
+        }
+
+    def pop_stop_request(self, conversation_uuid: UUID) -> str | None:
+        """Reason Nova ended the session this turn, if it did."""
+        return ConversationService._stop_requests.pop(conversation_uuid, None)

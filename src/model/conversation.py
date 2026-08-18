@@ -19,6 +19,9 @@ class Conversation(SQLModel, table=True):
     last_message_timestamp_utc: datetime | None = Field(default=None)
     is_closed: bool = Field(default=False)
     is_processed: bool = Field(default=False)
+    # Set only on conversations conducted over SMS; it is what links an
+    # incoming text back to the thread it belongs to. E.164.
+    sms_phone_number: str | None = Field(default=None)
 
     project: Project | None = Relationship(back_populates="conversations")
     messages: list["Message"] = Relationship(back_populates="conversation")

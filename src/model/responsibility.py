@@ -1,13 +1,13 @@
 from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field
 from datetime import datetime
-from enum import StrEnum
 
-class ResponsibilityReportType(StrEnum):
-    EMAIL = "email"
-    SMS = "sms"
-    CALL = "call"
-    CHAT = "chat"
+from src.model.report_type import ReportType
+
+# Report types are no longer specific to responsibilities — a background agent
+# can be given one too, and both paths converge on the Update that carries it.
+# Kept as an alias so existing call sites and stored values keep working.
+ResponsibilityReportType = ReportType
 
 class Responsibility(SQLModel, table=True):
     __tablename__ = "responsibility"
@@ -22,7 +22,7 @@ class Responsibility(SQLModel, table=True):
     )
     last_run: datetime | None = None
     project_id: int | None = None
-    report_type: ResponsibilityReportType | None = None
+    report_type: ReportType | None = None
 
     def to_payload(self) -> dict:
         return self.model_dump(
@@ -41,12 +41,28 @@ class Responsibility(SQLModel, table=True):
         return base
 
     def report_type_prompt(self) -> str:
-        if self.report_type == ResponsibilityReportType.EMAIL:
-            return f"Report the result of the responsibility to the user by email."
-        elif self.report_type == ResponsibilityReportType.SMS:
-            return f"Report the result of the responsibility to the user by SMS."
-        elif self.report_type == ResponsibilityReportType.CALL:
-            return f"Report the result of the responsibility to the user by call."
-        elif self.report_type == ResponsibilityReportType.CHAT:
-            return f"Report the result of the responsibility to the user by chat."
+        """
+        How this responsibility's outcome reaches the user.
+
+        Delivery is handled system-side once the run produces an Update, so
+        this is context for the agent's own writing — it should know whether
+        its summary will be read on a screen or spoken down a phone line — and
+        never an instruction to deliver anything itself.
+        """
+        if self.report_type == ReportType.EMAIL:
+            return (
+                "Your summary of this run will be emailed to the user verbatim, "
+                "so write it as the body of that email."
+            )
+        elif self.report_type == ReportType.CALL:
+            return (
+                "Nova will phone the user and report this run out loud, using "
+                "your summary as the basis for the conversation. Write it to be "
+                "spoken: lead with the outcome, keep it short, and leave out "
+                "code, file paths, and anything unreadable aloud."
+            )
+        elif self.report_type == ReportType.SMS:
+            return "Your summary of this run will be texted to the user, so keep it very short."
+        elif self.report_type == ReportType.CHAT:
+            return "Your summary of this run will be shown to the user in chat."
         return ""
