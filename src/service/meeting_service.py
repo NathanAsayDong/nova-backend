@@ -77,6 +77,7 @@ class MeetingService:
         # the whole tool surface, and most calls into this service never need
         # a model at all.
         self._agent = None
+        self._claude_service = None
         self.finalize_threads: list[threading.Thread] = []
 
     # ---------- mode ----------
@@ -286,6 +287,61 @@ class MeetingService:
             }
         return {"meeting": self._to_dict(meeting), "notes": self._notes_to_dict(notes)}
 
+    def get_meeting(self, meeting_uuid: str) -> dict:
+        """One meeting with its latest notes. The plain read."""
+        return self.get_meeting_notes(meeting_uuid)
+
+    def update_meeting(
+        self,
+        meeting_uuid: str,
+        title: str | None = None,
+        project_id: int | None = None,
+        clear_project: bool = False,
+    ) -> dict:
+        """
+        Rename a meeting or move it to a different project.
+
+        clear_project detaches it entirely — needed because a null project_id
+        is indistinguishable from "leave it alone" in a partial update.
+        """
+        meeting = self._require_meeting(meeting_uuid)
+
+        changes: dict = {}
+        if title is not None:
+            cleaned = title.strip()
+            if not cleaned:
+                raise MeetingError("A meeting title cannot be empty.")
+            changes["title"] = cleaned[:120]
+        if clear_project:
+            changes["project_id"] = None
+        elif project_id is not None:
+            if self.project_dao.get(int(project_id)) is None:
+                raise MeetingError(f"Project {project_id} does not exist.")
+            changes["project_id"] = int(project_id)
+
+        if not changes:
+            return {"meeting": self._to_dict(meeting)}
+
+        updated = self.meeting_dao.update(meeting.id, changes)
+        return {"meeting": self._to_dict(updated or meeting)}
+
+    def delete_meeting(self, meeting_uuid: str) -> dict:
+        """
+        Delete a meeting and everything derived from it.
+
+        Segments, chunks, and notes cascade in the database. A recording
+        meeting is refused: deleting the row out from under a live capture
+        would leave the socket writing into nothing.
+        """
+        meeting = self._require_meeting(meeting_uuid)
+        if meeting.status == MeetingStatus.RECORDING:
+            raise MeetingError(
+                "That meeting is still recording. Stop it before deleting it."
+            )
+        self._cleanup_audio(meeting.id)
+        self.meeting_dao.delete(meeting.id)
+        return {"status": "deleted", "meeting_uuid": str(meeting.uuid)}
+
     def get_meeting_segments(
         self,
         meeting_uuid: str,
@@ -477,7 +533,14 @@ class MeetingService:
                 f"where they conflict:\n{instructions.strip()}"
             )
 
-        reply = self._agent_loop()._run_agent_loop(prompt)
+        # A plain completion, NOT the agent loop. The transcript is untrusted
+        # text — anyone in the room can say "email the city about the quote" —
+        # and the agent loop would hand that text an agent holding send_email,
+        # run_terminal_command and run_sql. Summarizing needs no tools at all.
+        response = self._claude().get_response(prompt)
+        reply = "".join(
+            block.text for block in response.content if hasattr(block, "text")
+        ).strip()
         parsed = self._extract_json_object(reply) or {}
 
         summary = str(parsed.get("summary_md") or "").strip()
@@ -578,6 +641,13 @@ class MeetingService:
 
             self._agent = AgentLoop()
         return self._agent
+
+    def _claude(self):
+        if self._claude_service is None:
+            from src.service.claude_service import ClaudeService
+
+            self._claude_service = ClaudeService()
+        return self._claude_service
 
     def _build_transcript(self, meeting_id: int) -> str:
         segments = self.meeting_dao.get_segments(meeting_id)

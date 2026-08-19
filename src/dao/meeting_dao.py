@@ -104,6 +104,17 @@ class MeetingDao(BaseDao):
     def set_title(self, id: int, title: str) -> None:
         self.client.table(self._table).update({"title": title}).eq("id", int(id)).execute()
 
+    def update(self, id: int, changes: dict) -> Meeting | None:
+        """Partial update. Callers pass only the columns they mean to change."""
+        if not changes:
+            return self.get(id)
+        response = (
+            self.client.table(self._table).update(changes).eq("id", int(id)).execute()
+        )
+        if not response.data:
+            return None
+        return self._to_model(self._model_class, response.data[0])
+
     def close_stale_recordings(self) -> list[Meeting]:
         """
         Fail any meeting left recording by a crash.

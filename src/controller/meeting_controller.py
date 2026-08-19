@@ -126,6 +126,30 @@ async def get_meeting_segments(
         raise HTTPException(status_code=404, detail=str(exc))
 
 
+@router.patch("/meetings/{meeting_uuid}")
+async def update_meeting(meeting_uuid: str, payload: dict = Body(default={})) -> dict:
+    """Rename a meeting, or move it to (or off) a project."""
+    try:
+        return await asyncio.to_thread(
+            meeting_service.update_meeting,
+            meeting_uuid,
+            title=payload.get("title"),
+            project_id=payload.get("projectId") or payload.get("project_id"),
+            clear_project=bool(payload.get("clearProject")),
+        )
+    except MeetingError as exc:
+        raise _meeting_error(exc)
+
+
+@router.delete("/meetings/{meeting_uuid}")
+async def delete_meeting(meeting_uuid: str) -> dict:
+    """Delete a meeting and everything derived from it."""
+    try:
+        return await asyncio.to_thread(meeting_service.delete_meeting, meeting_uuid)
+    except MeetingError as exc:
+        raise _meeting_error(exc)
+
+
 @router.post("/meetings/{meeting_uuid}/stop")
 async def stop_meeting(meeting_uuid: str, payload: dict = Body(default={})) -> dict:
     """Leave meeting mode. Notes are prepared in the background."""

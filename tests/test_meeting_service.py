@@ -57,6 +57,17 @@ class FakeMeetingDao:
     def set_audio_path(self, id, audio_path):
         self.audio_paths[int(id)] = audio_path
 
+    def update(self, id, changes):
+        meeting = self.meetings.get(int(id))
+        if meeting is None:
+            return None
+        for key, value in changes.items():
+            setattr(meeting, key, value)
+        return meeting
+
+    def delete(self, id):
+        self.meetings.pop(int(id), None)
+
     def close_stale_recordings(self):
         stale = [m for m in self.meetings.values() if m.status == MeetingStatus.RECORDING]
         for meeting in stale:
@@ -156,16 +167,44 @@ class FakeUpdateService:
         return record
 
 
-class FakeAgentLoop:
-    """Stands in for the ReAct loop; returns canned replies in order."""
+class ReplyQueue:
+    """
+    Canned model replies, drawn in order by whichever fake asks next.
+
+    Shared between the two fakes on purpose: notes come from a plain
+    completion and the follow-up from the agent loop, and a finalize run
+    consumes one of each, in that order.
+    """
 
     def __init__(self, replies):
         self.replies = list(replies)
+
+    def take(self):
+        return self.replies.pop(0) if self.replies else ""
+
+
+class FakeClaudeService:
+    """Plain completion. Notes generation deliberately gets no tools."""
+
+    def __init__(self, queue):
+        self.queue = queue
+        self.prompts = []
+
+    def get_response(self, prompt, **kwargs):
+        self.prompts.append(prompt)
+        return SimpleNamespace(content=[SimpleNamespace(text=self.queue.take())])
+
+
+class FakeAgentLoop:
+    """Stands in for the ReAct loop, used only by the follow-up assessment."""
+
+    def __init__(self, queue):
+        self.queue = queue
         self.calls = []
 
     def _run_agent_loop(self, prompt, system=None):
         self.calls.append({"prompt": prompt, "system": system})
-        return self.replies.pop(0) if self.replies else ""
+        return self.queue.take()
 
 
 def build_service(meetings=(), replies=(), conversations=None):
@@ -177,7 +216,9 @@ def build_service(meetings=(), replies=(), conversations=None):
     service.conversation_dao = FakeConversationDao(conversations)
     service.embedding_service = FakeEmbeddingService()
     service.update_service = FakeUpdateService()
-    service._agent = FakeAgentLoop(replies)
+    queue = ReplyQueue(replies)
+    service._claude_service = FakeClaudeService(queue)
+    service._agent = FakeAgentLoop(queue)
     service.finalize_threads = []
     return service
 
@@ -521,6 +562,78 @@ class RetrievalTests(unittest.TestCase):
     def test_malformed_meeting_id_is_an_error(self):
         with self.assertRaises(MeetingError):
             build_service().get_meeting_notes("not-a-uuid")
+
+
+class NotesUseNoToolsTests(unittest.TestCase):
+    def test_notes_come_from_a_plain_completion_not_the_agent_loop(self):
+        # The transcript is untrusted text. Anyone in the room can say
+        # "email the city" and the agent loop would hand that to an agent
+        # holding send_email, run_terminal_command and run_sql.
+        meeting = recording_meeting()
+        service = build_service(meetings=[meeting], replies=['{"summary_md": "x"}'])
+        service.meeting_dao.segments = [
+            MeetingSegment(meeting_id=1, start_ms=0, end_ms=1000, text="talking")
+        ]
+        service._write_notes(meeting)
+        self.assertEqual(len(service._claude_service.prompts), 1)
+        self.assertEqual(service._agent.calls, [])
+
+
+class UpdateMeetingTests(unittest.TestCase):
+    def test_renames(self):
+        meeting = recording_meeting(status=MeetingStatus.COMPLETE)
+        service = build_service(meetings=[meeting])
+        result = service.update_meeting(str(meeting.uuid), title="  Sensor kickoff  ")
+        self.assertEqual(result["meeting"]["title"], "Sensor kickoff")
+
+    def test_rejects_an_empty_title(self):
+        meeting = recording_meeting(status=MeetingStatus.COMPLETE)
+        service = build_service(meetings=[meeting])
+        with self.assertRaises(MeetingError):
+            service.update_meeting(str(meeting.uuid), title="   ")
+
+    def test_moves_to_another_project(self):
+        meeting = recording_meeting(status=MeetingStatus.COMPLETE)
+        service = build_service(meetings=[meeting])
+        service.project_dao = FakeProjectDao(ids=(1, 2))
+        result = service.update_meeting(str(meeting.uuid), project_id=2)
+        self.assertEqual(result["meeting"]["project"]["id"], 2)
+
+    def test_rejects_an_unknown_project(self):
+        meeting = recording_meeting(status=MeetingStatus.COMPLETE)
+        service = build_service(meetings=[meeting])
+        with self.assertRaises(MeetingError):
+            service.update_meeting(str(meeting.uuid), project_id=999)
+
+    def test_clear_project_detaches_it(self):
+        meeting = recording_meeting(status=MeetingStatus.COMPLETE)
+        service = build_service(meetings=[meeting])
+        result = service.update_meeting(str(meeting.uuid), clear_project=True)
+        self.assertIsNone(result["meeting"]["project"])
+
+    def test_no_changes_is_a_no_op_not_an_error(self):
+        meeting = recording_meeting(status=MeetingStatus.COMPLETE)
+        service = build_service(meetings=[meeting])
+        result = service.update_meeting(str(meeting.uuid))
+        self.assertEqual(result["meeting"]["uuid"], str(meeting.uuid))
+
+
+class DeleteMeetingTests(unittest.TestCase):
+    def test_deletes_a_finished_meeting(self):
+        meeting = recording_meeting(status=MeetingStatus.COMPLETE)
+        service = build_service(meetings=[meeting])
+        service._cleanup_audio = lambda meeting_id: None
+        result = service.delete_meeting(str(meeting.uuid))
+        self.assertEqual(result["status"], "deleted")
+        self.assertEqual(service.meeting_dao.meetings, {})
+
+    def test_refuses_to_delete_one_that_is_still_recording(self):
+        meeting = recording_meeting()
+        service = build_service(meetings=[meeting])
+        with self.assertRaises(MeetingError) as ctx:
+            service.delete_meeting(str(meeting.uuid))
+        self.assertIn("still recording", str(ctx.exception))
+        self.assertIn(1, service.meeting_dao.meetings)
 
 
 class RecoveryTests(unittest.TestCase):

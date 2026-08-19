@@ -454,6 +454,84 @@ PROJECT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "update_meeting",
+        "description": (
+            "Rename a meeting, or move it to a different project. Use when the "
+            "user wants a recorded meeting titled properly or filed under the "
+            "right project — 'call that one the sensor kickoff', 'put yesterday's "
+            "meeting under the Borden project'. Find the meeting with "
+            "list_meetings first. Cannot delete a meeting; that is deliberate."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.update_meeting",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "meeting_uuid": {
+                        "type": "string",
+                        "description": "The meeting's id, from list_meetings.",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "New title. Omit to leave unchanged.",
+                    },
+                    "project_id": {
+                        "type": "integer",
+                        "description": (
+                            "Move the meeting to this project. Omit to leave "
+                            "unchanged. Use list_projects to find the id."
+                        ),
+                    },
+                    "clear_project": {
+                        "type": "boolean",
+                        "description": (
+                            "Detach the meeting from its project entirely. Only "
+                            "when the user explicitly wants it unfiled."
+                        ),
+                    },
+                },
+                "required": ["meeting_uuid"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "delete_meeting",
+        "description": (
+            "Permanently delete a meeting, along with its transcript and its "
+            "notes. This cannot be undone and there is no archive to recover "
+            "from. Only call it when the user has clearly asked for that "
+            "specific meeting to be deleted — not to tidy up, not because a "
+            "meeting looks empty or like a test, and never on your own "
+            "initiative. Identify the meeting with list_meetings or "
+            "search_meetings first and make sure it is the one they meant; if "
+            "more than one could match what they said, ask which before "
+            "deleting anything. A meeting that is still recording cannot be "
+            "deleted — stop it first."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.meeting_service.MeetingService.delete_meeting",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "meeting_uuid": {
+                        "type": "string",
+                        "description": (
+                            "The id of the meeting to delete, from "
+                            "list_meetings or search_meetings. Required, so a "
+                            "meeting can never be deleted without having been "
+                            "looked up and identified first."
+                        ),
+                    },
+                },
+                "required": ["meeting_uuid"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
         "name": "end_session",
         "description": (
             "End the current session because the user is finished talking. "
