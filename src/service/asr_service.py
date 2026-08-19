@@ -40,6 +40,24 @@ def _platform_default_provider() -> str:
     return "faster_whisper"  # CTranslate2 picks CUDA when available, else CPU
 
 
+def _register_nvidia_dll_dirs() -> None:
+    """
+    Let CTranslate2 find the pip-installed CUDA libraries on Windows.
+
+    The nvidia-cublas-cu12 / nvidia-cudnn-cu12 wheels put their DLLs under
+    site-packages/nvidia/*/bin, which is not on the Windows DLL search path.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import nvidia
+    except ImportError:
+        return  # wheels not installed; CTranslate2 falls back to CPU
+    for base in nvidia.__path__:
+        for bin_dir in Path(base).glob("*/bin"):
+            os.add_dll_directory(str(bin_dir))
+
+
 class ASRService:
     """Speech-to-text with switchable providers.
 
@@ -80,6 +98,7 @@ class ASRService:
                 "ELEVEN_LABS_STT_MODEL_ID", DEFAULT_ELEVEN_LABS_STT_MODEL_ID
             )
         else:
+            _register_nvidia_dll_dirs()
             from faster_whisper import WhisperModel
 
             model_size = os.getenv("WHISPER_MODEL_SIZE", DEFAULT_WHISPER_MODEL_SIZE)
