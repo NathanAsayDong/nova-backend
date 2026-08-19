@@ -1,4 +1,6 @@
 import os
+import platform
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
@@ -31,13 +33,25 @@ class TranscriptSegment:
         )
 
 
+def _platform_default_provider() -> str:
+    """Best local provider for the machine this process is running on."""
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "mlx_whisper"  # Apple Silicon GPU via MLX
+    return "faster_whisper"  # CTranslate2 picks CUDA when available, else CPU
+
+
 class ASRService:
     """Speech-to-text with switchable providers.
 
     Providers:
-        - "mlx_whisper" (default): runs locally on the Apple Silicon GPU via MLX,
+        - "auto" (default): "mlx_whisper" on Apple Silicon Macs, otherwise
+          "faster_whisper" (which itself uses CUDA when available, else CPU),
+          so the same .env works on macOS and Windows/Linux machines.
+        - "mlx_whisper": runs locally on the Apple Silicon GPU via MLX,
           with Silero VAD pre-filtering to suppress hallucinations on silence.
-        - "faster_whisper": runs locally on CPU via CTranslate2, no ffmpeg needed.
+        - "faster_whisper": runs locally via CTranslate2 (CUDA or CPU), no
+          ffmpeg needed. Tune with WHISPER_DEVICE ("auto"/"cuda"/"cpu") and
+          WHISPER_COMPUTE_TYPE ("int8"/"float16"/...).
         - "elevenlabs": ElevenLabs Scribe API. Scribe has no downloadable weights,
           so this provider requires ELEVEN_LABS_API_KEY and internet access.
 
@@ -45,11 +59,13 @@ class ASRService:
     """
 
     def __init__(self, provider: str | None = None) -> None:
-        self.provider = (provider or os.getenv("ASR_PROVIDER") or "mlx_whisper").strip().lower()
+        self.provider = (provider or os.getenv("ASR_PROVIDER") or "auto").strip().lower()
+        if self.provider == "auto":
+            self.provider = _platform_default_provider()
         if self.provider not in ("mlx_whisper", "faster_whisper", "elevenlabs"):
             raise ValueError(
                 f"Unknown ASR provider '{self.provider}'. "
-                "Expected 'mlx_whisper', 'faster_whisper', or 'elevenlabs'."
+                "Expected 'auto', 'mlx_whisper', 'faster_whisper', or 'elevenlabs'."
             )
 
         if self.provider == "mlx_whisper":
@@ -68,7 +84,9 @@ class ASRService:
 
             model_size = os.getenv("WHISPER_MODEL_SIZE", DEFAULT_WHISPER_MODEL_SIZE)
             # int8 quantization keeps memory low; "auto" picks CUDA when available, else CPU
-            self.whisper = WhisperModel(model_size, device="auto", compute_type="int8")
+            device = os.getenv("WHISPER_DEVICE", "auto")
+            compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+            self.whisper = WhisperModel(model_size, device=device, compute_type=compute_type)
 
     def transcribe_file_path(self, file_path: str | Path, language: str | None = None) -> str:
         if self.provider == "elevenlabs":
