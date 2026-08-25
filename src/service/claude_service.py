@@ -108,6 +108,7 @@ class ClaudeService:
                 )
             kwargs["mcp_servers"] = server_entries
             combined_tools = (combined_tools or []) + toolsets
+            print(f"mcp_servers: {server_entries}")
 
         if combined_tools:
             kwargs["tools"] = combined_tools
