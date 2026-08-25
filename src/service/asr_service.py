@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 ELEVEN_LABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVEN_LABS_STT_MODEL_ID = "scribe_v2"
 DEFAULT_WHISPER_MODEL_SIZE = "distil-large-v3" #NOTE: Options are base, and distil-large-v3
+DEFAULT_COMPUTE_TYPE = "int8"
 DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 
 SAMPLE_RATE = 16000
@@ -40,22 +41,134 @@ def _platform_default_provider() -> str:
     return "faster_whisper"  # CTranslate2 picks CUDA when available, else CPU
 
 
-def _register_nvidia_dll_dirs() -> None:
-    """
-    Let CTranslate2 find the pip-installed CUDA libraries on Windows.
+# CTranslate2 4.x is built against CUDA 12 and cuDNN 9 and requests these by
+# bare name the first time it uses the GPU.
+_REQUIRED_CUDA_DLLS = ("cublas64_12.dll", "cudnn64_9.dll")
 
-    The nvidia-cublas-cu12 / nvidia-cudnn-cu12 wheels put their DLLs under
-    site-packages/nvidia/*/bin, which is not on the Windows DLL search path.
-    """
-    if sys.platform != "win32":
-        return
+# Preload order matters: cuBLAS depends on cuBLASLt, cuDNN on both.
+_CUDA_DLL_PATTERNS = ("cublasLt64_*.dll", "cublas64_*.dll", "cudnn64_*.dll")
+
+_cuda_setup: dict | None = None
+
+
+def _nvidia_wheel_dll_dirs() -> list[Path]:
+    """DLL directories inside the installed nvidia-*-cu12 wheels, if any."""
     try:
         import nvidia
     except ImportError:
-        return  # wheels not installed; CTranslate2 falls back to CPU
+        return []  # wheels not installed
+    dirs: list[Path] = []
     for base in nvidia.__path__:
-        for bin_dir in Path(base).glob("*/bin"):
-            os.add_dll_directory(str(bin_dir))
+        for candidate in sorted(Path(base).glob("*/bin")):
+            if any(candidate.glob("*.dll")):
+                dirs.append(candidate)
+    return dirs
+
+
+def _setup_cuda_libraries() -> dict:
+    """
+    Make the pip-installed CUDA libraries usable by CTranslate2 on Windows.
+
+    The nvidia-cublas-cu12 / nvidia-cudnn-cu12 wheels keep their DLLs in
+    site-packages/nvidia/*/bin, a directory Windows does not search. Adding it
+    to the search path is not enough on its own, because CTranslate2 asks for
+    cuBLAS by bare name and Python 3.8+ dropped PATH from DLL resolution, so
+    each library is also loaded here by absolute path: Windows resolves a later
+    request for the same base name to the module already in the process, which
+    sidesteps the search path entirely.
+
+    Runs once per process; the returned report drives the device choice and
+    scripts/check_asr_env.py.
+    """
+    global _cuda_setup
+    if _cuda_setup is not None:
+        return _cuda_setup
+
+    report: dict = {"wheel_dirs": [], "preloaded": [], "unloadable": {}}
+    if sys.platform != "win32":
+        _cuda_setup = report
+        return report
+
+    import ctypes
+
+    for directory in _nvidia_wheel_dll_dirs():
+        os.add_dll_directory(str(directory))  # so each DLL can find its siblings
+        report["wheel_dirs"].append(str(directory))
+
+    for directory in report["wheel_dirs"]:
+        for pattern in _CUDA_DLL_PATTERNS:
+            for dll in sorted(Path(directory).glob(pattern)):
+                try:
+                    ctypes.WinDLL(str(dll))
+                    report["preloaded"].append(dll.name)
+                except OSError as exc:
+                    report["unloadable"][dll.name] = str(exc)
+
+    _cuda_setup = report
+    return report
+
+
+def missing_cuda_libraries() -> list[str]:
+    """CUDA libraries CTranslate2 needs that cannot be loaded the way it asks."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+
+    missing = []
+    for name in _REQUIRED_CUDA_DLLS:
+        try:
+            ctypes.WinDLL(name)
+        except OSError:
+            missing.append(name)
+    return missing
+
+
+def _resolve_whisper_device() -> tuple[str, str]:
+    """
+    Pick the CTranslate2 device and precision for this machine.
+
+    "auto" resolves to CUDA only when the GPU will really work — a device is
+    visible and the CUDA libraries load. Anything short of that falls back to
+    CPU, because a model built on a GPU it cannot use fails at inference time
+    instead of at startup, which shows up as every transcription failing.
+    """
+    import ctranslate2
+
+    requested = (os.getenv("WHISPER_DEVICE") or "auto").strip().lower()
+    compute_type = (os.getenv("WHISPER_COMPUTE_TYPE") or DEFAULT_COMPUTE_TYPE).strip()
+    device = requested
+
+    if requested in ("auto", "cuda"):
+        _setup_cuda_libraries()
+        if ctranslate2.get_cuda_device_count() < 1:
+            if requested == "cuda":
+                print("[asr] WHISPER_DEVICE=cuda but no CUDA device is visible; using CPU.")
+            device = "cpu"
+        elif missing := missing_cuda_libraries():
+            print(
+                f"[asr] CUDA GPU found, but {', '.join(missing)} could not be loaded; "
+                "using CPU. Run `uv sync` to install the NVIDIA library wheels, "
+                "and check that your NVIDIA driver is up to date."
+            )
+            device = "cpu"
+        else:
+            device = "cuda"
+
+    # int8 keeps memory low and is supported everywhere; a device that cannot do
+    # the requested precision would otherwise fail when the model is built.
+    try:
+        supported = ctranslate2.get_supported_compute_types(device)
+    except Exception:  # noqa: BLE001 - never block startup on a capability probe
+        supported = set()
+    if supported and compute_type not in supported:
+        fallback = "int8" if "int8" in supported else "float32"
+        print(
+            f"[asr] compute type '{compute_type}' is unsupported on {device}; "
+            f"using '{fallback}'."
+        )
+        compute_type = fallback
+
+    return device, compute_type
 
 
 class ASRService:
@@ -98,13 +211,11 @@ class ASRService:
                 "ELEVEN_LABS_STT_MODEL_ID", DEFAULT_ELEVEN_LABS_STT_MODEL_ID
             )
         else:
-            _register_nvidia_dll_dirs()
             from faster_whisper import WhisperModel
 
             model_size = os.getenv("WHISPER_MODEL_SIZE", DEFAULT_WHISPER_MODEL_SIZE)
-            # int8 quantization keeps memory low; "auto" picks CUDA when available, else CPU
-            device = os.getenv("WHISPER_DEVICE", "auto")
-            compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+            device, compute_type = _resolve_whisper_device()
+            print(f"[asr] faster-whisper on {device} ({compute_type}), model {model_size}")
             self.whisper = WhisperModel(model_size, device=device, compute_type=compute_type)
 
     def transcribe_file_path(self, file_path: str | Path, language: str | None = None) -> str:
