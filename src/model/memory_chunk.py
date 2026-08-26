@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -29,3 +30,20 @@ class MemoryChunk(SQLModel, table=True):
             exclude_none=True,
             mode="json",
         )
+
+
+@dataclass(frozen=True)
+class MemoryMatch:
+    """
+    A memory chunk together with how well it matched the query.
+
+    The similarity is a property of one lookup rather than of the row, so it
+    lives here instead of on MemoryChunk. Callers that inject memory into a
+    prompt unasked need it: a nearest-neighbour search always returns its k
+    nearest rows, and without a score there is no way to tell "the user's
+    deploy preferences" from "the nearest thing we had, which was nothing
+    like the question".
+    """
+
+    chunk: MemoryChunk
+    similarity: float

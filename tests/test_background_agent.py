@@ -63,6 +63,9 @@ class FakeConversationService:
 class BackgroundAgentTests(unittest.TestCase):
     def setUp(self):
         self.agent_loop = AgentLoop()
+        # Memory injection is covered in its own suite; these tests
+        # assert on prompts, so keep retrieval out of them.
+        self.agent_loop.memory_retrieval_enabled = False
         tool_service = ToolService.__new__(ToolService)
         tool_service.tool_dao = FakeToolDao()
         self.agent_loop.tool_service = tool_service

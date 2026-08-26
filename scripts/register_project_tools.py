@@ -576,9 +576,14 @@ PROJECT_TOOLS: list[dict] = [
             "Memory holds distilled facts, decisions, preferences, and outcomes "
             "from past conversations. The search is automatically scoped to the "
             "current conversation's project (plus general memory); conversations "
-            "without a project search all memory. Use this when the user refers "
-            "to something from the past, asks what you know or remember, or when "
-            "prior context would clearly improve your answer."
+            "without a project search all memory. "
+            "Note that the most relevant memories for the user's current turn "
+            "are already retrieved for you and appear in a <recalled_memory> "
+            "block — there is no need to call this tool to get those. Call it to "
+            "go BEYOND them: when the recalled block is empty or off-target, "
+            "when the user asks about something other than what they just said, "
+            "or when you need to search a different phrasing or a related topic "
+            "than the one that was retrieved automatically."
         ),
         "config": {
             "type": "service_method",

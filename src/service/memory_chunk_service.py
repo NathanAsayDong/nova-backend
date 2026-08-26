@@ -1,4 +1,6 @@
 import json
+import os
+import re
 from uuid import UUID
 
 from src.dao.memory_chunk_dao import MemoryChunkDao
@@ -12,6 +14,50 @@ from src.service.embedding_service import EmbeddingService
 _MAX_CHUNKS_PER_CONVERSATION = 12
 _MAX_TOOL_CONTENT_CHARS = 400
 _FETCH_LIMIT = 5
+
+# --- automatic retrieval (memory injected into the prompt, unasked) ---------
+
+# How many chunks a turn may carry. Five is what the tool returns, and it is
+# the point where the block is still shorter than the reply it informs.
+_RETRIEVAL_LIMIT = 5
+
+# Cosine-similarity floor for injecting a chunk nobody asked for.
+#
+# A nearest-neighbour search always returns its k nearest rows, so without a
+# floor every turn gets five memories whether or not any of them are about the
+# question — which is worse than none, because irrelevant context misleads.
+# 0.40 is the empirical query-to-document balance point for
+# text-embedding-3-small, whose relevant matches land around 0.30-0.55 (much
+# lower than query-to-query similarity, so thresholds quoted for semantic
+# caching do not transfer here).
+_MIN_SIMILARITY = float(os.getenv("NOVA_MEMORY_MIN_SIMILARITY", "0.40"))
+
+# Chunks are summaries, but a runaway one should not crowd out the reply.
+_MAX_INJECTED_CHARS = 320
+
+_WORD_RE = re.compile(r"[A-Za-z0-9']+")
+
+# Turns with nothing to look up. Retrieval on "yes" or "thanks" embeds the
+# acknowledgment and returns whatever happens to sit nearest it in vector
+# space, which is noise by construction.
+_NON_RETRIEVABLE_WORDS = frozenset(
+    {
+        "yes", "yeah", "yep", "yup", "no", "nope", "nah", "ok", "okay",
+        "sure", "thanks", "thank", "you", "please", "stop", "cancel",
+        "nevermind", "never", "mind", "done", "correct", "right", "wrong",
+        "exactly", "perfect", "great", "cool", "nice", "hello", "hi", "hey",
+        "nova", "goodbye", "bye", "go", "on", "it", "do", "that", "this",
+        "again", "continue", "repeat", "louder", "quieter", "and", "the",
+        "a", "an", "i", "we", "sounds", "good", "got",
+    }
+)
+
+_MEMORY_HEADER = (
+    "Recalled from your long-term memory because it looks relevant to what the "
+    "user just said. This is background you already know: use it where it "
+    "helps, ignore it where it does not, and never announce that you looked it "
+    "up. Call fetch_memory when you need something these lines do not cover."
+)
 
 _SUMMARIZE_PROMPT = """You are distilling a finished conversation into long-term memory chunks for an AI assistant named Nova.
 
@@ -149,6 +195,84 @@ class MemoryChunkService:
 
         lines = [f"{index}. {chunk.content}" for index, chunk in enumerate(chunks, start=1)]
         return "Relevant memories (most similar first):\n" + "\n".join(lines)
+
+    @staticmethod
+    def is_retrievable_query(text: str) -> bool:
+        """
+        Whether a turn is worth a memory lookup at all.
+
+        Acknowledgments, confirmations, and one-word commands carry no subject
+        to search for. Embedding them costs a round trip and returns whatever
+        sits nearest a content-free phrase, so they are skipped outright.
+        """
+        words = _WORD_RE.findall((text or "").lower())
+        if not words:
+            return False
+        return any(word not in _NON_RETRIEVABLE_WORDS for word in words)
+
+    def retrieve_context(
+        self,
+        query: str,
+        project_id: int | None = None,
+        limit: int = _RETRIEVAL_LIMIT,
+        min_similarity: float = _MIN_SIMILARITY,
+    ) -> str | None:
+        """
+        Relevance-gated memory for injecting into a prompt, or None.
+
+        The difference from fetch_memory is the gate and the return contract.
+        fetch_memory answers a question the model chose to ask, so returning
+        the five nearest rows is right even when they are a poor match — the
+        model asked. This runs on every turn whether or not memory is wanted,
+        so it returns nothing at all unless the rows actually clear
+        `min_similarity`, and None (rather than prose) so the caller can tell
+        "nothing relevant" from "here is something".
+        """
+        query = (query or "").strip()
+        if not query or not self.is_retrievable_query(query):
+            return None
+
+        embedding = self.embedding_service.embed_text(query)
+        matches = self.memory_chunk_dao.match_memory_chunks(
+            embedding, project_id=project_id, limit=limit
+        )
+
+        lines: list[str] = []
+        for match in matches:
+            if match.similarity < min_similarity:
+                # Ordered by distance, so the first miss ends the useful run.
+                break
+            content = (match.chunk.content or "").strip()
+            if not content:
+                continue
+            if len(content) > _MAX_INJECTED_CHARS:
+                content = content[: _MAX_INJECTED_CHARS - 1].rstrip() + "…"
+            lines.append(f"- {content}")
+
+        if not lines:
+            return None
+        return _MEMORY_HEADER + "\n" + "\n".join(lines)
+
+    def retrieve_context_for_conversation(
+        self, query: str, conversation_uuid: UUID | str | None
+    ) -> str | None:
+        """
+        retrieve_context scoped by the conversation's project, like the tool.
+
+        Falls back to searching all memory when the conversation has no
+        project or cannot be read — a scoping lookup failing is not a reason
+        to answer the turn with no memory at all.
+        """
+        project_id = None
+        if conversation_uuid is not None:
+            try:
+                conversation = self.conversation_service.get_conversation(
+                    UUID(str(conversation_uuid))
+                )
+                project_id = conversation.project_id if conversation else None
+            except Exception as exc:
+                print(f"Memory scoping lookup failed (searching all memory): {exc}")
+        return self.retrieve_context(query, project_id=project_id)
 
     def fetch_memory_for_conversation(self, prompt: str, conversation_uuid: str) -> str:
         """

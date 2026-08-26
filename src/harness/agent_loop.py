@@ -1,8 +1,10 @@
 import json
+import os
 import re
 import threading
 import time
 from collections.abc import Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any
 from uuid import UUID
 import uuid
@@ -18,6 +20,7 @@ from src.model.report_type import ReportType
 from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
 from src.service.mcp_server_service import McpServerService
+from src.service.memory_chunk_service import MemoryChunkService
 from src.service.tool_service import ToolExecutionError, ToolService
 from src.service.update_service import UpdateService
 
@@ -25,6 +28,30 @@ _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
 _MIN_SENTENCE_CHARS = 30
 _AGENT_MAX_ITERATIONS = 50
 _AGENT_LOOP_TIMEOUT_SECONDS = 120.0
+
+# Memory retrieval is overlapped with the turn's other setup work, so it needs
+# somewhere to run. Small and shared: at most one retrieval is in flight per
+# turn, and the sockets serve one user.
+_RETRIEVAL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nova-retrieval")
+
+# Hard ceiling on how long a turn will wait for memory it did not ask for.
+# Retrieval normally finishes inside the setup work it overlaps with; if the
+# embedding API or the vector store is having a bad day, the turn goes ahead
+# without memory rather than making the user wait for it.
+_MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 1.5
+
+# Delimiters for the injected block. Explicit tags rather than bare prose so
+# the model can tell recalled memory from the user's own words, and so the
+# block stays findable in a transcript.
+_MEMORY_OPEN_TAG = "<recalled_memory>"
+_MEMORY_CLOSE_TAG = "</recalled_memory>"
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"false", "0", "no", "off"}
 
 
 class AgentLoop:
@@ -39,6 +66,12 @@ class AgentLoop:
         self.conversation_service: ConversationService | None = None
         self.update_service: UpdateService | None = None
         self.mcp_server_service: McpServerService | None = None
+        # Built on the first turn that needs it, so a deployment without an
+        # embedding key or vector store still serves chat.
+        self.memory_chunk_service: MemoryChunkService | None = None
+        # Whether every turn gets relevant memory pre-loaded into its prompt.
+        # The fetch_memory tool is unaffected either way.
+        self.memory_retrieval_enabled = _env_flag("NOVA_MEMORY_INJECTION", True)
         # Nova's identity — WHO the assistant is and HOW it behaves. Loaded
         # once per process; fails fast at startup if the file is missing.
         self.persona_prompt = PromptEnums.NOVA_PERSONA_PROMPT.load()
@@ -70,6 +103,74 @@ class AgentLoop:
 
     def new_conversation_id(self) -> UUID:
         return uuid.uuid4()
+
+    # ---------- memory retrieval ----------
+    #
+    # Memory used to be reachable only through the fetch_memory tool, which
+    # meant it was only ever consulted when the model thought to ask — and it
+    # rarely did, because deciding to search requires already suspecting there
+    # is something to find. Retrieving on every turn and putting what clears
+    # the relevance gate in front of the model inverts that: recall becomes the
+    # default, and the tool becomes what it should have been all along, a way
+    # to dig deeper than the automatic pass reached.
+
+    def _start_memory_retrieval(
+        self, prompt: str, conversation: Conversation
+    ) -> "Future | None":
+        """
+        Begin the lookup for this turn off-thread, or None when not applicable.
+
+        Returns immediately either way; the work is collected by
+        `_collect_memory` once the turn's other setup is done.
+        """
+        if not self.memory_retrieval_enabled:
+            return None
+        if not (prompt or "").strip():
+            return None
+        try:
+            return _RETRIEVAL_POOL.submit(
+                self._retrieve_memory, prompt, conversation.project_id
+            )
+        except Exception as exc:
+            print(f"Could not start memory retrieval (continuing without it): {exc}")
+            return None
+
+    def _retrieve_memory(self, prompt: str, project_id: int | None) -> str | None:
+        """The retrieval itself. Runs on the pool; never raises."""
+        try:
+            if self.memory_chunk_service is None:
+                self.memory_chunk_service = MemoryChunkService()
+            return self.memory_chunk_service.retrieve_context(
+                prompt, project_id=project_id
+            )
+        except Exception as exc:
+            print(f"Memory retrieval failed (continuing without it): {exc}")
+            return None
+
+    @staticmethod
+    def _collect_memory(memory_future: "Future | None") -> str:
+        """Retrieved memory, or "" if there was none or it ran out of time."""
+        if memory_future is None:
+            return ""
+        try:
+            return memory_future.result(
+                timeout=_MEMORY_RETRIEVAL_TIMEOUT_SECONDS
+            ) or ""
+        except FutureTimeout:
+            print("Memory retrieval exceeded its budget; answering without it.")
+            return ""
+        except Exception as exc:
+            print(f"Memory retrieval failed (continuing without it): {exc}")
+            return ""
+
+    @staticmethod
+    def _augment(prompt: str, memory_block: str) -> str:
+        """The user's turn with any recalled memory in front of it."""
+        if not memory_block:
+            return prompt
+        return (
+            f"{_MEMORY_OPEN_TAG}\n{memory_block}\n{_MEMORY_CLOSE_TAG}\n\n{prompt}"
+        )
 
     def _persist_message(
         self,
@@ -312,6 +413,12 @@ class AgentLoop:
         # ConversationClosedError), creating the row on first use.
         conversation = self.conversation_service.ensure_open_conversation(conversation_uuid)
 
+        # Kick off memory retrieval now and collect it just before the request
+        # goes out. The turn's remaining setup is three network round trips
+        # (history, tools, MCP registry) that do not depend on it, so the
+        # embed-and-search runs inside time the turn was already spending.
+        memory_future = self._start_memory_retrieval(prompt, conversation)
+
         # Rehydrate LLM history from persisted messages when this process
         # hasn't seen the conversation yet (e.g. after a restart).
         if conversation_uuid not in self.conversations:
@@ -319,8 +426,6 @@ class AgentLoop:
                 conversation
             )
         history = self.conversations[conversation_uuid]
-        history.append({"role": "user", "content": prompt})
-        self._persist_message(conversation, MessageRole.USER, prompt)
 
         tool_context = {"conversation_uuid": str(conversation_uuid)}
 
@@ -359,6 +464,20 @@ class AgentLoop:
         # Remote MCP servers, resolved once per turn so a registry change
         # mid-turn can't flip the tool list between iterations.
         mcp_servers = self._load_mcp_servers() or None
+
+        # Everything the retrieval was overlapping with is done; collect it and
+        # open the turn.
+        #
+        # The memory rides on the user message rather than in a system block so
+        # the prompt cache survives: system renders before messages, so a block
+        # that changes every turn would invalidate the whole conversation
+        # history behind it. Appended to history in the augmented form for the
+        # same reason — the next turn's cached prefix has to be byte-identical
+        # to what this turn sent. Only the user's own words are persisted; the
+        # memory is derived, and re-derives on rehydration.
+        memory_block = self._collect_memory(memory_future)
+        history.append({"role": "user", "content": self._augment(prompt, memory_block)})
+        self._persist_message(conversation, MessageRole.USER, prompt)
 
         # At most one spoken acknowledgment per turn: the text Claude writes
         # before its first tool call is real feedback ("Let me pull that up"),

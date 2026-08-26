@@ -1,5 +1,5 @@
 from src.dao.base_dao import BaseDao
-from src.model.memory_chunk import MemoryChunk
+from src.model.memory_chunk import MemoryChunk, MemoryMatch
 
 
 class MemoryChunkDao(BaseDao):
@@ -12,15 +12,16 @@ class MemoryChunkDao(BaseDao):
     def __init__(self):
         super().__init__()
 
-    def get_memory_chunks(
+    def match_memory_chunks(
         self,
         embedding: list[float],
         project_id: int | None = None,
         limit: int = 5,
-    ) -> list[MemoryChunk]:
+    ) -> list[MemoryMatch]:
         """
         Nearest-neighbor search over memory chunks via the match_memory_chunks
-        Postgres function (PostgREST cannot order by pgvector distance itself).
+        Postgres function (PostgREST cannot order by pgvector distance itself),
+        keeping each row's cosine similarity.
 
         When project_id is given, matches chunks for that project plus general
         (project-less) chunks; when None, searches all memory.
@@ -34,16 +35,33 @@ class MemoryChunkDao(BaseDao):
             },
         ).execute()
 
-        chunks: list[MemoryChunk] = []
+        matches: list[MemoryMatch] = []
         for row in response.data or []:
-            chunks.append(
-                MemoryChunk(
-                    id=row.get("id"),
-                    content=row.get("content"),
-                    project_id=row.get("project_id"),
+            matches.append(
+                MemoryMatch(
+                    chunk=MemoryChunk(
+                        id=row.get("id"),
+                        content=row.get("content"),
+                        project_id=row.get("project_id"),
+                    ),
+                    similarity=float(row.get("similarity") or 0.0),
                 )
             )
-        return chunks
+        return matches
+
+    def get_memory_chunks(
+        self,
+        embedding: list[float],
+        project_id: int | None = None,
+        limit: int = 5,
+    ) -> list[MemoryChunk]:
+        """Same search, for callers that only want the rows."""
+        return [
+            match.chunk
+            for match in self.match_memory_chunks(
+                embedding, project_id=project_id, limit=limit
+            )
+        ]
 
     def insert_memory_chunks(self, memory_chunks: list[MemoryChunk]) -> None:
         if not memory_chunks:

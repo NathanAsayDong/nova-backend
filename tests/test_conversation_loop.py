@@ -58,6 +58,9 @@ class FakeConversationService:
 class ConversationLoopStreamTests(unittest.TestCase):
     def setUp(self):
         self.agent_loop = AgentLoop()
+        # Memory injection is covered in its own suite; these tests
+        # assert on prompts, so keep retrieval out of them.
+        self.agent_loop.memory_retrieval_enabled = False
         self.conversation_id = uuid4()
         tool_service = ToolService.__new__(ToolService)
         tool_service.tool_dao = FakeToolDao()
