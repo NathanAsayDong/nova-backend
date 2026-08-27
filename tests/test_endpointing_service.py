@@ -5,6 +5,7 @@ from src.service.endpointing_service import (
     MAX_SILENCE_MS,
     MIN_SILENCE_MS,
     PENDING_SILENCE_MS,
+    STATEMENT_SILENCE_MS,
     endpoint_decision,
     silence_budget_ms,
 )
@@ -29,15 +30,27 @@ class EndpointDecisionTests(unittest.TestCase):
     def test_punctuation_only_transcript_has_no_words(self):
         self.assert_window("...", DEFAULT_SILENCE_MS, "no_words")
 
-    def test_finished_sentence_gets_the_floor(self):
-        self.assert_window(
-            "Send Sophie the deploy notes.", MIN_SILENCE_MS, "terminal_punctuation"
-        )
+    def test_questions_get_the_floor_statements_get_grace(self):
+        # A question mark is rarely fake — a question to an assistant is over
+        # when it is asked. A period is Whisper's habit: real dictation pauses
+        # between complete sentences, so statements keep a thinking pause.
         self.assert_window(
             "What did we decide about the migration?",
             MIN_SILENCE_MS,
-            "terminal_punctuation",
+            "terminal_question",
         )
+        self.assert_window(
+            "Send Sophie the deploy notes.",
+            STATEMENT_SILENCE_MS,
+            "terminal_statement",
+        )
+        self.assertLess(STATEMENT_SILENCE_MS, DEFAULT_SILENCE_MS)
+
+    def test_ellipsis_reads_as_trailing_off(self):
+        # Whisper writes down a trail-off as an ellipsis; it must not be
+        # mistaken for a finished statement's period.
+        self.assert_window("I was thinking...", PENDING_SILENCE_MS, "ellipsis")
+        self.assert_window("I was thinking…", PENDING_SILENCE_MS, "ellipsis")
 
     def test_hard_continuations_hold_the_line(self):
         for transcript in (
@@ -82,9 +95,9 @@ class EndpointDecisionTests(unittest.TestCase):
 
     def test_terminal_punctuation_beats_a_soft_continuation(self):
         # Whisper reads a finished command as finished; trust it over the
-        # particle. "Turn it off." must end fast.
+        # particle. "Turn it off." ends on the statement tier, not the hold.
         for transcript in ("Turn it off.", "Turn the lights on.", "I think so."):
-            self.assert_window(transcript, MIN_SILENCE_MS, "terminal_punctuation")
+            self.assert_window(transcript, STATEMENT_SILENCE_MS, "terminal_statement")
         self.assert_window("What are you waiting for?", MIN_SILENCE_MS)
 
     def test_sentence_final_adverbs_get_at_most_pending(self):
@@ -127,18 +140,19 @@ class EndpointDecisionTests(unittest.TestCase):
         )
 
     def test_windows_are_ordered(self):
-        self.assertLess(MIN_SILENCE_MS, DEFAULT_SILENCE_MS)
+        self.assertLess(MIN_SILENCE_MS, STATEMENT_SILENCE_MS)
+        self.assertLess(STATEMENT_SILENCE_MS, DEFAULT_SILENCE_MS)
         self.assertLess(DEFAULT_SILENCE_MS, PENDING_SILENCE_MS)
         self.assertLess(PENDING_SILENCE_MS, MAX_SILENCE_MS)
 
     def test_max_hold_is_not_slower_than_it_needs_to_be(self):
         # The ceiling exists for genuine dangles; it must still feel like a
         # conversation, not a timeout.
-        self.assertLessEqual(MAX_SILENCE_MS, 1600)
+        self.assertLessEqual(MAX_SILENCE_MS, 2500)
 
     def test_silence_budget_ms_matches_the_decision(self):
         self.assertEqual(
-            silence_budget_ms("Send Sophie the deploy notes."), MIN_SILENCE_MS
+            silence_budget_ms("Send Sophie the deploy notes."), STATEMENT_SILENCE_MS
         )
 
 

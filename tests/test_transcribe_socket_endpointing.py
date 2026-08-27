@@ -17,6 +17,7 @@ from src.service.endpointing_service import (
     DEFAULT_SILENCE_MS,
     MAX_SILENCE_MS,
     MIN_SILENCE_MS,
+    STATEMENT_SILENCE_MS,
 )
 
 
@@ -133,7 +134,7 @@ class TranscribeSocketTests(unittest.TestCase):
                         windows.append((message["text"], message["endpointMs"]))
 
         self.assertEqual(windows[0], ("Send that to", MAX_SILENCE_MS))
-        self.assertEqual(windows[1], ("Send that to Sophie.", MIN_SILENCE_MS))
+        self.assertEqual(windows[1], ("Send that to Sophie.", STATEMENT_SILENCE_MS))
 
     def test_pause_transcribes_before_stop_is_sent(self):
         # The point of the whole exercise: by the time the client says stop,

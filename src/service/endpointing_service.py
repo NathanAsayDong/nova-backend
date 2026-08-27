@@ -36,17 +36,47 @@ floor latency for an obviously-finished utterance, MAX_SILENCE_MS the patience
 ceiling for an obviously-unfinished one.
 """
 
+import os
 import re
 from typing import NamedTuple
 
-# Obviously finished: just enough silence to be sure the speaker stopped.
-MIN_SILENCE_MS = 450
+
+def _endpoint_scale() -> float:
+    """
+    One knob over every window: NOVA_ENDPOINT_SCALE in .env.
+
+    Rooms, mics, and speakers differ — the same windows that feel snappy on
+    one machine feel trigger-happy on another. Raising the scale (e.g. 1.3)
+    makes Nova more patient everywhere at once; lowering it makes it faster.
+    Bounded so a typo cannot produce a zero or a minute-long wait.
+    """
+    try:
+        return max(0.25, min(4.0, float(os.getenv("NOVA_ENDPOINT_SCALE", "1.0"))))
+    except ValueError:
+        return 1.0
+
+
+_SCALE = _endpoint_scale()
+
+
+def _ms(base: int) -> int:
+    return round(base * _SCALE)
+
+
+# Obviously finished — a question, an exclamation, a bare "yes": just enough
+# silence to be sure the speaker stopped.
+MIN_SILENCE_MS = _ms(600)
+# A trailing period. Weaker evidence than a question mark: Whisper ends
+# whatever fragment it decodes with a period, and people dictating pause
+# between complete sentences intending to continue — so a statement gets a
+# thinking-pause of grace that a question does not need.
+STATEMENT_SILENCE_MS = _ms(850)
 # Nothing either way — no transcript yet, or a plain unpunctuated clause.
-DEFAULT_SILENCE_MS = 700
+DEFAULT_SILENCE_MS = _ms(1000)
 # Leaning unfinished: a particle, a comma, mid-number, a short fragment.
-PENDING_SILENCE_MS = 1100
+PENDING_SILENCE_MS = _ms(1400)
 # Obviously unfinished: hold the line.
-MAX_SILENCE_MS = 1600
+MAX_SILENCE_MS = _ms(2200)
 
 
 class EndpointDecision(NamedTuple):
@@ -121,7 +151,6 @@ _STANDALONE_COMPLETE = frozenset(
 _WORD = re.compile(r"[A-Za-z']+|\d+")
 # Marks that signal an unfinished clause rather than a finished sentence.
 _PENDING_PUNCTUATION = ",:;-–—"
-_TERMINAL_PUNCTUATION = ".!?"
 
 
 def endpoint_decision(transcript: str | None) -> EndpointDecision:
@@ -157,10 +186,26 @@ def endpoint_decision(transcript: str | None) -> EndpointDecision:
         # still in progress.
         return EndpointDecision(PENDING_SILENCE_MS, "digits")
 
-    # Punctuation next. Soft-continuation words defer to it: "turn it off."
-    # with a period is a finished command far more often than a fragment.
-    if last_char in _TERMINAL_PUNCTUATION:
-        return EndpointDecision(MIN_SILENCE_MS, "terminal_punctuation")
+    # A bare acknowledgment is complete no matter how Whisper punctuates it —
+    # "Yes." must not pay the statement tier's thinking-pause tax.
+    if len(words) <= 2 and tail in _STANDALONE_COMPLETE:
+        return EndpointDecision(MIN_SILENCE_MS, "standalone_complete")
+
+    # An ellipsis is Whisper writing down a trail-off. Check before the plain
+    # period, which it would otherwise be mistaken for.
+    if text.endswith("...") or last_char == "…":
+        return EndpointDecision(PENDING_SILENCE_MS, "ellipsis")
+
+    # Punctuation next, by strength. A question mark is rarely fake — a
+    # question to an assistant is over when it is asked. A period is weak:
+    # Whisper ends fragments with one, and a speaker dictating several
+    # sentences pauses between them intending to continue, so statements keep
+    # a thinking-pause of grace. Soft-continuation words defer to both:
+    # "turn it off." is a finished command far more often than a fragment.
+    if last_char in "?!":
+        return EndpointDecision(MIN_SILENCE_MS, "terminal_question")
+    if last_char == ".":
+        return EndpointDecision(STATEMENT_SILENCE_MS, "terminal_statement")
     if last_char in _PENDING_PUNCTUATION:
         return EndpointDecision(PENDING_SILENCE_MS, "pending_punctuation")
 
@@ -168,8 +213,6 @@ def endpoint_decision(transcript: str | None) -> EndpointDecision:
         return EndpointDecision(PENDING_SILENCE_MS, "soft_continuation")
 
     if len(words) <= 2:
-        if tail in _STANDALONE_COMPLETE:
-            return EndpointDecision(MIN_SILENCE_MS, "standalone_complete")
         return EndpointDecision(PENDING_SILENCE_MS, "short_fragment")
 
     return EndpointDecision(DEFAULT_SILENCE_MS, "unpunctuated_clause")
