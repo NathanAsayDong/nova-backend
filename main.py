@@ -18,6 +18,7 @@ from src.controller.tool_controller import router as tool_router
 from src.controller.mcp_server_controller import router as mcp_server_router
 from src.controller.update_controller import router as update_router
 from src.controller.face_controller import router as face_router
+from src.controller.coding_controller import router as coding_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,6 +34,14 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(meeting_service.recover_stale_meetings)
     except Exception as exc:
         print(f"Could not recover stale meetings: {exc}")
+
+    # The coding tools run on the agent loop's worker thread but have to talk
+    # to the Mac over a websocket that lives here. Hand them this loop so they
+    # can schedule onto it instead of trying to await from a thread.
+    from src.controller.coding_controller import coding_service
+
+    coding_service.loop = asyncio.get_running_loop()
+
     yield
 
 
@@ -57,6 +66,7 @@ app.include_router(update_router)
 app.include_router(meeting_router)
 app.include_router(mcp_server_router)
 app.include_router(face_router)
+app.include_router(coding_router)
 # Twilio's webhooks, not the browser client's — CORS above does not apply to
 # them, and they are gated on Twilio's request signature instead.
 app.include_router(call_router)

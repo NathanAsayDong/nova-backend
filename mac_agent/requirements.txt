@@ -1,0 +1,5 @@
+# The Mac agent installs separately from the backend: the backend runs on the
+# tower and has no use for the Claude Code SDK, and this has no use for
+# whisper, torch, or postgres.
+claude-agent-sdk>=0.2.152
+websockets>=13.0

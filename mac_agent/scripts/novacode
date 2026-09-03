@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Control script. `novacode <start|stop|restart|status|logs|task ...>`
+set -euo pipefail
+AGENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LABEL="com.nova.codeagent"
+TARGET="gui/$(id -u)/$LABEL"
+
+case "${1:-status}" in
+  start)   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"; echo started ;;
+  stop)    launchctl bootout "$TARGET" 2>/dev/null || true; echo stopped ;;
+  restart) launchctl kickstart -k "$TARGET"; echo restarted ;;
+  status)  launchctl print "$TARGET" 2>/dev/null | grep -E "state|pid|last exit" || echo "not running" ;;
+  logs)    tail -f "$HOME/Library/Logs/novacode.log" ;;
+  task)    shift; exec "$AGENT_DIR/.venv/bin/python" -m novacode task "$@" ;;
+  *)       echo "usage: novacode <start|stop|restart|status|logs|task ...>" >&2; exit 2 ;;
+esac
