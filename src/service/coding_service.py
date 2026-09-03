@@ -25,14 +25,31 @@ _MILESTONE_TYPES = {"started", "result", "error", "closed"}
 
 
 class CodingService:
+    # Class attributes, deliberately, and this is load-bearing: ToolService
+    # constructs a FRESH CodingService for every tool call
+    # (`instance = service_class()`), so anything wired onto the controller's
+    # instance is invisible to the instance a tool actually runs on. Binding
+    # per-instance meant every start_coding_task raised "link is not
+    # initialised" while the socket sat there connected.
+    #
+    # Still injected rather than imported, so the service stays testable
+    # without a live websocket and the import graph has no cycle.
+    link: Any = None
+    loop: Any = None
+
     def __init__(self) -> None:
         self.dao = CodingSessionDao()
-        # Set by coding_controller once the socket layer exists; injected
-        # rather than imported so the service stays testable without a live
-        # websocket, and so the import graph has no cycle.
-        self.link: Any = None
-        self.loop: Any = None
         self.update_service: Any = None
+
+    @classmethod
+    def bind_link(cls, link: Any) -> None:
+        """Attach the live Mac socket, process-wide."""
+        cls.link = link
+
+    @classmethod
+    def bind_loop(cls, loop: Any) -> None:
+        """Attach the event loop the socket lives on, process-wide."""
+        cls.loop = loop
 
     # ---------- commands ----------
 
@@ -233,7 +250,8 @@ class CodingService:
     def _run(self, coro, timeout: float = 120.0):
         if self.loop is None:
             raise RuntimeError(
-                "The coding agent link is not initialised on this server."
+                "The coding agent link is not initialised on this server — the "
+                "API process has not bound its event loop. Restart the API."
             )
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return future.result(timeout=timeout)

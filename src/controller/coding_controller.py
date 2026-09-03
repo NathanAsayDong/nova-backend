@@ -80,7 +80,9 @@ class AgentLink:
 
 
 link = AgentLink()
-coding_service.link = link
+# On the class, not this instance: every tool call builds its own
+# CodingService, and each one has to see the same socket.
+CodingService.bind_link(link)
 
 
 def _authorized(websocket: WebSocket) -> bool:
