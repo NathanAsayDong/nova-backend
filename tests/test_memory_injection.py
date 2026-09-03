@@ -12,6 +12,7 @@ from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
 from src.model.memory_chunk import MemoryChunk, MemoryMatch
 from src.model.message import MessageRole
+from src.service.claude_service import TurnStream
 from src.service.memory_chunk_service import MemoryChunkService
 from src.service.tool_service import ToolService
 
@@ -171,7 +172,9 @@ class MemoryInjectionTests(unittest.TestCase):
 
         def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             self.sent_messages.append(list(context or []))
-            return FakeMessage(content=[FakeTextBlock(text="Friday, as always.")])
+            return TurnStream.completed(
+                FakeMessage(content=[FakeTextBlock(text="Friday, as always.")])
+            )
 
         self.agent_loop.claude_service.stream_response = fake_stream
 

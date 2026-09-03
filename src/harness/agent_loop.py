@@ -17,6 +17,12 @@ from prompting.prompt_source_prompt import PromptSourceEnum
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.model.report_type import ReportType
+from src.harness.spoken_reply import (
+    SpokenLineWatcher,
+    clamp_spoken,
+    speech_summary,
+    split_spoken_reply,
+)
 from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
 from src.service.mcp_server_service import McpServerService
@@ -374,6 +380,55 @@ class AgentLoop:
             )
         return records
 
+    def _failure_events(
+        self,
+        prompt_source: PromptSourceEnum,
+        text: str,
+        spoke_early: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """
+        Emit one of the loop's own failure messages on both tracks.
+
+        A timeout, a dead tool, the iteration ceiling. These are short by
+        construction so there is nothing to summarize, but they do have to be
+        SAID: now that only `speech_text` reaches TTS, a voice turn that
+        yielded a bare `text` event would leave the user listening to silence,
+        waiting for an answer that has already given up.
+
+        `spoke_early` covers the case where the stream got far enough to say
+        something before it fell over — the turn does not follow "here you go"
+        with "I had to stop" out loud, it just shows the failure on screen.
+        """
+        if not spoke_early:
+            spoken = self._spoken_track(prompt_source, text, text)
+            if spoken:
+                yield {"type": "speech_text", "text": spoken, "role": "final"}
+        yield {"type": "text", "text": text}
+
+    @staticmethod
+    def _spoken_track(
+        prompt_source: PromptSourceEnum,
+        tagged: str | None,
+        written: str,
+    ) -> str | None:
+        """
+        Decide what, if anything, this turn should say out loud.
+
+        Returns None for every medium that does not deliver a reply to an ear
+        and a screen at once — a phone call and an SMS are already written for
+        their one audience, and a chat turn has no audience for audio.
+
+        For the voice UI: the model's own `<speak>` line when it wrote one,
+        and otherwise the opening of the written answer, reduced to something
+        sayable. Either way the result goes through the length ceiling. The
+        prompt asks for brevity, which a model can decline; this is where it
+        stops being optional.
+        """
+        if not prompt_source.wants_spoken_summary():
+            return None
+        spoken = clamp_spoken(tagged) if tagged else speech_summary(written)
+        return spoken or None
+
     def conversation_loop_events(
         self,
         prompt: str,
@@ -384,21 +439,33 @@ class AgentLoop:
         Run a single conversation turn as a bounded ReAct loop, as an event stream.
 
         Yields dicts the transport layer renders however it likes:
-          {"type": "text", "text": ...}        sentence chunk of the reply
-          {"type": "status_text", "text": ...} spoken acknowledgment emitted
-                                               before tool work starts
+          {"type": "text", "text": ...}        sentence chunk of the written
+                                               reply, for the screen
+          {"type": "speech_text", "text": ...} the ONLY thing meant to be read
+                                               aloud, with a "role" of
+                                               "status" or "final"
+          {"type": "status_text", "text": ...} acknowledgment shown before tool
+                                               work starts
           {"type": "tool_call", "tool": ...}   a tool is about to run
           {"type": "artifact", "kind": ...}    renderable output of a tool
                                                (diff, file, terminal)
 
-        Text chunks are sentence-sized because the voice path speaks them; the
-        chat path reassembles them. Tool calls run inline between Claude rounds,
-        and only text from the terminal no-tool reply is spoken.
+        Written text and spoken text are two different tracks, not one text
+        used twice. `speech_text` carries what goes to TTS — at most a couple
+        of sentences, because audio has to be listened through in real time.
+        `text` / `text_final` carry the full answer at whatever length the
+        question deserves, because a screen can be skimmed. A transport that
+        speaks anything other than `speech_text` has reunited them by mistake.
+
+        Text chunks are sentence-sized so the chat panel can stream them in;
+        the chat path reassembles them. Tool calls run inline between Claude
+        rounds.
 
         `prompt_source` steers the reply for the medium it will be delivered
-        in — a spoken reply gets read aloud by TTS, so it should be short.
-        It is applied per request rather than appended to history, so a spoken
-        turn does not shorten later typed turns in the same conversation.
+        in, and decides whether there is a spoken track at all — see
+        `_spoken_track`. It is applied per request rather than appended to
+        history, so a spoken turn does not shorten later typed turns in the
+        same conversation.
 
         Turns are persisted to the conversation/message tables. Raises
         ConversationClosedError before yielding anything if the conversation
@@ -490,28 +557,54 @@ class AgentLoop:
                 fallback = "I hit a time limit while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield {"type": "text", "text": fallback}
+                yield from self._failure_events(prompt_source, fallback)
                 return
 
+            # Whether this round already said something out loud. The reply is
+            # read as it is written, so the spoken line usually goes out well
+            # before the round finishes; the end-of-round paths below check
+            # this so a turn never says the same thing twice.
+            spoke_early = False
+            watcher = (
+                SpokenLineWatcher() if prompt_source.wants_spoken_summary() else None
+            )
+
             try:
-                response = self.claude_service.stream_response(
+                turn = self.claude_service.stream_response(
                     "",
                     context=history,
                     tools=tools_arg,
                     system=system_blocks,
                     mcp_servers=mcp_servers,
                 )
+                # This is the latency win. The `<speak>` block is written
+                # first, so its closing tag lands while the markdown answer
+                # beneath it is still being generated — and the moment it
+                # does, TTS can start. Waiting for the final message here (as
+                # this used to) meant every voice turn paid for the length of
+                # the WRITTEN answer before a word of the spoken one was said.
+                for delta in turn:
+                    if watcher is None:
+                        continue
+                    line = watcher.push(delta)
+                    if line is None:
+                        continue
+                    say = clamp_spoken(line)
+                    if say:
+                        spoke_early = True
+                        yield {"type": "speech_text", "text": say, "role": "final"}
+                response = turn.message
             except TimeoutError:
                 fallback = "I hit a backend timeout while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield {"type": "text", "text": fallback}
+                yield from self._failure_events(prompt_source, fallback, spoke_early)
                 return
             except Exception as exc:
                 fallback = f"Agent loop failed: {str(exc)}"
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield {"type": "text", "text": fallback}
+                yield from self._failure_events(prompt_source, fallback, spoke_early)
                 return
 
             # Only client-side tool_use blocks need execution here; anything
@@ -547,34 +640,71 @@ class AgentLoop:
                     history.append({"role": "assistant", "content": assistant_blocks})
                     continue
 
-                text = self._extract_text(response)
+                raw_text = self._extract_text(response)
+                display_text, spoken_text = split_spoken_reply(raw_text)
+                spoken_text = self._spoken_track(
+                    prompt_source, spoken_text, display_text
+                )
                 # Persist before yielding so a client disconnect mid-stream
-                # can't lose the reply.
-                self._persist_message(conversation, MessageRole.NOVA, text)
+                # can't lose the reply. The written answer is the turn of
+                # record: the spoken line is a lossy view of it, and a
+                # transcript reread later should show what was actually said
+                # in full, not the summary that went to the speaker.
+                self._persist_message(conversation, MessageRole.NOVA, display_text)
                 try:
-                    if text:
-                        for chunk in self.iter_sentence_chunks([text]):
+                    # Speech first. It is the only thing the user is actually
+                    # waiting on — the written answer arrives faster than it
+                    # can be read either way — so the transport gets it before
+                    # the prose and can start synthesizing immediately.
+                    if spoken_text and not spoke_early:
+                        yield {
+                            "type": "speech_text",
+                            "text": spoken_text,
+                            "role": "final",
+                        }
+                    if display_text:
+                        for chunk in self.iter_sentence_chunks([display_text]):
                             yield {"type": "text", "text": chunk}
-                        # Sentence chunks are stripped for TTS, which destroys
-                        # the newlines markdown lists and code fences need.
-                        # Emit the raw text so a renderer can restore fidelity.
-                        yield {"type": "text_final", "text": text}
+                        # Sentence chunks are stripped, which destroys the
+                        # newlines markdown lists and code fences need. Emit
+                        # the whole text so a renderer can restore fidelity.
+                        yield {"type": "text_final", "text": display_text}
                 finally:
                     # Keep the full blocks (citations, search results) in
                     # history so follow-up turns stay valid; fall back to raw
-                    # text when the model returned nothing to serialize.
+                    # text when the model returned nothing to serialize. The
+                    # <speak> block is deliberately left in history — seeing
+                    # its own format is what keeps the model producing it.
                     history.append(
-                        {"role": "assistant", "content": assistant_blocks or text}
+                        {"role": "assistant", "content": assistant_blocks or raw_text}
                     )
                 return
 
             history.append({"role": "assistant", "content": assistant_blocks})
 
             if not status_emitted:
-                status = self._extract_text(response).strip()
-                if status:
+                status_display, status_spoken = split_spoken_reply(
+                    self._extract_text(response).strip()
+                )
+                if status_display:
                     status_emitted = True
-                    yield {"type": "status_text", "text": status}
+                    yield {"type": "status_text", "text": status_display}
+                    # The ack goes through the same ceiling as the reply, so a
+                    # model that turns chatty before a tool call cannot stall
+                    # the turn with narration the user has to sit through.
+                    spoken_ack = (
+                        None
+                        if spoke_early
+                        else self._spoken_track(
+                            prompt_source, status_spoken, status_display
+                        )
+                    )
+                    if spoken_ack:
+                        yield {
+                            "type": "speech_text",
+                            "text": spoken_ack,
+                            "role": "status",
+                        }
 
             tool_results: list[dict[str, Any]] = []
             for block in tool_uses:
@@ -636,7 +766,9 @@ class AgentLoop:
                         fallback = "I ran into a tool execution issue and had to stop."
                         history.append({"role": "assistant", "content": fallback})
                         self._persist_message(conversation, MessageRole.NOVA, fallback)
-                        yield {"type": "text", "text": fallback}
+                        yield from self._failure_events(
+                            prompt_source, fallback, spoke_early
+                        )
                         return
                     tool_results.append(
                         {
@@ -652,7 +784,7 @@ class AgentLoop:
         fallback = "I hit a loop limit while working on that and had to stop."
         history.append({"role": "assistant", "content": fallback})
         self._persist_message(conversation, MessageRole.NOVA, fallback)
-        yield {"type": "text", "text": fallback}
+        yield from self._failure_events(prompt_source, fallback)
 
     def run_agent(
         self,

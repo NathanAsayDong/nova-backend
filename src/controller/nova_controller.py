@@ -912,40 +912,64 @@ async def transcribe_socket(websocket: WebSocket) -> None:
 
                     # Same event stream the chat endpoint consumes: speech and
                     # chat are one conversation, so they see the same tool
-                    # calls and artifacts. Only text is spoken.
+                    # calls and artifacts.
+                    #
+                    # What differs is that this transport has a speaker as well
+                    # as a screen, and the two get different tracks. `text`
+                    # events are the written answer and are only ever
+                    # displayed; `speech_text` events are the short spoken line
+                    # and are the only thing handed to TTS. Speaking the
+                    # written answer here is exactly the coupling this split
+                    # exists to remove — it is what made a long reply mean a
+                    # long wait.
                     event_stream = agent_loop.conversation_loop_events(
                         transcript,
                         conversation_id,
                         prompt_source=PromptSourceEnum.SPEECH_PROMPT,
                     )
-                    spoken_parts: list[str] = []
+                    display_parts: list[str] = []
                     final_text: str | None = None
                     tts_available = True
                     async for event in iter_in_thread(event_stream):
                         event_type = event.get("type")
 
                         if event_type == "text":
-                            spoken_parts.append(event["text"])
+                            display_parts.append(event["text"])
                             await send_assistant_text(
                                 websocket,
                                 event["text"],
-                                seq=len(spoken_parts),
+                                seq=len(display_parts),
                                 conversation_id=conversation_id,
                             )
+                        elif event_type == "speech_text":
+                            # Sent to the client as well as to TTS: the audio
+                            # arrives as opaque chunks, so this is the only way
+                            # the UI can know what is being said.
+                            await websocket.send_json(
+                                {
+                                    "type": "speech_text",
+                                    "text": event["text"],
+                                    "role": event.get("role", "final"),
+                                    "conversationId": str(conversation_id),
+                                }
+                            )
                             # One failure mutes TTS for the rest of the turn:
-                            # every remaining sentence would fail the same way
-                            # and spam the client with error toasts. The text
-                            # above was already sent, so the turn degrades to
-                            # text-only instead of dying.
+                            # every remaining line would fail the same way and
+                            # spam the client with error toasts. The text was
+                            # already sent, so the turn degrades to text-only
+                            # instead of dying.
                             if tts_available:
                                 tts_available = await stream_tts_audio(
-                                    websocket, event["text"], role="final"
+                                    websocket,
+                                    event["text"],
+                                    role=event.get("role", "final"),
                                 )
                         elif event_type == "status_text":
-                            # Pre-tool acknowledgment: spoken so the user gets
-                            # feedback before tool work goes quiet, but kept
-                            # out of spoken_parts — the turn's assistantText
-                            # is the final answer, not the "on it" line.
+                            # Pre-tool acknowledgment. Shown here, spoken by
+                            # the speech_text event that follows it — and kept
+                            # out of display_parts either way, because the
+                            # turn's assistantText is the final answer, not the
+                            # "on it" line.
                             await websocket.send_json(
                                 {
                                     "type": "status_text",
@@ -953,10 +977,6 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                                     "conversationId": str(conversation_id),
                                 }
                             )
-                            if tts_available:
-                                tts_available = await stream_tts_audio(
-                                    websocket, event["text"], role="status"
-                                )
                         elif event_type == "text_final":
                             final_text = event["text"]
                             await websocket.send_json(
@@ -981,7 +1001,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             "assistantText": (
                                 final_text
                                 if final_text is not None
-                                else " ".join(spoken_parts)
+                                else " ".join(display_parts)
                             ),
                         }
                     )

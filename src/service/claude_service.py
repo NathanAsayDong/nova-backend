@@ -1,5 +1,6 @@
 from anthropic import Anthropic
 import os
+from collections.abc import Callable, Iterator
 from typing import Any, Optional
 from anthropic.types.message import Message
 
@@ -21,6 +22,76 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"false", "0", "no", "off"}
+
+
+class TurnStream:
+    """
+    One model turn, readable while it is still being written.
+
+    Iterating yields text deltas in arrival order. Once iteration finishes,
+    `message` holds the assembled Message — the content blocks and tool_use
+    the agent loop needs to decide what happens next.
+
+    The shape exists for latency. This used to open a stream and throw every
+    delta away, returning only `get_final_message()`, which meant nothing at
+    all could happen until the last token of a reply had been written. For a
+    voice turn that is the entire cost: the two sentences Nova says out loud
+    are finished long before the markdown answer beneath them, and waiting for
+    the answer to speak the summary is waiting for no reason.
+
+    Read once, all the way through. A partly-consumed stream has no `message`,
+    because the turn genuinely has no answer yet.
+    """
+
+    def __init__(
+        self,
+        open_stream: Optional[Callable[[], Any]] = None,
+        message: Optional[Message] = None,
+    ) -> None:
+        self._open_stream = open_stream
+        self._message = message
+        self._drained = message is not None
+        self._started = False
+
+    def __iter__(self) -> Iterator[str]:
+        if self._open_stream is None:
+            # An already-complete turn. Replay its text so anything watching
+            # the stream sees the same content — all at once, which is what a
+            # non-streaming turn is.
+            replay = "".join(
+                block.text
+                for block in (self._message.content if self._message else [])
+                if getattr(block, "text", None)
+            )
+            if replay:
+                yield replay
+            return
+
+        if self._started:
+            raise RuntimeError("A TurnStream can only be read once.")
+        self._started = True
+
+        with self._open_stream() as stream:
+            for delta in stream.text_stream:
+                if delta:
+                    yield delta
+            self._message = stream.get_final_message()
+        self._drained = True
+
+    @property
+    def message(self) -> Message:
+        """The assembled turn. Available only after the stream is drained."""
+        if not self._drained or self._message is None:
+            raise RuntimeError(
+                "TurnStream.message is not available until the stream has been "
+                "read to completion."
+            )
+        return self._message
+
+    @classmethod
+    def completed(cls, message: Message) -> "TurnStream":
+        """A turn that is already whole, for callers with no live connection."""
+        return cls(message=message)
 
 
 class ClaudeService:
@@ -127,16 +198,21 @@ class ClaudeService:
         tools: Optional[list] = None,
         system: Optional[str | list] = None,
         mcp_servers: Optional[list] = None,
-    ) -> Message:
+    ) -> TurnStream:
         """
-        Stream a response from the Claude API and return the final Message.
+        Open a streaming turn against the Claude API.
 
-        Uses the streaming endpoint so the connection stays open for longer
-        generations, then returns the complete message (including tool_use).
-        The top-level cache_control auto-caches the last cacheable block, so
-        the growing conversation history is served from cache turn over turn.
-        Requests that declare MCP servers go through the beta endpoint with
-        the connector flag; everything else stays on the GA endpoint.
+        Returns a `TurnStream`: iterate it for text deltas as the model writes
+        them, then read `.message` for the complete message including tool_use.
+        Nothing is sent until iteration begins.
+
+        The connection stays open for the length of the generation either way;
+        what changed is that the caller now gets to see the reply take shape
+        instead of only its final form. The top-level cache_control auto-caches
+        the last cacheable block, so the growing conversation history is served
+        from cache turn over turn. Requests that declare MCP servers go through
+        the beta endpoint with the connector flag; everything else stays on the
+        GA endpoint.
         """
         params: dict[str, Any] = dict(
             model=self.MODEL,
@@ -146,12 +222,12 @@ class ClaudeService:
             **self._build_kwargs(tools, system, mcp_servers),
         )
         if mcp_servers:
-            with self.client.beta.messages.stream(
-                betas=[MCP_CONNECTOR_BETA], **params
-            ) as stream:
-                return stream.get_final_message()
-        with self.client.messages.stream(**params) as stream:
-            return stream.get_final_message()
+            return TurnStream(
+                lambda: self.client.beta.messages.stream(
+                    betas=[MCP_CONNECTOR_BETA], **params
+                )
+            )
+        return TurnStream(lambda: self.client.messages.stream(**params))
 
     def get_response(
         self,

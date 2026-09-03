@@ -1,10 +1,12 @@
 import json
 import unittest
+from types import SimpleNamespace
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 from prompting.prompt_source_prompt import PromptSourceEnum
 from src.harness.agent_loop import AgentLoop
+from src.service.claude_service import TurnStream
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.service.tool_service import ToolService
@@ -75,7 +77,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
     def _set_stream(self, text: str):
         def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             blocks = [FakeTextBlock(text=text)] if text else []
-            return FakeMessage(content=blocks)
+            return TurnStream.completed(FakeMessage(content=blocks))
 
         self.agent_loop.claude_service.stream_response = fake_stream
 
@@ -152,7 +154,9 @@ class ConversationLoopStreamTests(unittest.TestCase):
         }
 
         def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
-            return FakeMessage(content=[search_result_block, cited_text_block])
+            return TurnStream.completed(
+                FakeMessage(content=[search_result_block, cited_text_block])
+            )
 
         self.agent_loop.claude_service.stream_response = fake_stream
 
@@ -175,7 +179,7 @@ class ConversationLoopStreamTests(unittest.TestCase):
             calls["n"] += 1
             message = responses[index]
             message.stop_reason = stop_reasons[index]
-            return message
+            return TurnStream.completed(message)
 
         self.agent_loop.claude_service.stream_response = fake_stream
 
@@ -230,7 +234,9 @@ class PromptSourceTests(ConversationLoopStreamTests):
 
         def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
             systems.append(system)
-            return FakeMessage(content=[FakeTextBlock(text="Short answer.")])
+            return TurnStream.completed(
+                FakeMessage(content=[FakeTextBlock(text="Short answer.")])
+            )
 
         self.agent_loop.claude_service.stream_response = fake_stream
         return systems
@@ -252,7 +258,7 @@ class PromptSourceTests(ConversationLoopStreamTests):
         # The stable persona carries the cache breakpoint.
         self.assertEqual(blocks[0]["cache_control"], {"type": "ephemeral"})
 
-    def test_speech_appends_brevity_steer_after_persona(self):
+    def test_speech_appends_split_reply_steer_after_persona(self):
         systems = self._capture_systems()
 
         list(
@@ -265,8 +271,8 @@ class PromptSourceTests(ConversationLoopStreamTests):
         blocks = systems[0]
         self.assertEqual(len(blocks), 2)
         self.assertIn("Nova", blocks[0]["text"])
-        self.assertIn("voice mode", blocks[1]["text"])
-        self.assertIn("brief", blocks[1]["text"])
+        self.assertIn("<speak></speak>", blocks[1]["text"])
+        self.assertIn("two sentences", blocks[1]["text"])
         # The steer varies per medium, so it must sit AFTER the cache
         # breakpoint — a cached steer would invalidate the prefix whenever
         # the user switches between chat and voice.
@@ -277,7 +283,7 @@ class PromptSourceTests(ConversationLoopStreamTests):
 
         list(self.agent_loop.conversation_loop_stream("hi", self.conversation_id))
 
-        self.assertIn("brief", systems[0][-1]["text"])
+        self.assertIn("<speak></speak>", systems[0][-1]["text"])
 
     def test_chat_default_is_unsteered(self):
         systems = self._capture_systems()
@@ -301,8 +307,458 @@ class PromptSourceTests(ConversationLoopStreamTests):
 
         history = self.agent_loop.conversations[self.conversation_id]
         serialized = json.dumps(history)
-        self.assertNotIn("voice mode", serialized)
-        self.assertNotIn("brief", serialized)
+        self.assertNotIn("<speak></speak>", serialized)
+        self.assertNotIn("read aloud", serialized)
+
+
+class SpokenTrackTests(unittest.TestCase):
+    """
+    The event stream carries two tracks, and a turn is only correct when they
+    disagree in the right direction: short in the ear, complete on screen.
+    """
+
+    LONG_REPLY = (
+        "<speak>Both checks passed.</speak>\n\n"
+        "## Results\n\n"
+        "The unit suite passed in 4.2 seconds. The integration suite passed in "
+        "31 seconds. Coverage held at 87 percent. Nothing regressed against "
+        "the previous run, and the flaky socket test stayed green this time.\n\n"
+        "```bash\npytest -q\n```\n"
+    )
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        self.conversation_id = uuid4()
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.conversation_service = FakeConversationService()
+        self.agent_loop.conversation_service = self.conversation_service
+
+    def _set_stream(self, text: str):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            return TurnStream.completed(FakeMessage(content=[FakeTextBlock(text=text)]))
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+    def _run(self, prompt_source):
+        return list(
+            self.agent_loop.conversation_loop_events(
+                "how did the tests go",
+                self.conversation_id,
+                prompt_source=prompt_source,
+            )
+        )
+
+    def test_speech_turn_speaks_the_short_line_and_shows_the_long_one(self):
+        self._set_stream(self.LONG_REPLY)
+
+        events = self._run(PromptSourceEnum.SPEECH_PROMPT)
+
+        spoken = [event for event in events if event["type"] == "speech_text"]
+        self.assertEqual(len(spoken), 1)
+        self.assertEqual(spoken[0]["text"], "Both checks passed.")
+        self.assertEqual(spoken[0]["role"], "final")
+
+        final = next(event for event in events if event["type"] == "text_final")
+        self.assertIn("Coverage held at 87 percent", final["text"])
+        self.assertIn("```bash", final["text"])
+
+    def test_the_spoken_line_arrives_before_the_prose(self):
+        """
+        TTS is the only part of a turn the user waits on in real time, so the
+        line that feeds it has to reach the transport first.
+        """
+        self._set_stream(self.LONG_REPLY)
+
+        types = [event["type"] for event in self._run(PromptSourceEnum.SPEECH_PROMPT)]
+
+        self.assertEqual(types[0], "speech_text")
+        self.assertIn("text", types)
+
+    def test_written_answer_is_what_gets_persisted(self):
+        self._set_stream(self.LONG_REPLY)
+
+        self._run(PromptSourceEnum.SPEECH_PROMPT)
+
+        nova_rows = [
+            content
+            for _uuid, role, content in self.conversation_service.recorded
+            if role is MessageRole.NOVA
+        ]
+        self.assertEqual(len(nova_rows), 1)
+        self.assertIn("Coverage held at 87 percent", nova_rows[0])
+        self.assertNotIn("<speak>", nova_rows[0])
+
+    def test_no_speak_block_falls_back_to_the_opening_sentences(self):
+        """
+        The ceiling cannot depend on the model remembering the format, so a
+        reply that ignores it is summarized rather than read out whole.
+        """
+        self._set_stream(
+            "The migration finished. It touched 12 tables. "
+            "Nothing needs your attention. Here is the full log."
+        )
+
+        events = self._run(PromptSourceEnum.SPEECH_PROMPT)
+
+        spoken = next(event for event in events if event["type"] == "speech_text")
+        self.assertEqual(
+            spoken["text"], "The migration finished. It touched 12 tables."
+        )
+        final = next(event for event in events if event["type"] == "text_final")
+        self.assertIn("Here is the full log.", final["text"])
+
+    def test_chat_turn_has_no_spoken_track_at_all(self):
+        self._set_stream("A perfectly ordinary markdown answer.\n\n- one\n- two")
+
+        events = self._run(PromptSourceEnum.CHAT_PROMPT)
+
+        self.assertEqual([e for e in events if e["type"] == "speech_text"], [])
+        final = next(event for event in events if event["type"] == "text_final")
+        self.assertIn("- one\n- two", final["text"])
+
+    def test_call_turn_has_no_spoken_track_because_it_has_no_screen(self):
+        """
+        A phone call speaks its `text` events directly. Emitting a second
+        track there would say everything twice.
+        """
+        self._set_stream("Two checks passed.")
+
+        events = self._run(PromptSourceEnum.CALL_PROMPT)
+
+        self.assertEqual([e for e in events if e["type"] == "speech_text"], [])
+
+    def test_tool_round_speaks_a_clamped_acknowledgment(self):
+        replies = [
+            FakeMessage(
+                content=[
+                    FakeTextBlock(
+                        text=(
+                            "Let me pull that up. I will check the runner. "
+                            "Then the logs, then the coverage report."
+                        )
+                    ),
+                    FakeToolUseBlock(id="t1", name="missing_tool", input={}),
+                ]
+            ),
+            FakeMessage(content=[FakeTextBlock(text="<speak>All clear.</speak>Details.")]),
+        ]
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            return TurnStream.completed(replies.pop(0))
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        events = self._run(PromptSourceEnum.SPEECH_PROMPT)
+
+        status = next(event for event in events if event["type"] == "status_text")
+        # The screen gets the whole acknowledgment...
+        self.assertIn("coverage report", status["text"])
+        # ...the speaker gets two sentences of it.
+        ack = next(
+            event
+            for event in events
+            if event["type"] == "speech_text" and event["role"] == "status"
+        )
+        self.assertEqual(
+            ack["text"], "Let me pull that up. I will check the runner."
+        )
+
+
+class ScriptedTurnStream:
+    """
+    A turn whose deltas arrive one at a time, on demand.
+
+    Records what has actually been pulled, which is what lets a test ask the
+    question that matters here: had the model finished writing when Nova
+    started speaking?
+    """
+
+    def __init__(self, deltas: list[str], message=None):
+        self.deltas = list(deltas)
+        self.consumed: list[str] = []
+        self._message = message or FakeMessage(
+            content=[FakeTextBlock(text="".join(deltas))]
+        )
+
+    def __iter__(self):
+        for delta in self.deltas:
+            self.consumed.append(delta)
+            yield delta
+
+    @property
+    def message(self):
+        return self._message
+
+    @property
+    def finished(self) -> bool:
+        return len(self.consumed) == len(self.deltas)
+
+
+class StreamedSpeechTests(unittest.TestCase):
+    """
+    The spoken line has to leave before the written answer is finished.
+
+    That is the whole point of putting `<speak>` first: two sentences are done
+    in a fraction of the time a markdown answer takes, and a voice turn should
+    not pay for the difference.
+    """
+
+    # Split the way a real stream splits — mid-word, mid-tag.
+    DELTAS = [
+        "<spe", "ak>Both checks", " passed.</spe", "ak>",
+        "\n\n## Results\n\nThe unit suite passed in 4.2 seconds. ",
+        "The integration suite passed in 31 seconds. ",
+        "Coverage held at 87 percent.",
+    ]
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        self.conversation_id = uuid4()
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.agent_loop.conversation_service = FakeConversationService()
+
+    def _script(self, deltas, message=None) -> ScriptedTurnStream:
+        stream = ScriptedTurnStream(deltas, message)
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            return stream
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+        return stream
+
+    def _events(self, prompt_source=PromptSourceEnum.SPEECH_PROMPT):
+        return self.agent_loop.conversation_loop_events(
+            "how did the tests go", self.conversation_id, prompt_source=prompt_source
+        )
+
+    def test_speech_goes_out_before_the_model_stops_writing(self):
+        stream = self._script(self.DELTAS)
+        events = self._events()
+
+        first = next(events)
+
+        self.assertEqual(first["type"], "speech_text")
+        self.assertEqual(first["text"], "Both checks passed.")
+        # The assertion that matters: deltas are still unread. Under the old
+        # code this event could not exist until the last one had arrived.
+        self.assertFalse(stream.finished)
+        self.assertEqual(stream.consumed, self.DELTAS[:4])
+
+        list(events)  # drain, so the turn finishes cleanly
+
+    def test_the_written_answer_still_arrives_whole(self):
+        self._script(self.DELTAS)
+
+        events = list(self._events())
+
+        final = next(event for event in events if event["type"] == "text_final")
+        self.assertIn("## Results", final["text"])
+        self.assertIn("Coverage held at 87 percent", final["text"])
+        self.assertNotIn("<speak>", final["text"])
+
+    def test_a_line_spoken_early_is_not_spoken_again_at_the_end(self):
+        self._script(self.DELTAS)
+
+        events = list(self._events())
+
+        spoken = [event for event in events if event["type"] == "speech_text"]
+        self.assertEqual(len(spoken), 1)
+
+    def test_a_chat_turn_never_watches_the_stream(self):
+        self._script(self.DELTAS)
+
+        events = list(self._events(PromptSourceEnum.CHAT_PROMPT))
+
+        self.assertEqual([e for e in events if e["type"] == "speech_text"], [])
+
+    def test_an_unclosed_block_falls_back_to_the_end_of_turn_path(self):
+        """
+        Nothing fires mid-stream, but the turn still says something: the
+        end-of-turn split handles the unclosed tag.
+        """
+        self._script(["<speak>Still ", "talking and never closing"])
+
+        events = list(self._events())
+
+        spoken = [event for event in events if event["type"] == "speech_text"]
+        self.assertEqual(len(spoken), 1)
+        self.assertEqual(spoken[0]["text"], "Still talking and never closing")
+
+    def test_a_reply_with_no_block_still_speaks_from_the_end(self):
+        self._script(["The migration finished. ", "It touched 12 tables. ", "Details below."])
+
+        events = list(self._events())
+
+        spoken = [event for event in events if event["type"] == "speech_text"]
+        self.assertEqual(len(spoken), 1)
+        self.assertEqual(
+            spoken[0]["text"], "The migration finished. It touched 12 tables."
+        )
+
+
+class FailureSpeechTests(unittest.TestCase):
+    """
+    Now that only `speech_text` reaches TTS, the loop's own failure messages
+    have to travel on it too — otherwise a voice turn that gives up gives up
+    silently, and the user is left waiting for an answer that already stopped.
+    """
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        self.conversation_id = uuid4()
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.agent_loop.conversation_service = FakeConversationService()
+
+    def _explode(self, error: Exception):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            raise error
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+    def _events(self, prompt_source):
+        return list(
+            self.agent_loop.conversation_loop_events(
+                "hi", self.conversation_id, prompt_source=prompt_source
+            )
+        )
+
+    def test_a_backend_timeout_is_said_out_loud(self):
+        self._explode(TimeoutError())
+
+        events = self._events(PromptSourceEnum.SPEECH_PROMPT)
+
+        spoken = next(event for event in events if event["type"] == "speech_text")
+        self.assertIn("timeout", spoken["text"])
+        # And still shown, so the transcript records what happened.
+        self.assertTrue(any(event["type"] == "text" for event in events))
+
+    def test_a_crash_is_said_out_loud(self):
+        self._explode(RuntimeError("claude exploded"))
+
+        events = self._events(PromptSourceEnum.SPEECH_PROMPT)
+
+        spoken = next(event for event in events if event["type"] == "speech_text")
+        self.assertIn("claude exploded", spoken["text"])
+
+    def test_a_chat_failure_stays_silent(self):
+        self._explode(RuntimeError("claude exploded"))
+
+        events = self._events(PromptSourceEnum.CHAT_PROMPT)
+
+        self.assertEqual([e for e in events if e["type"] == "speech_text"], [])
+        self.assertTrue(any(event["type"] == "text" for event in events))
+
+    def test_a_turn_that_already_spoke_does_not_announce_its_own_failure(self):
+        """
+        The stream got far enough to say "here you go" and then died. Saying
+        "I had to stop" after it would be a second, contradictory answer —
+        the failure belongs on screen only.
+        """
+        class DyingStream:
+            def __iter__(self):
+                yield "<speak>Here you go.</speak>"
+                raise RuntimeError("connection reset")
+
+            @property
+            def message(self):
+                raise AssertionError("never reached")
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            return DyingStream()
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        events = self._events(PromptSourceEnum.SPEECH_PROMPT)
+
+        spoken = [event for event in events if event["type"] == "speech_text"]
+        self.assertEqual(len(spoken), 1)
+        self.assertEqual(spoken[0]["text"], "Here you go.")
+        self.assertTrue(
+            any("connection reset" in event.get("text", "") for event in events)
+        )
+
+
+class TurnStreamTests(unittest.TestCase):
+    def test_a_completed_turn_replays_its_text(self):
+        stream = TurnStream.completed(
+            FakeMessage(content=[FakeTextBlock(text="all of it")])
+        )
+
+        self.assertEqual(list(stream), ["all of it"])
+        self.assertEqual(stream.message.content[0].text, "all of it")
+
+    def test_a_completed_turn_with_no_text_yields_nothing(self):
+        stream = TurnStream.completed(FakeMessage(content=[]))
+
+        self.assertEqual(list(stream), [])
+
+    def test_a_live_turn_has_no_message_until_it_is_drained(self):
+        stream = TurnStream(open_stream=lambda: None)
+
+        with self.assertRaises(RuntimeError):
+            stream.message
+
+    def test_a_live_turn_reads_deltas_then_exposes_the_message(self):
+        """
+        Shaped like the Anthropic SDK's stream: a context manager yielding an
+        object with `text_stream` and `get_final_message()`.
+
+        Pinned here because `text_stream` is an instance attribute the SDK
+        assigns in __init__ and only annotates on the class — it does not
+        exist on the class object, so nothing short of an actual call would
+        notice it going away.
+        """
+        message = FakeMessage(content=[FakeTextBlock(text="ab")])
+        closed = {"count": 0}
+
+        class FakeSdkStream:
+            def __init__(self):
+                self.text_stream = iter(["a", "", "b"])
+
+            def get_final_message(self):
+                return message
+
+        class FakeManager:
+            def __enter__(inner):
+                return sdk_stream
+
+            def __exit__(inner, *exc):
+                closed["count"] += 1
+                return False
+
+        sdk_stream = FakeSdkStream()
+        stream = TurnStream(open_stream=FakeManager)
+
+        # Empty deltas are dropped; the connection is released on the way out.
+        self.assertEqual(list(stream), ["a", "b"])
+        self.assertIs(stream.message, message)
+        self.assertEqual(closed["count"], 1)
+
+    def test_a_live_turn_refuses_a_second_read(self):
+        class FakeManager:
+            def __enter__(inner):
+                return SimpleNamespace(
+                    text_stream=iter(["x"]),
+                    get_final_message=lambda: FakeMessage(content=[]),
+                )
+
+            def __exit__(inner, *exc):
+                return False
+
+        stream = TurnStream(open_stream=FakeManager)
+        list(stream)
+
+        with self.assertRaises(RuntimeError):
+            list(stream)
 
 
 class ArtifactTests(unittest.TestCase):
@@ -430,7 +886,7 @@ class StatusTextTests(ConversationLoopStreamTests):
         queue = list(responses)
 
         def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
-            return queue.pop(0)
+            return TurnStream.completed(queue.pop(0))
 
         self.agent_loop.claude_service.stream_response = fake_stream
 
