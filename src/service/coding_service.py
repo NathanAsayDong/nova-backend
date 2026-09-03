@@ -210,6 +210,57 @@ class CodingService:
             await self.feedback(parsed, instructions)
         return {"sessionId": str(parsed), "status": CodingStatus.WORKING if instructions else CodingStatus.IDLE}
 
+    # ---------- shell on the Mac ----------
+
+    async def exec_on_mac(
+        self, command: str, cwd: str | None, timeout_seconds: int
+    ) -> dict:
+        """
+        Run one shell command on the Mac and wait for its output.
+
+        The timeouts nest and the order matters: the command may run for
+        `timeout_seconds`, so the websocket call has to outlast it, and `_run`
+        has to outlast the call. Left at the 90s default, a 120s command would
+        report a spurious 504 while the Mac was still perfectly happily
+        working.
+        """
+        # The shell string travels as `cmd`, not `command`: AgentLink.call's
+        # first positional parameter is itself named `command` (it is the
+        # command *name*, "exec"), so a `command=` kwarg here collides with it.
+        return await self.link.call(
+            "exec",
+            timeout=timeout_seconds + 15,
+            cmd=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def run_terminal_command(
+        self,
+        command: str,
+        working_directory: str | None = None,
+        timeout_seconds: int | None = None,
+        conversation_uuid: str | None = None,
+    ) -> dict:
+        """
+        Tool entry point: Nova's shell, now on the Mac.
+
+        Same name, same arguments and same return shape as the tower
+        implementation it replaces, so nothing downstream changes — including
+        the terminal artifact the chat panel draws from stdout/stderr.
+
+        `conversation_uuid` is accepted and ignored. The tower version used it
+        to default the working directory to the conversation's project
+        workspace, but that is a path under project_files/ on the tower and
+        does not exist over here; the Mac defaults to the repos root instead.
+        """
+        timeout = int(timeout_seconds or 30)
+        timeout = max(1, min(timeout, 120))
+        return self._run(
+            self.exec_on_mac(command, working_directory, timeout),
+            timeout=timeout + 30,
+        )
+
     # ---------- the agent's events ----------
 
     def record_event(self, event: dict) -> None:

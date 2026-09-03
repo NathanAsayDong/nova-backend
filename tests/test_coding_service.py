@@ -160,3 +160,81 @@ class WorkingTreeTests(unittest.TestCase):
                 callable(getattr(CodingService, method, None)),
                 f"{tool['name']} -> {method} is not a method on CodingService",
             )
+
+
+class MacShellTests(unittest.TestCase):
+    """
+    run_terminal_command routes to the Mac, not the tower.
+
+    The collision here only fails on a live call: AgentLink.call's first
+    positional is named `command`, so the shell string cannot also ride as
+    `command=`. These pin the wire contract so a rename cannot bring it back.
+
+    One asyncio loop runs on a background thread for the whole class -- that
+    is what `_run` schedules onto -- and is torn down once at the end rather
+    than per test, which is what made the first version try to close a loop
+    while it was still running.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import asyncio, threading
+
+        cls._saved = (CodingService.link, CodingService.loop)
+        cls._env = dict(os.environ)
+        cls.loop = asyncio.new_event_loop()
+        cls._thread = threading.Thread(target=cls.loop.run_forever, daemon=True)
+        cls._thread.start()
+        CodingService.bind_loop(cls.loop)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.loop.call_soon_threadsafe(cls.loop.stop)
+        cls._thread.join(timeout=2)
+        cls.loop.close()
+        CodingService.link, CodingService.loop = cls._saved
+        os.environ.clear()
+        os.environ.update(cls._env)
+
+    class _FakeLink:
+        connected = True
+        def __init__(self):
+            self.sent = None
+        async def call(self, command, timeout=90.0, **fields):
+            self.sent = {"name": command, "timeout": timeout, **fields}
+            return {"host": "mac", "exit_code": 0, "stdout": "ok",
+                    "stderr": "", "timed_out": False}
+
+    def _service(self):
+        link = self._FakeLink()
+        CodingService.bind_link(link)
+        with patch.object(CodingService, "__init__", lambda self: None):
+            svc = CodingService()
+        return svc, link
+
+    def test_the_shell_string_is_not_passed_as_command(self):
+        svc, link = self._service()
+        result = svc.run_terminal_command("pytest -q", None, 45, "c1")
+
+        self.assertEqual(link.sent["name"], "exec")      # envelope command NAME
+        self.assertEqual(link.sent["cmd"], "pytest -q")  # shell string as cmd
+        self.assertNotIn("command", link.sent)           # the collision
+        self.assertEqual(result["host"], "mac")
+
+    def test_the_call_timeout_outlasts_the_command_timeout(self):
+        """A 504 must not fire while the Mac is still legitimately working."""
+        svc, link = self._service()
+        svc.run_terminal_command("sleep 100", None, 120, None)
+
+        self.assertEqual(link.sent["timeout_seconds"], 120)
+        self.assertGreater(link.sent["timeout"], 120)
+
+    def test_the_tool_still_points_at_a_real_method(self):
+        import scripts.register_project_tools as reg
+
+        tool = next(t for t in reg.PROJECT_TOOLS if t["name"] == "run_terminal_command")
+        path = tool["config"]["callable_path"]
+        self.assertEqual(
+            path, "src.service.coding_service.CodingService.run_terminal_command"
+        )
+        self.assertTrue(callable(getattr(CodingService, path.rsplit(".", 1)[-1], None)))

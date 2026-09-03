@@ -20,7 +20,7 @@ from typing import Any
 
 import websockets
 
-from . import protocol
+from . import protocol, shell
 from .config import Config
 from .sessions import SessionManager
 
@@ -177,5 +177,14 @@ class Link:
                 repo=command.get("repo"),
                 cwd=command.get("cwd"),
                 title=command.get("title"),
+            )
+        if kind == protocol.CMD_EXEC:
+            # `cmd`, not `command`: the outer envelope key `command` is the
+            # command NAME ("exec"), so the shell string is carried separately.
+            return await shell.run(
+                command["cmd"],
+                cwd=command.get("cwd"),
+                timeout_seconds=command.get("timeout_seconds"),
+                default_cwd=self.config.repos_root,
             )
         raise ValueError(f"Unknown command: {kind}")

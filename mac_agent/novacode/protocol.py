@@ -27,6 +27,9 @@ CMD_LIST = "list"
 CMD_CLAUDE_SESSIONS = "claude_sessions"
 CMD_TRANSCRIPT = "transcript"
 CMD_ATTACH = "attach"
+# A shell command, run on this Mac. Nova's run_terminal_command routes here
+# rather than to the tower.
+CMD_EXEC = "exec"
 
 # Events (agent -> Nova)
 EVT_HELLO = "hello"
