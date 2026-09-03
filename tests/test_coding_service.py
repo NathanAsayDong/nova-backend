@@ -8,6 +8,7 @@ actually runs on, and the failure is silent until a real tool call raises at
 runtime with the socket sitting there connected.
 """
 
+import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -105,3 +106,57 @@ class TimestampShapeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkingTreeTests(unittest.TestCase):
+    """
+    Sessions run in the repo Nate actually has open, not a hidden worktree.
+
+    The tool description is part of the behaviour here: it is the only thing
+    telling Nova that a repo takes one task at a time and that continuing an
+    existing thread is usually better than starting cold.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        # register_coding_tools calls load_dotenv() at import — a side effect
+        # that leaks the real .env into os.environ for every test that runs
+        # afterwards. test_cursor_service asserts on a MISSING CURSOR_API_KEY
+        # and started failing the moment this file imported that script.
+        # Snapshot the environment and put it back.
+        cls._env = dict(os.environ)
+        import scripts.register_coding_tools as reg
+
+        cls.tools = reg.CODING_TOOLS
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.clear()
+        os.environ.update(cls._env)
+
+    def test_start_describes_the_real_working_tree(self):
+        start = next(t for t in self.tools if t["name"] == "start_coding_task")
+
+        self.assertIn("REAL working tree", start["description"])
+        self.assertIn("never switches branches", start["description"])
+        self.assertNotIn("nova/<slug>", start["description"])
+
+    def test_the_history_tools_are_registered_and_wired(self):
+        by_name = {t["name"]: t for t in self.tools}
+        for name in ("list_claude_threads", "read_claude_thread", "continue_claude_thread"):
+            self.assertIn(name, by_name)
+            path = by_name[name]["config"]["callable_path"]
+            method = path.rsplit(".", 1)[-1]
+            self.assertTrue(
+                hasattr(CodingService, method),
+                f"{name} points at {path}, which does not exist",
+            )
+
+    def test_every_tool_points_at_a_real_method(self):
+        """A typo'd callable_path fails only at runtime, on a live tool call."""
+        for tool in self.tools:
+            method = tool["config"]["callable_path"].rsplit(".", 1)[-1]
+            self.assertTrue(
+                callable(getattr(CodingService, method, None)),
+                f"{tool['name']} -> {method} is not a method on CodingService",
+            )

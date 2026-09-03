@@ -22,6 +22,11 @@ CMD_INTERRUPT = "interrupt"
 CMD_STOP = "stop"
 CMD_REPLAY = "replay"
 CMD_LIST = "list"
+# Claude Code's own history on this Mac — threads Nova did not start, including
+# the ones Nate has been having in the desktop app.
+CMD_CLAUDE_SESSIONS = "claude_sessions"
+CMD_TRANSCRIPT = "transcript"
+CMD_ATTACH = "attach"
 
 # Events (agent -> Nova)
 EVT_HELLO = "hello"

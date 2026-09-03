@@ -143,6 +143,7 @@ class Link:
                 instructions=command["instructions"],
                 title=command.get("title"),
                 base=command.get("base"),
+                isolate=bool(command.get("isolate")),
             )
         if kind == protocol.CMD_FEEDBACK:
             return await manager.feedback(
@@ -156,4 +157,25 @@ class Link:
             return manager.replay(command["session_id"], int(command.get("after_seq", 0)))
         if kind == protocol.CMD_LIST:
             return manager.list()
+        if kind == protocol.CMD_CLAUDE_SESSIONS:
+            # Synchronous: both SDK history calls read local .jsonl files and
+            # return in milliseconds, so there is nothing to await.
+            return manager.claude_sessions(
+                command["repo"], limit=int(command.get("limit", 25))
+            )
+        if kind == protocol.CMD_TRANSCRIPT:
+            return manager.transcript(
+                command["session_id"],
+                command["repo"],
+                limit=int(command.get("limit", 20)),
+                offset=command.get("offset"),
+                prose_only=command.get("prose_only", True),
+            )
+        if kind == protocol.CMD_ATTACH:
+            return await manager.attach(
+                command["session_id"],
+                repo=command.get("repo"),
+                cwd=command.get("cwd"),
+                title=command.get("title"),
+            )
         raise ValueError(f"Unknown command: {kind}")

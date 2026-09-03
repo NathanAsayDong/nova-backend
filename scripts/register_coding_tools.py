@@ -30,9 +30,12 @@ CODING_TOOLS: list[dict] = [
             "Hand a real coding task to Claude Code running on Nate's Mac. Use this "
             "for work that means reading and changing a codebase — building a "
             "feature, fixing a bug, refactoring — not for answering questions about "
-            "code, which you should just answer. The task runs in its own git "
-            "worktree on a branch named nova/<slug>, so it never disturbs what Nate "
-            "has open, and the result is a branch he reviews. It runs for minutes to "
+            "code, which you should just answer. The task runs in the repo's REAL "
+            "working tree on whatever branch is checked out, so edits appear live in "
+            "Nate's editor; it never switches branches or commits on its own. Only "
+            "one task per repo at a time. If the work continues something he has "
+            "already discussed with Claude, use continue_claude_thread instead so "
+            "the context carries over. It runs for minutes to "
             "an hour: say you have started it and move on, then use check_coding_task "
             "when he asks. Write the instructions as you would brief a capable "
             "engineer who cannot ask you a follow-up: what to build, where, and how "
@@ -113,6 +116,96 @@ CODING_TOOLS: list[dict] = [
                     },
                 },
                 "required": ["session_id", "text"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "list_claude_threads",
+        "description": (
+            "List the Claude Code conversations that already exist for a repo on "
+            "Nate's Mac — including the long-running ones he has been having in "
+            "the Claude desktop app, which Nova did not start. Use this when he "
+            "refers to something he 'already talked to Claude about', or before "
+            "starting new work on a repo, since an existing thread often already "
+            "has the context. Returns titles, branches and when each was last "
+            "touched; read one with read_claude_thread or pick it up with "
+            "continue_claude_thread."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_BASE}.list_claude_threads",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name as it appears on Nate's Desktop, e.g. 'nova-backend'.",
+                    }
+                },
+                "required": ["repo"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "read_claude_thread",
+        "description": (
+            "Read what was actually said in one of Nate's Claude Code "
+            "conversations. Returns the most recent exchanges by default, with "
+            "tool traffic stripped out, so it reads as dialogue rather than a "
+            "log. Long threads run to hundreds of messages — ask for the tail "
+            "first and page back with 'offset' only if the answer is not there. "
+            "Use this to answer questions about work already discussed, rather "
+            "than guessing or asking him to repeat it."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_BASE}.read_claude_thread",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Thread id from list_claude_threads."},
+                    "repo": {"type": "string", "description": "The repo the thread belongs to."},
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many messages to return. Defaults to the last 20.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Start index, for paging back through a long thread.",
+                    },
+                },
+                "required": ["session_id", "repo"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "continue_claude_thread",
+        "description": (
+            "Pick up one of Nate's existing Claude Code conversations and carry "
+            "it on — the agent resumes with all of that thread's context instead "
+            "of starting cold. Prefer this over start_coding_task whenever the "
+            "work continues something already discussed. It runs in the repo's "
+            "real working tree, so edits appear live in his editor. Pass "
+            "'instructions' to give it the next task, or leave it out just to "
+            "open the thread."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_BASE}.continue_claude_thread",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "Thread id from list_claude_threads."},
+                    "repo": {"type": "string", "description": "The repo the thread belongs to."},
+                    "instructions": {
+                        "type": "string",
+                        "description": "What to do next in that thread. Optional.",
+                    },
+                },
+                "required": ["session_id", "repo"],
                 "additionalProperties": False,
             },
         },
