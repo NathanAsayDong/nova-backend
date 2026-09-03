@@ -11,6 +11,7 @@ import unittest
 
 from src.harness.spoken_reply import (
     MAX_SPOKEN_CHARS,
+    SpokenLineWatcher,
     clamp_spoken,
     speech_summary,
     split_spoken_reply,
@@ -118,6 +119,61 @@ class ClampSpokenTests(unittest.TestCase):
 
     def test_empty_stays_empty(self):
         self.assertEqual(clamp_spoken("   "), "")
+
+
+class SpokenLineWatcherTests(unittest.TestCase):
+    """
+    Reading the reply as it is written. A real stream splits wherever the
+    tokenizer happens to split, so the tag arrives in pieces.
+    """
+
+    @staticmethod
+    def _feed(deltas: list[str]) -> list[tuple[int, str]]:
+        """Every line the watcher reported, with the delta index that did it."""
+        watcher = SpokenLineWatcher()
+        fired = []
+        for index, delta in enumerate(deltas):
+            line = watcher.push(delta)
+            if line is not None:
+                fired.append((index, line))
+        return fired
+
+    def test_fires_on_the_delta_that_closes_the_tag(self):
+        fired = self._feed(
+            ["<spe", "ak>Both checks", " passed.</spe", "ak>", "\n\n## Results", " and more"]
+        )
+
+        self.assertEqual(fired, [(3, "Both checks passed.")])
+
+    def test_never_fires_twice(self):
+        fired = self._feed(
+            ["<speak>One.</speak>", "<speak>Two.</speak>", "trailing"]
+        )
+
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0][1], "One.")
+
+    def test_an_unclosed_block_never_fires(self):
+        self.assertEqual(self._feed(["<speak>Still going", " and going"]), [])
+
+    def test_a_reply_that_declines_the_format_never_fires(self):
+        self.assertEqual(
+            self._feed(["Plain prose. ", "More prose. ", "Even more."]), []
+        )
+
+    def test_stops_watching_once_the_opener_is_clearly_not_coming(self):
+        """
+        The block is asked for first, so a page of prose without it settles
+        the question — and a long generation should not keep re-scanning.
+        """
+        watcher = SpokenLineWatcher()
+        watcher.push("Prose with an angle bracket > in it. " * 12)
+
+        # A tag this late is not the opening block; it is content.
+        self.assertIsNone(watcher.push("<speak>too late</speak>"))
+
+    def test_an_empty_block_reports_nothing_to_say(self):
+        self.assertEqual(self._feed(["<speak></speak>", "the answer"]), [])
 
 
 if __name__ == "__main__":

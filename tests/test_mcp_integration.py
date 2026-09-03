@@ -7,7 +7,7 @@ from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
 from src.model.mcp_server import McpServer
 from src.model.message import MessageRole
-from src.service.claude_service import ClaudeService, MCP_CONNECTOR_BETA
+from src.service.claude_service import ClaudeService, MCP_CONNECTOR_BETA, TurnStream
 from src.service.mcp_server_service import McpServerService
 from src.service.tool_service import ToolService
 
@@ -193,13 +193,15 @@ class AgentLoopMcpTests(unittest.TestCase):
         def fake_stream(prompt, role=None, context=None, tools=None,
                         system=None, mcp_servers=None):
             self.captured["mcp_servers"] = mcp_servers
-            return FakeMessage(
-                content=[
-                    FakeBlock(type="mcp_tool_use", name="search_issues",
-                              server_name="linear", input={"query": "bug"}),
-                    FakeBlock(type="mcp_tool_result"),
-                    FakeBlock(type="text", text="Found 3 issues."),
-                ]
+            return TurnStream.completed(
+                FakeMessage(
+                    content=[
+                        FakeBlock(type="mcp_tool_use", name="search_issues",
+                                  server_name="linear", input={"query": "bug"}),
+                        FakeBlock(type="mcp_tool_result"),
+                        FakeBlock(type="text", text="Found 3 issues."),
+                    ]
+                )
             )
 
         self.agent_loop.claude_service.stream_response = fake_stream
@@ -233,7 +235,9 @@ class AgentLoopMcpTests(unittest.TestCase):
         def fake_stream(prompt, role=None, context=None, tools=None,
                         system=None, mcp_servers=None):
             self.captured["mcp_servers"] = mcp_servers
-            return FakeMessage(content=[FakeBlock(type="text", text="ok")])
+            return TurnStream.completed(
+                FakeMessage(content=[FakeBlock(type="text", text="ok")])
+            )
 
         self.agent_loop.claude_service.stream_response = fake_stream
 

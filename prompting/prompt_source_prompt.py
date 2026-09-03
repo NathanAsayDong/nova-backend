@@ -30,7 +30,12 @@ class PromptSourceEnum(StrEnum):
         "When the answer genuinely is one sentence, say it aloud and write "
         "that same sentence — do not pad the written half to justify the "
         "format. Never mention the <speak> tags, the split, or the fact that "
-        "you are being read aloud."
+        "you are being read aloud.\n"
+        "\n"
+        "The <speak> block is for your ANSWER. When you are about to use a "
+        "tool, write the one-sentence acknowledgment as ordinary text with no "
+        "tags around it — it is spoken too, and tagging it would make the "
+        "answer arrive with the acknowledgment's timing instead of its own."
     )
     SMS_PROMPT = (
         "The user is texting you, and your reply is sent back as an SMS. Keep "

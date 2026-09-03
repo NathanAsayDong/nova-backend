@@ -17,7 +17,12 @@ from prompting.prompt_source_prompt import PromptSourceEnum
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.model.report_type import ReportType
-from src.harness.spoken_reply import clamp_spoken, speech_summary, split_spoken_reply
+from src.harness.spoken_reply import (
+    SpokenLineWatcher,
+    clamp_spoken,
+    speech_summary,
+    split_spoken_reply,
+)
 from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
 from src.service.mcp_server_service import McpServerService
@@ -375,6 +380,31 @@ class AgentLoop:
             )
         return records
 
+    def _failure_events(
+        self,
+        prompt_source: PromptSourceEnum,
+        text: str,
+        spoke_early: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        """
+        Emit one of the loop's own failure messages on both tracks.
+
+        A timeout, a dead tool, the iteration ceiling. These are short by
+        construction so there is nothing to summarize, but they do have to be
+        SAID: now that only `speech_text` reaches TTS, a voice turn that
+        yielded a bare `text` event would leave the user listening to silence,
+        waiting for an answer that has already given up.
+
+        `spoke_early` covers the case where the stream got far enough to say
+        something before it fell over — the turn does not follow "here you go"
+        with "I had to stop" out loud, it just shows the failure on screen.
+        """
+        if not spoke_early:
+            spoken = self._spoken_track(prompt_source, text, text)
+            if spoken:
+                yield {"type": "speech_text", "text": spoken, "role": "final"}
+        yield {"type": "text", "text": text}
+
     @staticmethod
     def _spoken_track(
         prompt_source: PromptSourceEnum,
@@ -527,28 +557,54 @@ class AgentLoop:
                 fallback = "I hit a time limit while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield {"type": "text", "text": fallback}
+                yield from self._failure_events(prompt_source, fallback)
                 return
 
+            # Whether this round already said something out loud. The reply is
+            # read as it is written, so the spoken line usually goes out well
+            # before the round finishes; the end-of-round paths below check
+            # this so a turn never says the same thing twice.
+            spoke_early = False
+            watcher = (
+                SpokenLineWatcher() if prompt_source.wants_spoken_summary() else None
+            )
+
             try:
-                response = self.claude_service.stream_response(
+                turn = self.claude_service.stream_response(
                     "",
                     context=history,
                     tools=tools_arg,
                     system=system_blocks,
                     mcp_servers=mcp_servers,
                 )
+                # This is the latency win. The `<speak>` block is written
+                # first, so its closing tag lands while the markdown answer
+                # beneath it is still being generated — and the moment it
+                # does, TTS can start. Waiting for the final message here (as
+                # this used to) meant every voice turn paid for the length of
+                # the WRITTEN answer before a word of the spoken one was said.
+                for delta in turn:
+                    if watcher is None:
+                        continue
+                    line = watcher.push(delta)
+                    if line is None:
+                        continue
+                    say = clamp_spoken(line)
+                    if say:
+                        spoke_early = True
+                        yield {"type": "speech_text", "text": say, "role": "final"}
+                response = turn.message
             except TimeoutError:
                 fallback = "I hit a backend timeout while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield {"type": "text", "text": fallback}
+                yield from self._failure_events(prompt_source, fallback, spoke_early)
                 return
             except Exception as exc:
                 fallback = f"Agent loop failed: {str(exc)}"
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield {"type": "text", "text": fallback}
+                yield from self._failure_events(prompt_source, fallback, spoke_early)
                 return
 
             # Only client-side tool_use blocks need execution here; anything
@@ -600,7 +656,7 @@ class AgentLoop:
                     # waiting on — the written answer arrives faster than it
                     # can be read either way — so the transport gets it before
                     # the prose and can start synthesizing immediately.
-                    if spoken_text:
+                    if spoken_text and not spoke_early:
                         yield {
                             "type": "speech_text",
                             "text": spoken_text,
@@ -636,8 +692,12 @@ class AgentLoop:
                     # The ack goes through the same ceiling as the reply, so a
                     # model that turns chatty before a tool call cannot stall
                     # the turn with narration the user has to sit through.
-                    spoken_ack = self._spoken_track(
-                        prompt_source, status_spoken, status_display
+                    spoken_ack = (
+                        None
+                        if spoke_early
+                        else self._spoken_track(
+                            prompt_source, status_spoken, status_display
+                        )
                     )
                     if spoken_ack:
                         yield {
@@ -706,7 +766,9 @@ class AgentLoop:
                         fallback = "I ran into a tool execution issue and had to stop."
                         history.append({"role": "assistant", "content": fallback})
                         self._persist_message(conversation, MessageRole.NOVA, fallback)
-                        yield {"type": "text", "text": fallback}
+                        yield from self._failure_events(
+                            prompt_source, fallback, spoke_early
+                        )
                         return
                     tool_results.append(
                         {
@@ -722,7 +784,7 @@ class AgentLoop:
         fallback = "I hit a loop limit while working on that and had to stop."
         history.append({"role": "assistant", "content": fallback})
         self._persist_message(conversation, MessageRole.NOVA, fallback)
-        yield {"type": "text", "text": fallback}
+        yield from self._failure_events(prompt_source, fallback)
 
     def run_agent(
         self,

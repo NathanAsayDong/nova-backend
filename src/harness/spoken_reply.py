@@ -51,6 +51,61 @@ _EMPHASIS = re.compile(r"(\*{1,3}|_{1,3}|~~)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
 _WHITESPACE = re.compile(r"\s+")
 
 
+# How much of a reply may go by without a `<speak>` opener before the watcher
+# concludes none is coming. The prompt asks for the block FIRST, so anything
+# past a sentence or two of prose means the model chose not to use it.
+_OPENER_GRACE_CHARS = 200
+
+
+class SpokenLineWatcher:
+    """
+    Reports the spoken line the instant it is finished, mid-generation.
+
+    The `<speak>` block is asked for first precisely so this can exist. The
+    two sentences Nova says are done long before the markdown answer beneath
+    them, and the whole felt cost of a voice turn is the wait for those two
+    sentences — so the turn should not have to see its own last token before
+    it can start talking.
+
+    Feed it deltas as they arrive. `push` returns the finished line exactly
+    once, on the delta that completes the closing tag, and None every other
+    time. A model that never opens the block, or opens it and never closes it,
+    simply never fires: the end-of-turn path picks those up instead.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._finished = False
+
+    def push(self, delta: str) -> str | None:
+        if self._finished:
+            return None
+
+        self._buffer += delta
+
+        # The delta that completes `</speak>` necessarily contains its final
+        # ">", so anything without one cannot be the delta we are waiting for.
+        # Cheap, and it keeps this off the hot path of a long generation.
+        if ">" not in delta:
+            self._give_up_if_no_opener()
+            return None
+
+        match = _SPEAK_BLOCK.search(self._buffer)
+        if match is None:
+            self._give_up_if_no_opener()
+            return None
+
+        self._finished = True
+        return match.group(1).strip() or None
+
+    def _give_up_if_no_opener(self) -> None:
+        """Stop watching once it is clear the model declined the format."""
+        if len(self._buffer) < _OPENER_GRACE_CHARS:
+            return
+        if _UNCLOSED_SPEAK.search(self._buffer) is None:
+            self._finished = True
+
+
 def split_spoken_reply(text: str) -> tuple[str, str | None]:
     """
     Pull a `<speak>` block out of a reply.
