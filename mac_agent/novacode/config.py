@@ -25,7 +25,7 @@ _BILLING_OVERRIDE_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 DEFAULT_WS_URL = "ws://localhost:8000/ws/coding"
 
 
-def load_env_file(path: Path | None = None) -> None:
+def load_env_file(path: Path | None = None, override: bool = False) -> None:
     """
     Read `mac_agent/.env` into the process environment.
 
@@ -34,8 +34,10 @@ def load_env_file(path: Path | None = None) -> None:
     long-lived credential to a Claude account sitting in a world-readable
     corner of ~/Library. A 0600 file next to the code is the better home.
 
-    Existing environment variables win, so a value exported for one run is not
-    silently overridden by the file.
+    Existing environment variables win by default, so a value exported for one
+    run is not silently overridden by the file. `override` flips that, which is
+    what a reload wants: the file is the source of truth and the stale value in
+    os.environ is exactly what needs replacing.
     """
     path = path or Path(__file__).resolve().parent.parent / ".env"
     if not path.exists():
@@ -47,7 +49,7 @@ def load_env_file(path: Path | None = None) -> None:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key and (override or key not in os.environ):
             os.environ[key] = value
 
 
@@ -70,8 +72,8 @@ class Config:
     model: str | None
 
     @classmethod
-    def from_env(cls) -> "Config":
-        load_env_file()
+    def from_env(cls, reload: bool = False) -> "Config":
+        load_env_file(override=reload)
         home = Path.home()
         budget = os.getenv("NOVA_CODE_MAX_BUDGET_USD")
         return cls(

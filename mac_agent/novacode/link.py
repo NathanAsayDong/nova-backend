@@ -46,6 +46,18 @@ class Link:
         backoff = _BACKOFF_START
         while True:
             try:
+                # Re-read .env on every attempt. Editing it and wondering why
+                # nothing changed is otherwise a guaranteed ten minutes: the
+                # daemon runs for weeks, and a value read once at startup is
+                # stale for almost all of that.
+                self.config = Config.from_env(reload=True)
+                if not self.config.token:
+                    log.error(
+                        "NOVA_CODE_TOKEN is empty in mac_agent/.env — the tower "
+                        "will reject the connection. Check the line is "
+                        "NOVA_CODE_TOKEN=<value> with an equals sign."
+                    )
+
                 headers = (
                     {"Authorization": f"Bearer {self.config.token}"}
                     if self.config.token
@@ -74,7 +86,19 @@ class Link:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning("link down (%s); retrying in %.0fs", exc, backoff)
+                # A rejected handshake surfaces as a bare "HTTP 403", which
+                # reads like a server fault rather than what it is. The tower
+                # closes the socket before accepting when the bearer token does
+                # not match, and that is the only reason it does so.
+                if "403" in str(exc):
+                    log.error(
+                        "Tower rejected the connection (403): the token does not "
+                        "match NOVA_CODE_TOKEN on the server, or the server has "
+                        "none set. Retrying in %.0fs",
+                        backoff,
+                    )
+                else:
+                    log.warning("link down (%s); retrying in %.0fs", exc, backoff)
             finally:
                 self.socket = None
 
