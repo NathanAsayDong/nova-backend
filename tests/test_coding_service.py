@@ -214,7 +214,7 @@ class MacShellTests(unittest.TestCase):
 
     def test_the_shell_string_is_not_passed_as_command(self):
         svc, link = self._service()
-        result = svc.run_terminal_command("pytest -q", None, 45, "c1")
+        result = svc.run_mac_command("pytest -q", None, 45, "c1")
 
         self.assertEqual(link.sent["name"], "exec")      # envelope command NAME
         self.assertEqual(link.sent["cmd"], "pytest -q")  # shell string as cmd
@@ -224,17 +224,25 @@ class MacShellTests(unittest.TestCase):
     def test_the_call_timeout_outlasts_the_command_timeout(self):
         """A 504 must not fire while the Mac is still legitimately working."""
         svc, link = self._service()
-        svc.run_terminal_command("sleep 100", None, 120, None)
+        svc.run_mac_command("sleep 100", None, 120, None)
 
         self.assertEqual(link.sent["timeout_seconds"], 120)
         self.assertGreater(link.sent["timeout"], 120)
 
-    def test_the_tool_still_points_at_a_real_method(self):
+    def test_run_mac_command_is_registered_and_wired(self):
+        import scripts.register_coding_tools as reg
+
+        tool = next(t for t in reg.CODING_TOOLS if t["name"] == "run_mac_command")
+        path = tool["config"]["callable_path"]
+        self.assertEqual(path, "src.service.coding_service.CodingService.run_mac_command")
+        self.assertTrue(callable(getattr(CodingService, path.rsplit(".", 1)[-1], None)))
+
+    def test_run_terminal_command_stayed_on_the_tower(self):
+        """The sibling must not have moved: it still runs on the server."""
         import scripts.register_project_tools as reg
 
         tool = next(t for t in reg.PROJECT_TOOLS if t["name"] == "run_terminal_command")
-        path = tool["config"]["callable_path"]
         self.assertEqual(
-            path, "src.service.coding_service.CodingService.run_terminal_command"
+            tool["config"]["callable_path"],
+            "src.service.command_line_service.CommandLineService.run_terminal_command",
         )
-        self.assertTrue(callable(getattr(CodingService, path.rsplit(".", 1)[-1], None)))
