@@ -210,6 +210,61 @@ class CodingService:
             await self.feedback(parsed, instructions)
         return {"sessionId": str(parsed), "status": CodingStatus.WORKING if instructions else CodingStatus.IDLE}
 
+    # ---------- shell on the Mac (run_mac_command) ----------
+
+    async def exec_on_mac(
+        self, command: str, cwd: str | None, timeout_seconds: int
+    ) -> dict:
+        """
+        Run one shell command on the Mac and wait for its output.
+
+        The timeouts nest and the order matters: the command may run for
+        `timeout_seconds`, so the websocket call has to outlast it, and `_run`
+        has to outlast the call. Left at the 90s default, a 120s command would
+        report a spurious 504 while the Mac was still perfectly happily
+        working.
+        """
+        # The shell string travels as `cmd`, not `command`: AgentLink.call's
+        # first positional parameter is itself named `command` (it is the
+        # command *name*, "exec"), so a `command=` kwarg here collides with it.
+        return await self.link.call(
+            "exec",
+            timeout=timeout_seconds + 15,
+            cmd=command,
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def run_mac_command(
+        self,
+        command: str,
+        working_directory: str | None = None,
+        timeout_seconds: int | None = None,
+        conversation_uuid: str | None = None,
+    ) -> dict:
+        """
+        Tool entry point: run a shell command on Nate's Mac.
+
+        A sibling of run_terminal_command, not a replacement — that one still
+        runs on the tower, which is the right place for anything about Nova's
+        own service. This is for the other machine: his repos, his toolchain,
+        his dev servers. Nova picks the host by picking the tool.
+
+        Return shape matches CommandLineService exactly, so the terminal
+        artifact the chat panel draws from stdout/stderr renders the same
+        whichever host ran the command.
+
+        `conversation_uuid` is accepted and ignored: the tower version used it
+        to default the cwd to a project workspace under project_files/, a path
+        that does not exist on the Mac, which defaults to the repos root.
+        """
+        timeout = int(timeout_seconds or 30)
+        timeout = max(1, min(timeout, 120))
+        return self._run(
+            self.exec_on_mac(command, working_directory, timeout),
+            timeout=timeout + 30,
+        )
+
     # ---------- the agent's events ----------
 
     def record_event(self, event: dict) -> None:
