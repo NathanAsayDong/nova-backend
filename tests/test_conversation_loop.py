@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from prompting.prompt_source_prompt import PromptSourceEnum
 from src.harness.agent_loop import AgentLoop
+from src.harness.spoken_reply import SCREEN_ONLY_LINE
 from src.service.claude_service import TurnStream
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
@@ -759,6 +760,206 @@ class TurnStreamTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             list(stream)
+
+
+class ToolTurnSpeechTests(unittest.TestCase):
+    """
+    A turn that calls tools has to keep talking.
+
+    The failure this covers, reported from real use: Nova said what it was
+    about to do and then never said the answer. Two causes — an answer made
+    entirely of markdown structure reduced to no sayable prose, and every
+    round after the first was gagged by design.
+    """
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        self.conversation_id = uuid4()
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.agent_loop.conversation_service = FakeConversationService()
+
+    def _rounds(self, responses):
+        queue = list(responses)
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            return TurnStream.completed(queue.pop(0))
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+    @staticmethod
+    def _tool_round(text, call_id):
+        blocks = [FakeTextBlock(text=text)] if text else []
+        blocks.append(FakeToolUseBlock(id=call_id, name="missing_tool", input={}))
+        return FakeMessage(content=blocks)
+
+    def _spoken(self, prompt_source=PromptSourceEnum.SPEECH_PROMPT):
+        events = list(
+            self.agent_loop.conversation_loop_events(
+                "what's on my calendar", self.conversation_id, prompt_source=prompt_source
+            )
+        )
+        return [
+            (event["role"], event["text"])
+            for event in events
+            if event["type"] == "speech_text"
+        ], [event["text"] for event in events if event["type"] == "status_text"]
+
+    def test_an_answer_that_is_all_table_is_still_answered_out_loud(self):
+        self._rounds([
+            self._tool_round("Let me pull that up.", "t1"),
+            FakeMessage(content=[FakeTextBlock(
+                text="| time | event |\n| --- | --- |\n| 9am | standup |"
+            )]),
+        ])
+
+        spoken, _ = self._spoken()
+
+        self.assertEqual(spoken[-1], ("final", SCREEN_ONLY_LINE))
+
+    def test_an_answer_that_is_all_code_is_still_answered_out_loud(self):
+        self._rounds([
+            self._tool_round("On it.", "t1"),
+            FakeMessage(content=[FakeTextBlock(text="```python\nprint(1)\n```")]),
+        ])
+
+        spoken, _ = self._spoken()
+
+        self.assertEqual(spoken[-1], ("final", SCREEN_ONLY_LINE))
+
+    def test_an_answer_with_prose_uses_the_prose_not_the_fallback(self):
+        """The floor is a floor, not a replacement."""
+        self._rounds([
+            self._tool_round("On it.", "t1"),
+            FakeMessage(content=[FakeTextBlock(
+                text="You have three meetings.\n\n| time | event |\n| --- | --- |"
+            )]),
+        ])
+
+        spoken, _ = self._spoken()
+
+        self.assertEqual(spoken[-1], ("final", "You have three meetings."))
+
+    def test_a_turn_with_nothing_written_at_all_stays_silent(self):
+        """The floor points at the screen, so there has to be something on it."""
+        self._rounds([
+            self._tool_round("On it.", "t1"),
+            FakeMessage(content=[FakeTextBlock(text="")]),
+        ])
+
+        spoken, _ = self._spoken()
+
+        self.assertEqual([role for role, _ in spoken], ["status"])
+
+    def test_each_tool_round_gets_to_say_where_it_is(self):
+        self._rounds([
+            self._tool_round("Checking your calendar.", "t1"),
+            self._tool_round("Now cross-referencing the invites.", "t2"),
+            FakeMessage(content=[FakeTextBlock(text="<speak>Three meetings.</speak>Details.")]),
+        ])
+
+        spoken, shown = self._spoken()
+
+        self.assertEqual(
+            spoken,
+            [
+                ("status", "Checking your calendar."),
+                ("status", "Now cross-referencing the invites."),
+                ("final", "Three meetings."),
+            ],
+        )
+        # Every spoken line is captioned; audio with no text is worse than none.
+        self.assertEqual(
+            shown, ["Checking your calendar.", "Now cross-referencing the invites."]
+        )
+
+    def test_progress_stops_before_it_becomes_a_monologue(self):
+        self._rounds(
+            [self._tool_round(f"Step {n}.", f"t{n}") for n in range(1, 6)]
+            + [FakeMessage(content=[FakeTextBlock(text="<speak>All set.</speak>Details.")])]
+        )
+
+        spoken, shown = self._spoken()
+
+        progress = [text for role, text in spoken if role == "status"]
+        self.assertEqual(progress, ["Step 1.", "Step 2.", "Step 3."])
+        # Past the cap nothing is said and nothing is shown — the turn just works.
+        self.assertEqual(shown, ["Step 1.", "Step 2.", "Step 3."])
+        # And the answer still lands.
+        self.assertEqual(spoken[-1], ("final", "All set."))
+
+    def test_a_model_stuck_on_one_phrase_only_says_it_once(self):
+        self._rounds([
+            self._tool_round("Let me check that.", "t1"),
+            self._tool_round("Let me check that!", "t2"),
+            self._tool_round("Still checking that", "t3"),
+            FakeMessage(content=[FakeTextBlock(text="<speak>Found it.</speak>Details.")]),
+        ])
+
+        spoken, _ = self._spoken()
+
+        progress = [text for role, text in spoken if role == "status"]
+        self.assertEqual(progress, ["Let me check that.", "Still checking that"])
+
+    def test_a_tagged_acknowledgment_is_not_said_twice(self):
+        """
+        The model wrapped its pre-tool line in <speak>, so the stream already
+        spoke it mid-generation. The round must not repeat it.
+        """
+        self._rounds([
+            self._tool_round("<speak>Let me pull that up.</speak>", "t1"),
+            FakeMessage(content=[FakeTextBlock(text="<speak>Three meetings.</speak>Details.")]),
+        ])
+
+        spoken, _ = self._spoken()
+
+        self.assertEqual(
+            [text for _role, text in spoken],
+            ["Let me pull that up.", "Three meetings."],
+        )
+
+    def test_tagging_every_round_does_not_narrate_around_the_cap(self):
+        """
+        The prompt asks for plain-text progress lines, so a tagged one is the
+        model going off-format. The stream path applies the same cap, or the
+        cap would only bind models that were already behaving.
+        """
+        self._rounds(
+            [
+                self._tool_round(f"<speak>Step {n}.</speak>", f"t{n}")
+                for n in range(1, 6)
+            ]
+            + [FakeMessage(content=[FakeTextBlock(text="<speak>All set.</speak>Details.")])]
+        )
+
+        spoken, _ = self._spoken()
+
+        progress = [text for role, text in spoken if role == "status"]
+        self.assertEqual(progress, [])
+        # They came out of the stream path, so they carry the 'final' role --
+        # what matters is that there are three of them, then the answer.
+        self.assertEqual(
+            [text for _role, text in spoken],
+            ["Step 1.", "Step 2.", "Step 3.", "All set."],
+        )
+
+    def test_chat_still_gets_exactly_one_status_line(self):
+        """
+        Progress speech exists to fill silence. A typed turn has no silence to
+        fill, so it keeps the one-acknowledgment behaviour unchanged.
+        """
+        self._rounds([
+            self._tool_round("Checking your calendar.", "t1"),
+            self._tool_round("Now cross-referencing the invites.", "t2"),
+            FakeMessage(content=[FakeTextBlock(text="Three meetings.")]),
+        ])
+
+        spoken, shown = self._spoken(PromptSourceEnum.CHAT_PROMPT)
+
+        self.assertEqual(spoken, [])
+        self.assertEqual(shown, ["Checking your calendar."])
 
 
 class ArtifactTests(unittest.TestCase):

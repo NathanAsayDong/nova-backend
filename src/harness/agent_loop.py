@@ -18,8 +18,10 @@ from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.model.report_type import ReportType
 from src.harness.spoken_reply import (
+    SCREEN_ONLY_LINE,
     SpokenLineWatcher,
     clamp_spoken,
+    is_repeat,
     speech_summary,
     split_spoken_reply,
 )
@@ -33,6 +35,12 @@ from src.service.update_service import UpdateService
 _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
 _MIN_SENTENCE_CHARS = 30
 _AGENT_MAX_ITERATIONS = 50
+
+# How many progress lines one turn may say out loud before it stops narrating
+# and just works. A multi-step turn should not leave the user in silence, but
+# it should not talk the whole way through either — past about three, the
+# updates stop being reassurance and become the thing you are waiting out.
+_MAX_SPOKEN_PROGRESS_LINES = 3
 _AGENT_LOOP_TIMEOUT_SECONDS = 120.0
 
 # Memory retrieval is overlapped with the turn's other setup work, so it needs
@@ -410,6 +418,8 @@ class AgentLoop:
         prompt_source: PromptSourceEnum,
         tagged: str | None,
         written: str,
+        *,
+        required: bool = False,
     ) -> str | None:
         """
         Decide what, if anything, this turn should say out loud.
@@ -423,11 +433,22 @@ class AgentLoop:
         sayable. Either way the result goes through the length ceiling. The
         prompt asks for brevity, which a model can decline; this is where it
         stops being optional.
+
+        `required` marks the place where saying nothing is not an option. An
+        answer made entirely of table rows or a code block reduces to no
+        sayable prose at all, and for a progress line that is fine — skip it.
+        For the ANSWER it is not: the user asked a question out loud and is
+        waiting for a reply, and silence tells them the turn failed. So the
+        answer falls back to a line that at least points at the screen.
         """
         if not prompt_source.wants_spoken_summary():
             return None
         spoken = clamp_spoken(tagged) if tagged else speech_summary(written)
-        return spoken or None
+        if spoken:
+            return spoken
+        if required and written.strip():
+            return SCREEN_ONLY_LINE
+        return None
 
     def conversation_loop_events(
         self,
@@ -546,11 +567,21 @@ class AgentLoop:
         history.append({"role": "user", "content": self._augment(prompt, memory_block)})
         self._persist_message(conversation, MessageRole.USER, prompt)
 
-        # At most one spoken acknowledgment per turn: the text Claude writes
-        # before its first tool call is real feedback ("Let me pull that up"),
-        # but text on later tool rounds is play-by-play narration — it stays
-        # in history for the model and is never surfaced to the user.
-        status_emitted = False
+        # Progress reporting across a multi-round turn.
+        #
+        # This used to be a single flag: one acknowledgment per turn, and every
+        # later round silent, on the theory that round-by-round text is
+        # play-by-play narration. Spoken, that theory is wrong. A turn that
+        # calls three tools said "let me pull that up" and then went quiet for
+        # the length of the work, which sounds like Nova stopped listening.
+        #
+        # So a voice turn may speak again as it goes, bounded by
+        # `_MAX_SPOKEN_PROGRESS_LINES` and by not repeating itself. A turn with
+        # no voice keeps the old behaviour exactly — one status line, because
+        # there is no silence there to fill.
+        progress_spoken = 0
+        last_progress = ""
+        status_shown = False
 
         for _ in range(_AGENT_MAX_ITERATIONS):
             if time.monotonic() - started_at > _AGENT_LOOP_TIMEOUT_SECONDS:
@@ -564,7 +595,7 @@ class AgentLoop:
             # read as it is written, so the spoken line usually goes out well
             # before the round finishes; the end-of-round paths below check
             # this so a turn never says the same thing twice.
-            spoke_early = False
+            early_line: str | None = None
             watcher = (
                 SpokenLineWatcher() if prompt_source.wants_spoken_summary() else None
             )
@@ -590,21 +621,34 @@ class AgentLoop:
                     if line is None:
                         continue
                     say = clamp_spoken(line)
-                    if say:
-                        spoke_early = True
+                    # The turn's limits apply here too, or a model that wraps
+                    # every pre-tool line in <speak> narrates its way straight
+                    # around them. If this round turns out to be the answer,
+                    # the end-of-round path speaks it instead — later than it
+                    # could have, but never lost.
+                    if (
+                        say
+                        and progress_spoken < _MAX_SPOKEN_PROGRESS_LINES
+                        and not is_repeat(say, last_progress)
+                    ):
+                        early_line = say
                         yield {"type": "speech_text", "text": say, "role": "final"}
                 response = turn.message
             except TimeoutError:
                 fallback = "I hit a backend timeout while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield from self._failure_events(prompt_source, fallback, spoke_early)
+                yield from self._failure_events(
+                    prompt_source, fallback, early_line is not None
+                )
                 return
             except Exception as exc:
                 fallback = f"Agent loop failed: {str(exc)}"
                 history.append({"role": "assistant", "content": fallback})
                 self._persist_message(conversation, MessageRole.NOVA, fallback)
-                yield from self._failure_events(prompt_source, fallback, spoke_early)
+                yield from self._failure_events(
+                    prompt_source, fallback, early_line is not None
+                )
                 return
 
             # Only client-side tool_use blocks need execution here; anything
@@ -642,8 +686,11 @@ class AgentLoop:
 
                 raw_text = self._extract_text(response)
                 display_text, spoken_text = split_spoken_reply(raw_text)
+                # required: this is the answer the user asked for out loud.
+                # A reply that is all table or all code reduces to no sayable
+                # prose, and ending a turn in silence reads as failure.
                 spoken_text = self._spoken_track(
-                    prompt_source, spoken_text, display_text
+                    prompt_source, spoken_text, display_text, required=True
                 )
                 # Persist before yielding so a client disconnect mid-stream
                 # can't lose the reply. The written answer is the turn of
@@ -656,7 +703,7 @@ class AgentLoop:
                     # waiting on — the written answer arrives faster than it
                     # can be read either way — so the transport gets it before
                     # the prose and can start synthesizing immediately.
-                    if spoken_text and not spoke_early:
+                    if spoken_text and early_line is None:
                         yield {
                             "type": "speech_text",
                             "text": spoken_text,
@@ -682,29 +729,47 @@ class AgentLoop:
 
             history.append({"role": "assistant", "content": assistant_blocks})
 
-            if not status_emitted:
-                status_display, status_spoken = split_spoken_reply(
-                    self._extract_text(response).strip()
+            # What this round said before reaching for its tools.
+            status_display, status_tagged = split_spoken_reply(
+                self._extract_text(response).strip()
+            )
+            if status_display and early_line is not None:
+                # Already said out loud, mid-generation, having passed the same
+                # limits below. Count it, caption it, do not repeat it.
+                progress_spoken += 1
+                last_progress = early_line
+                status_shown = True
+                yield {"type": "status_text", "text": status_display}
+
+            elif status_display:
+                # The line goes through the same ceiling as the answer, so a
+                # model that turns chatty before a tool call cannot stall the
+                # turn with narration the user has to sit through.
+                progress_line = self._spoken_track(
+                    prompt_source, status_tagged, status_display
                 )
-                if status_display:
-                    status_emitted = True
+                say_it = (
+                    progress_line is not None
+                    and progress_spoken < _MAX_SPOKEN_PROGRESS_LINES
+                    and not is_repeat(progress_line, last_progress)
+                )
+
+                # Show it when it is about to be said — audio with no caption
+                # is worse than no audio — and otherwise only for the first
+                # round, which is the one-acknowledgment behaviour every
+                # medium without a speaker still gets.
+                if say_it or not status_shown:
+                    status_shown = True
                     yield {"type": "status_text", "text": status_display}
-                    # The ack goes through the same ceiling as the reply, so a
-                    # model that turns chatty before a tool call cannot stall
-                    # the turn with narration the user has to sit through.
-                    spoken_ack = (
-                        None
-                        if spoke_early
-                        else self._spoken_track(
-                            prompt_source, status_spoken, status_display
-                        )
-                    )
-                    if spoken_ack:
-                        yield {
-                            "type": "speech_text",
-                            "text": spoken_ack,
-                            "role": "status",
-                        }
+
+                if say_it:
+                    progress_spoken += 1
+                    last_progress = progress_line
+                    yield {
+                        "type": "speech_text",
+                        "text": progress_line,
+                        "role": "status",
+                    }
 
             tool_results: list[dict[str, Any]] = []
             for block in tool_uses:
@@ -767,7 +832,7 @@ class AgentLoop:
                         history.append({"role": "assistant", "content": fallback})
                         self._persist_message(conversation, MessageRole.NOVA, fallback)
                         yield from self._failure_events(
-                            prompt_source, fallback, spoke_early
+                            prompt_source, fallback, early_line is not None
                         )
                         return
                     tool_results.append(

@@ -30,6 +30,17 @@ _UNCLOSED_SPEAK = re.compile(r"<speak\b[^>]*>", re.IGNORECASE)
 # set; one is usually better, and the prompt says so.
 MAX_SPOKEN_SENTENCES = 2
 
+# What Nova says when a reply has no sayable prose in it at all — an answer
+# that is entirely a table, a code block, or a diff.
+#
+# Silence was the old behaviour and it is the wrong one. A turn that called
+# tools has already spent the user's patience on "let me pull that up"
+# followed by however long the work took; ending it with nothing reads as
+# Nova having failed, when in fact the answer is sitting on the screen. This
+# is only ever a floor — the model's own `<speak>` line, or the opening of its
+# prose, is used whenever either exists.
+SCREEN_ONLY_LINE = "I've put the details on screen."
+
 # A backstop on top of the sentence count, because "sentence" is not a bound —
 # a single one can run for a paragraph. Roughly 20 seconds of speech.
 MAX_SPOKEN_CHARS = 320
@@ -169,6 +180,21 @@ def clamp_spoken(text: str) -> str:
     if not collapsed:
         return ""
     return _clamp(collapsed)
+
+
+def is_repeat(line: str, previous: str) -> bool:
+    """
+    Whether two spoken lines are the same thing said twice.
+
+    Models settle into a phrase and reuse it across tool rounds — three
+    consecutive "let me check that for you"s are worse than one. Compared
+    loosely, because "On it." and "On it!" are not two different sentences.
+    """
+    return _comparable(line) == _comparable(previous) and _comparable(line) != ""
+
+
+def _comparable(text: str) -> str:
+    return _WHITESPACE.sub(" ", (text or "").strip().casefold()).strip(" .!?,;:—-")
 
 
 def _plain_text(text: str) -> str:
