@@ -9,7 +9,9 @@ runtime with the socket sitting there connected.
 """
 
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
+from uuid import uuid4
 
 from src.service.coding_service import CodingService
 
@@ -57,6 +59,48 @@ class AgentBindingTests(unittest.TestCase):
             CodingService()._run(None)
 
         self.assertIn("Restart the API", str(caught.exception))
+
+
+class TimestampShapeTests(unittest.TestCase):
+    """
+    Rows read back from Supabase carry ISO strings where the model claims
+    datetimes -- SQLModel does not validate `table=True` models, so nothing
+    coerces them. Both shapes reach _to_dict and both have to survive it.
+    """
+
+    def _session(self, created, updated):
+        from src.model.coding_session import CodingSession
+
+        return CodingSession(
+            session_id=uuid4(),
+            title="t",
+            repo="nova-backend",
+            instructions="do a thing",
+            created_at=created,
+            updated_at=updated,
+        )
+
+    def test_a_row_from_the_database_survives(self):
+        """The shape that crashed: strings straight out of postgres."""
+        row = self._session("2026-09-03T16:45:00+00:00", "2026-09-03T16:46:00+00:00")
+
+        out = CodingService._to_dict(row)
+
+        self.assertEqual(out["createdAt"], "2026-09-03T16:45:00+00:00")
+        self.assertEqual(out["updatedAt"], "2026-09-03T16:46:00+00:00")
+
+    def test_a_row_built_in_memory_survives(self):
+        now = datetime(2026, 9, 3, 16, 45, tzinfo=timezone.utc)
+
+        out = CodingService._to_dict(self._session(now, now))
+
+        self.assertEqual(out["createdAt"], now.isoformat())
+
+    def test_missing_timestamps_are_null_not_the_string_none(self):
+        out = CodingService._to_dict(self._session(None, None))
+
+        self.assertIsNone(out["createdAt"])
+        self.assertIsNone(out["updatedAt"])
 
 
 if __name__ == "__main__":

@@ -332,6 +332,22 @@ class CodingService:
         }
 
     @staticmethod
+    def _iso(value: Any) -> str | None:
+        """
+        Render a timestamp that may already be a string.
+
+        SQLModel skips validation on `table=True` models, so a row read back
+        from Supabase keeps whatever JSON gave it — `created_at` arrives as an
+        ISO string, not a datetime, and calling .isoformat() on it raises.
+        Rows this process just built in memory do hold real datetimes, so both
+        shapes are live at once and the type annotation is not to be trusted.
+        meeting_service and update_service both guard the same way.
+        """
+        if value is None:
+            return None
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+    @staticmethod
     def _to_dict(session: CodingSession) -> dict:
         return {
             "sessionId": str(session.session_id),
@@ -345,6 +361,6 @@ class CodingService:
             "lastResult": session.last_result,
             "lastSeq": session.last_seq,
             "projectId": session.project_id,
-            "createdAt": session.created_at.isoformat() if session.created_at else None,
-            "updatedAt": session.updated_at.isoformat() if session.updated_at else None,
+            "createdAt": CodingService._iso(session.created_at),
+            "updatedAt": CodingService._iso(session.updated_at),
         }
