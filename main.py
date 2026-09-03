@@ -40,7 +40,7 @@ async def lifespan(app: FastAPI):
     # can schedule onto it instead of trying to await from a thread.
     from src.controller.coding_controller import coding_service
 
-    coding_service.loop = asyncio.get_running_loop()
+    coding_service.bind_loop(asyncio.get_running_loop())
 
     yield
 
