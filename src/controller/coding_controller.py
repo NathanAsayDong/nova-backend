@@ -178,6 +178,32 @@ async def get_coding_session(session_id: str, afterSeq: int = Query(0, ge=0)) ->
     return {**detail, "agentConnected": link.connected}
 
 
+@router.get("/coding/repos/{repo}/threads")
+async def list_claude_threads(repo: str, limit: int = Query(25, ge=1, le=100)) -> dict:
+    """Claude Code threads for a repo, including ones Nova never started."""
+    return await coding_service.claude_sessions(repo, limit=limit)
+
+
+@router.get("/coding/repos/{repo}/threads/{session_id}")
+async def read_claude_thread(
+    repo: str,
+    session_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int | None = Query(None, ge=0),
+) -> dict:
+    return await coding_service.transcript(
+        session_id, repo, limit=limit, offset=offset
+    )
+
+
+@router.post("/coding/repos/{repo}/threads/{session_id}/adopt")
+async def adopt_claude_thread(repo: str, session_id: str, payload: dict = Body(default={})) -> dict:
+    """Pick up an existing thread so Nova can work in it."""
+    return await coding_service.adopt(
+        session_id, repo, (payload or {}).get("instructions")
+    )
+
+
 @router.post("/coding/sessions")
 async def start_coding_session(payload: dict = Body(...)) -> dict:
     repo = (payload.get("repo") or "").strip()

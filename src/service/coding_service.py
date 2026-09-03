@@ -141,6 +141,75 @@ class CodingService:
             )
         return {"sessionId": str(session_id), "status": CodingStatus.CLOSED}
 
+    # ---------- Claude Code's own history ----------
+    #
+    # Threads Nova did not start. Nate has been talking to Claude Code in the
+    # desktop app for weeks, and those conversations live in the same on-disk
+    # store the agent writes to — so "what did I already discuss about this
+    # repo" is answerable, and an existing thread can be picked up rather than
+    # restarted from nothing.
+
+    async def claude_sessions(self, repo: str, limit: int = 25) -> dict:
+        rows = await self.link.call("claude_sessions", repo=repo, limit=limit)
+        return {"repo": repo, "sessions": rows or []}
+
+    async def transcript(
+        self,
+        session_id: str,
+        repo: str,
+        limit: int = 20,
+        offset: int | None = None,
+    ) -> dict:
+        return await self.link.call(
+            "transcript",
+            session_id=session_id,
+            repo=repo,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def adopt(
+        self, session_id: str, repo: str, instructions: str | None = None
+    ) -> dict:
+        """
+        Take up one of Nate's own Claude Code threads.
+
+        Recorded in coding_session like any other, so it shows in the panel
+        and Nova can be asked about it later — but marked with the id Claude
+        Code already gave it, so the row and the .jsonl are the same thread
+        rather than two records of one conversation.
+        """
+        parsed = UUID(str(session_id))
+        existing = await asyncio.to_thread(self.dao.get, parsed)
+
+        # Default 90s timeout deliberately left alone: it has to stay inside
+        # _run's own 120s budget, or the outer wait expires first and the
+        # caller gets a bare timeout instead of the agent's actual error.
+        result = await self.link.call("attach", session_id=str(parsed), repo=repo)
+
+        if existing is None:
+            await asyncio.to_thread(
+                self.dao.create,
+                CodingSession(
+                    session_id=parsed,
+                    title=(result or {}).get("title") or f"Adopted thread {session_id[:8]}",
+                    status=CodingStatus.IDLE,
+                    repo=repo,
+                    cwd=(result or {}).get("cwd"),
+                    instructions=instructions or "(adopted from an existing Claude Code thread)",
+                    rollup="Picked up an existing conversation.",
+                ),
+            )
+        else:
+            await asyncio.to_thread(
+                self.dao.update, parsed, status=CodingStatus.IDLE,
+                rollup="Picked up an existing conversation.",
+            )
+
+        if instructions:
+            await self.feedback(parsed, instructions)
+        return {"sessionId": str(parsed), "status": CodingStatus.WORKING if instructions else CodingStatus.IDLE}
+
     # ---------- the agent's events ----------
 
     def record_event(self, event: dict) -> None:
@@ -287,6 +356,31 @@ class CodingService:
         self, session_id: str, conversation_uuid: str | None = None
     ) -> dict:
         return self._run(self.stop(UUID(session_id)))
+
+    def list_claude_threads(
+        self, repo: str, conversation_uuid: str | None = None
+    ) -> dict:
+        """Tool entry point: Nate's existing Claude Code threads for a repo."""
+        return self._run(self.claude_sessions(repo))
+
+    def read_claude_thread(
+        self,
+        session_id: str,
+        repo: str,
+        limit: int = 20,
+        offset: int | None = None,
+        conversation_uuid: str | None = None,
+    ) -> dict:
+        return self._run(self.transcript(session_id, repo, limit=limit, offset=offset))
+
+    def continue_claude_thread(
+        self,
+        session_id: str,
+        repo: str,
+        instructions: str | None = None,
+        conversation_uuid: str | None = None,
+    ) -> dict:
+        return self._run(self.adopt(session_id, repo, instructions))
 
     def check_coding_task(
         self, session_id: str | None = None, conversation_uuid: str | None = None
