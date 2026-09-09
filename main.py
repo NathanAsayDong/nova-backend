@@ -19,6 +19,7 @@ from src.controller.mcp_server_controller import router as mcp_server_router
 from src.controller.update_controller import router as update_router
 from src.controller.face_controller import router as face_router
 from src.controller.coding_controller import router as coding_router
+from src.controller.settings_controller import router as settings_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -67,6 +68,7 @@ app.include_router(meeting_router)
 app.include_router(mcp_server_router)
 app.include_router(face_router)
 app.include_router(coding_router)
+app.include_router(settings_router)
 # Twilio's webhooks, not the browser client's — CORS above does not apply to
 # them, and they are gated on Twilio's request signature instead.
 app.include_router(call_router)
