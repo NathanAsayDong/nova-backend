@@ -24,14 +24,26 @@ def get_available_models() -> Dict[str, Any]:
     Get list of available Claude models.
 
     Returns:
-        JSON with list of available models and current selection.
+        JSON with the models this account can use and the current selection.
+
+        `models` is the one a picker should render: each entry carries the id
+        to send back and the display_name to show, both straight from
+        Anthropic. `available_models` is the same set as bare ids, kept so
+        anything already reading it keeps working.
     """
     from src.service.claude_service import ClaudeService
 
     claude_service = ClaudeService()
+    options = claude_service.get_model_options()
     return {
-        "available_models": claude_service.get_available_models(),
+        "models": options,
+        "available_models": [model["id"] for model in options],
         "current_model": claude_service.get_current_model(),
+        "current_model_id": claude_service.get_current_model_id(),
+        # Resolved server-side: the stored id may be an alias
+        # (claude-haiku-4-5) while the list carries the dated snapshot it
+        # names, so a UI matching the two itself would show a bare id.
+        "current_model_name": claude_service.get_current_model_name(),
     }
 
 
@@ -59,6 +71,8 @@ def set_model(request: ModelSwitchRequest) -> Dict[str, Any]:
         return {
             "success": True,
             "current_model": claude_service.get_current_model(),
+            "current_model_id": claude_service.get_current_model_id(),
+            "current_model_name": claude_service.get_current_model_name(),
         }
     else:
         raise HTTPException(

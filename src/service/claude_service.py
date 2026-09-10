@@ -136,8 +136,27 @@ class ClaudeService:
         return False
 
     def get_available_models(self) -> list[str]:
-        """The models a caller is allowed to switch to."""
+        """The model ids a caller is allowed to switch to."""
         return self.settings_service.get_available_models()
+
+    def get_model_options(self) -> list[dict[str, str]]:
+        """The same models as {id, display_name}, for a picker to render."""
+        return self.settings_service.get_model_options()
+
+    def get_current_model_name(self) -> str:
+        """The display name of the current model, for showing rather than storing."""
+        return self.settings_service.display_name_for(self.MODEL)
+
+    def get_current_model_id(self) -> str:
+        """
+        The listed id the current model resolves to.
+
+        A picker matches its options against this, not against the stored
+        value: an alias matches no option, and a <select> whose value matches
+        nothing silently displays its first entry — claiming Fable 5.1 while
+        Haiku is what is actually selected.
+        """
+        return self.settings_service.resolve_model(self.MODEL) or self.MODEL
 
     def get_current_model(self) -> str:
         """The model this service is currently pointing at."""
