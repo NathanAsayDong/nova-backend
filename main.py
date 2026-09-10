@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -20,6 +21,8 @@ from src.controller.update_controller import router as update_router
 from src.controller.face_controller import router as face_router
 from src.controller.coding_controller import router as coding_router
 from src.controller.settings_controller import router as settings_router
+from src.controller.auth_controller import router as auth_router, auth_service
+from src.middleware.auth_gate import AuthGate
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -43,24 +46,47 @@ async def lifespan(app: FastAPI):
 
     coding_service.bind_loop(asyncio.get_running_loop())
 
+    # Expired login sessions are dead weight; sweep them on each start.
+    try:
+        await asyncio.to_thread(auth_service.purge_expired)
+    except Exception as exc:
+        print(f"Could not purge expired sessions: {exc}")
+
     yield
+
+
+def _allowed_origins() -> list[str]:
+    """
+    Where the browser client is allowed to call from.
+
+    The Vite dev server is always allowed. The hosted frontend's origin(s)
+    come from NOVA_ALLOWED_ORIGINS, comma-separated, e.g.
+        NOVA_ALLOWED_ORIGINS=https://nova-xyz.web.app,https://nova-xyz.firebaseapp.com
+    """
+    dev = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    configured = [
+        origin.strip().rstrip("/")
+        for origin in (os.getenv("NOVA_ALLOWED_ORIGINS") or "").split(",")
+        if origin.strip()
+    ]
+    return list(dict.fromkeys(dev + configured))
 
 
 app = FastAPI(title="Nova Voice Backend", lifespan=lifespan)
 
+# Order matters: the last middleware added is the outermost. CORS has to wrap
+# the gate so that a 401 still carries the CORS headers the browser needs to
+# read it, and so preflight never reaches the gate at all.
+app.add_middleware(AuthGate, auth_service=auth_service)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://10.1.10.199:5173",
-        "http://10.1.10.199:8000",
-    ],
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(nova_router)
 app.include_router(conversation_router)
 app.include_router(project_router)
@@ -89,4 +115,5 @@ async def health() -> dict[str, str]:
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
 
-#NOTE: Run ngrok http 8000 to get a public URL for the backend
+# NOTE: In production the tower exposes this through a Cloudflare Tunnel
+# (see docs/HOSTING.md). For Twilio-only local testing, `ngrok http 8000`.
