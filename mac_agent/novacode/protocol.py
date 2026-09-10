@@ -30,6 +30,12 @@ CMD_ATTACH = "attach"
 # A shell command, run on this Mac. Nova's run_terminal_command routes here
 # rather than to the tower.
 CMD_EXEC = "exec"
+# Long-lived commands — a dev server, a watcher. Separate commands rather than
+# a flag on `exec`, because the answer has a different shape: a handle and a
+# readiness verdict instead of an exit code that is never coming.
+CMD_BG_START = "bg_start"
+CMD_BG_CHECK = "bg_check"
+CMD_BG_STOP = "bg_stop"
 
 # Events (agent -> Nova)
 EVT_HELLO = "hello"

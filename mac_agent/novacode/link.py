@@ -20,7 +20,7 @@ from typing import Any
 
 import websockets
 
-from . import protocol, shell
+from . import processes, protocol, shell
 from .config import Config
 from .sessions import SessionManager
 
@@ -187,4 +187,18 @@ class Link:
                 timeout_seconds=command.get("timeout_seconds"),
                 default_cwd=self.config.repos_root,
             )
+        if kind == protocol.CMD_BG_START:
+            return await processes.start(
+                command["cmd"],
+                cwd=command.get("cwd") or str(self.config.repos_root),
+                wait_for_port=command.get("wait_for_port"),
+                wait_for_log=command.get("wait_for_log"),
+                wait_timeout_seconds=command.get("wait_timeout_seconds"),
+            )
+        if kind == protocol.CMD_BG_CHECK:
+            # Synchronous: reads the registry and a log file off disk, so
+            # there is nothing to await.
+            return processes.check(command.get("process_id"))
+        if kind == protocol.CMD_BG_STOP:
+            return await processes.stop(command["process_id"])
         raise ValueError(f"Unknown command: {kind}")
