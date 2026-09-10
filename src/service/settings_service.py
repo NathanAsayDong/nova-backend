@@ -10,6 +10,16 @@ import os
 class SettingsService:
     """Manages Nova user settings and preferences."""
 
+    # Class attribute, deliberately, and this is load-bearing: the settings
+    # controller builds a FRESH ClaudeService (and so a fresh SettingsService)
+    # for every request, so a dict on `self` would be discarded the moment the
+    # request that wrote it ended — set_model would report success and change
+    # nothing. Same trap CodingService documents for its link and loop.
+    #
+    # Still in memory, so a switch does not survive a restart; persisting it is
+    # the next step if that matters.
+    _settings: Dict[str, Any] = {}
+
     def __init__(self):
         """Initialize settings service with default values."""
         self.default_model = os.getenv("DEFAULT_CLAUDE_MODEL", "claude-haiku-4-5")
@@ -18,10 +28,7 @@ class SettingsService:
             "claude-sonnet-4-20250514",
             "claude-haiku-4-5",
         ]
-        # In-memory storage; could be persisted to DB later
-        self._settings: Dict[str, Any] = {
-            "current_model": self.default_model,
-        }
+        self._settings.setdefault("current_model", self.default_model)
 
     def get_current_model(self) -> str:
         """Get the currently selected model."""
