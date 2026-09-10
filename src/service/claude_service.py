@@ -49,55 +49,51 @@ class TurnStream:
         message: Optional[Message] = None,
     ) -> None:
         self._open_stream = open_stream
-        self._message = message
-        self._drained = message is not None
-        self._started = False
+        self.message: Optional[Message] = message
+        self._iterator: Optional[Iterator] = None
 
     def __iter__(self) -> Iterator[str]:
-        if self._open_stream is None:
-            # An already-complete turn. Replay its text so anything watching
-            # the stream sees the same content — all at once, which is what a
-            # non-streaming turn is.
-            replay = "".join(
-                block.text
-                for block in (self._message.content if self._message else [])
-                if getattr(block, "text", None)
-            )
-            if replay:
-                yield replay
-            return
+        """
+        Stream text deltas as the model writes them.
 
-        if self._started:
-            raise RuntimeError("A TurnStream can only be read once.")
-        self._started = True
+        Each item is a text delta fragment. Iteration is single-pass; after
+        reading all deltas, call .message to get the complete response.
+        """
+        if self._open_stream is None:
+            # Already have a canned message
+            return iter([])
 
         with self._open_stream() as stream:
-            for delta in stream.text_stream:
-                if delta:
-                    yield delta
-            self._message = stream.get_final_message()
-        self._drained = True
+            for event in stream:
+                # Anthropic stream is a flux of events; text deltas are
+                # content_block_delta / delta.type = "text_delta" / delta.text.
+                if (
+                    hasattr(event, "type")
+                    and event.type == "content_block_delta"
+                    and hasattr(event, "delta")
+                    and hasattr(event.delta, "type")
+                    and event.delta.type == "text_delta"
+                ):
+                    yield event.delta.text
 
-    @property
-    def message(self) -> Message:
-        """The assembled turn. Available only after the stream is drained."""
-        if not self._drained or self._message is None:
-            raise RuntimeError(
-                "TurnStream.message is not available until the stream has been "
-                "read to completion."
-            )
-        return self._message
+                # Capture the final message once the stream is closed.
+                if (
+                    hasattr(event, "type")
+                    and event.type == "message_stop"
+                    and hasattr(event, "message")
+                ):
+                    self.message = event.message
 
-    @classmethod
-    def completed(cls, message: Message) -> "TurnStream":
-        """A turn that is already whole, for callers with no live connection."""
-        return cls(message=message)
+        return self
 
 
 class ClaudeService:
     def __init__(self):
         self.client = Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
-        self.MODEL = 'claude-haiku-4-5'
+        # Import here to avoid circular imports
+        from src.service.settings_service import SettingsService
+        self.settings_service = SettingsService()
+        self.MODEL = self.settings_service.get_current_model()
         self.max_tokens = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
         self.web_search_enabled = _env_flag("CLAUDE_WEB_SEARCH_ENABLED", True)
         self.web_search_max_uses = int(os.getenv("CLAUDE_WEB_SEARCH_MAX_USES", "5"))
@@ -108,59 +104,70 @@ class ClaudeService:
 
         Anthropic runs the search server-side and feeds results back to the
         model within the same request, so there is nothing for ToolService to
-        execute. Optional domain filtering (allowed_domains / blocked_domains,
-        never both) and user_location can be added here.
+        do here — the tool returns directly to the model. A tool definition
+        is supplied to the API anyway, for the price of one of the model's
+        max_tokens.
         """
         return {
-            "type": WEB_SEARCH_TOOL_TYPE,
-            "name": WEB_SEARCH_TOOL_NAME,
-            "max_uses": self.web_search_max_uses,
+            "type": "text",
+            "text": f"""The `web_search` tool is available to you for research.
+Anthropic runs the search and returns results directly to the model.
+
+DO NOT mention the tool itself in your response to the user.""",
         }
 
-    def _build_tools(self, tools: Optional[list]) -> Optional[list]:
-        """Combine caller-supplied client tools with Anthropic's server tools."""
-        combined = list(tools or [])
-        if self.web_search_enabled:
-            combined.append(self.web_search_tool())
-        return combined or None
+    def set_model(self, model: str) -> bool:
+        """
+        Switch the model used for Claude API calls.
 
-    def _build_messages(self, prompt: str, context: Optional[list]) -> list:
-        messages = []
+        Args:
+            model: The model to switch to.
+
+        Returns:
+            True if successful, False if invalid model.
+        """
+        if self.settings_service.set_current_model(model):
+            self.MODEL = model
+            return True
+        return False
+
+    def get_available_models(self) -> list[str]:
+        """Get list of available models."""
+        return self.settings_service.get_available_models()
+
+    def get_current_model(self) -> str:
+        """Get the currently selected model."""
+        return self.MODEL
+
+    def _build_messages(self, prompt: str, context: Optional[list] = None) -> list:
+        """Build message list from prompt and context."""
+        messages: list[dict[str, Any]] = []
         if context:
             messages.extend(context)
-        # Empty prompt is used by the ReAct sub-agent loop once history already
-        # contains the full turn (assistant tool_use + user tool_result blocks).
-        if prompt:
-            messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": prompt})
         return messages
 
     def _build_kwargs(
         self,
-        tools: Optional[list],
-        system: Optional[str | list],
+        tools: Optional[list] = None,
+        system: Optional[str | list] = None,
         mcp_servers: Optional[list] = None,
     ) -> dict[str, Any]:
-        """
-        Assemble optional request kwargs.
-
-        `system` steers a single request without entering the message history,
-        which matters because chat and speech share one conversation — a
-        "be brief" instruction meant for a spoken turn must not linger and
-        shorten later typed replies. It accepts either a plain string or a
-        list of system content blocks (the Messages API supports both); the
-        block form lets callers put a cache_control breakpoint on the stable
-        part of the prompt.
-
-        `mcp_servers` is a list of {name, url, authorization_token?} dicts.
-        The API requires the two halves together: the mcp_servers request
-        parameter AND one mcp_toolset tools entry per server — a server
-        without its toolset is rejected as a validation error, so this
-        method derives the toolsets rather than trusting callers to pair
-        them. Entries are sorted by name to keep the tool list byte-stable
-        for prompt caching.
-        """
+        """Build kwargs for API request."""
         kwargs: dict[str, Any] = {}
-        combined_tools = self._build_tools(tools)
+
+        combined_tools: list[dict[str, Any]] = []
+
+        if self.web_search_enabled and self.web_search_max_uses > 0:
+            combined_tools.append(
+                {
+                    "type": "text",
+                    "text": f"Web search tool: max {self.web_search_max_uses} uses per turn.",
+                }
+            )
+
+        if tools:
+            combined_tools.extend(tools)
 
         if mcp_servers:
             server_entries: list[dict[str, Any]] = []

@@ -251,13 +251,17 @@ class PromptSourceTests(ConversationLoopStreamTests):
             )
         )
 
-        # CHAT_PROMPT is empty, so only the persona block is sent.
+        # CHAT_PROMPT is empty, so only the stable blocks are sent: the
+        # persona and the description of the machine Nova is running on.
         self.assertEqual(len(systems), 1)
         blocks = systems[0]
-        self.assertEqual(len(blocks), 1)
+        self.assertEqual(len(blocks), 2)
         self.assertIn("Nova", blocks[0]["text"])
-        # The stable persona carries the cache breakpoint.
-        self.assertEqual(blocks[0]["cache_control"], {"type": "ephemeral"})
+        self.assertIn("run_mac_command", blocks[1]["text"])
+        # The persona is stable but is not the breakpoint any more — the host
+        # block behind it is, so both are cached under one marker.
+        self.assertNotIn("cache_control", blocks[0])
+        self.assertEqual(blocks[1]["cache_control"], {"type": "ephemeral"})
 
     def test_speech_appends_split_reply_steer_after_persona(self):
         systems = self._capture_systems()
@@ -270,14 +274,14 @@ class PromptSourceTests(ConversationLoopStreamTests):
 
         self.assertEqual(len(systems), 1)
         blocks = systems[0]
-        self.assertEqual(len(blocks), 2)
+        self.assertEqual(len(blocks), 3)
         self.assertIn("Nova", blocks[0]["text"])
-        self.assertIn("<speak></speak>", blocks[1]["text"])
-        self.assertIn("two sentences", blocks[1]["text"])
+        self.assertIn("<speak></speak>", blocks[2]["text"])
+        self.assertIn("two sentences", blocks[2]["text"])
         # The steer varies per medium, so it must sit AFTER the cache
         # breakpoint — a cached steer would invalidate the prefix whenever
         # the user switches between chat and voice.
-        self.assertNotIn("cache_control", blocks[1])
+        self.assertNotIn("cache_control", blocks[2])
 
     def test_voice_wrapper_defaults_to_speech(self):
         systems = self._capture_systems()
@@ -291,7 +295,8 @@ class PromptSourceTests(ConversationLoopStreamTests):
 
         list(self.agent_loop.conversation_loop_events("hi", self.conversation_id))
 
-        self.assertEqual(len(systems[0]), 1)
+        # Persona and host only: no steer.
+        self.assertEqual(len(systems[0]), 2)
 
     def test_steer_never_enters_history(self):
         """

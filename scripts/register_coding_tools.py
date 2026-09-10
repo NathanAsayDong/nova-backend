@@ -230,7 +230,14 @@ CODING_TOOLS: list[dict] = [
             "so use a path or 'cd' to reach a project. Needs his Mac awake and "
             "connected; if it is not, this fails — say so rather than retrying. A "
             "non-zero exit is data, not an error. Output is truncated at 8000 "
-            "characters and the command is killed if it exceeds its timeout."
+            "characters and the command is killed if it exceeds its timeout — "
+            "along with everything it started, so nothing is left running behind "
+            "your back. "
+            "Only for commands that FINISH. His dev servers, watchers and "
+            "simulators belong in start_mac_background_command; do not try to "
+            "detach one here with a trailing '&' or a longer timeout, because "
+            "neither works. If you pass one anyway it is recognised and started "
+            "in the background instead, and the result says so."
         ),
         "config": {
             "type": "service_method",
@@ -249,6 +256,119 @@ CODING_TOOLS: list[dict] = [
                     },
                 },
                 "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "start_mac_background_command",
+        "description": (
+            "Start something long-lived on NATE'S MAC — a dev server, a file "
+            "watcher, ngrok, 'npm run dev' — and get a process_id back straight "
+            "away instead of waiting for an exit that never comes. Use this "
+            "INSTEAD of run_mac_command whenever the command is meant to keep "
+            "running. Pass wait_for_port (or wait_for_log) so the result says "
+            "whether it really came up: without one, 'started' only means the "
+            "process was spawned, and a server that dies on import would look "
+            "healthy. If it exits during the wait you get its exit code and "
+            "output, which is how a startup crash should be reported. It keeps "
+            "running on his Mac after the turn ends — read it with "
+            "check_mac_background_command, and stop it with "
+            "stop_mac_background_command once it is no longer needed. Never leave "
+            "a server running on his laptop that he did not ask for."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_BASE}.start_mac_background_command",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": (
+                            "The command to start on the Mac. Do not add a trailing '&'."
+                        ),
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": "Absolute path on the Mac. Defaults to ~/Desktop.",
+                    },
+                    "wait_for_port": {
+                        "type": "integer",
+                        "description": (
+                            "Wait until this TCP port on the Mac accepts "
+                            "connections before answering. The best readiness "
+                            "signal for anything that serves requests."
+                        ),
+                    },
+                    "wait_for_log": {
+                        "type": "string",
+                        "description": (
+                            "Regular expression to wait for in the process's "
+                            "output, e.g. 'Uvicorn running'. Use when there is no "
+                            "port to check."
+                        ),
+                    },
+                    "wait_timeout_seconds": {
+                        "type": "integer",
+                        "description": (
+                            "How long to wait for readiness. Defaults to 20, maximum 120."
+                        ),
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "check_mac_background_command",
+        "description": (
+            "Whether a background process on Nate's Mac is still running, and "
+            "what it has printed. Call with no process_id to list all of them — "
+            "which is also how to find one whose id was never written down, or to "
+            "check whether an old server is still holding a port. The output is "
+            "the tail of the log, so calling it again after doing something else "
+            "shows what happened in between."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_BASE}.check_mac_background_command",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": (
+                            "The id from start_mac_background_command. Omit to "
+                            "list everything running."
+                        ),
+                    }
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "stop_mac_background_command",
+        "description": (
+            "Stop a background process on Nate's Mac, and everything it started. "
+            "Use this when it is no longer needed, when a port needs freeing "
+            "before restarting something, and before finishing a turn in which a "
+            "server was started only to check something."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": f"{_BASE}.stop_mac_background_command",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": "The process to stop.",
+                    }
+                },
+                "required": ["process_id"],
                 "additionalProperties": False,
             },
         },

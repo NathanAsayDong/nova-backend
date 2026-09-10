@@ -624,7 +624,14 @@ PROJECT_TOOLS: list[dict] = [
             "changing system settings) unless the user has explicitly asked for "
             "that specific action. A non-zero exit code is returned as data, not "
             "an error. Output is truncated at 8000 characters and the command is "
-            "killed if it exceeds its timeout."
+            "killed if it exceeds its timeout — along with everything it started, "
+            "so nothing is left running behind your back. "
+            "Only for commands that FINISH. A dev server, a watcher, or anything "
+            "else meant to keep running belongs in start_background_command; do "
+            "not try to detach one here with 'start', a trailing '&', or a longer "
+            "timeout, because none of those work. If you pass one anyway it is "
+            "recognised and started in the background instead, and the result "
+            "says so."
         ),
         "config": {
             "type": "service_method",
@@ -655,6 +662,130 @@ PROJECT_TOOLS: list[dict] = [
                 "additionalProperties": False,
             },
             # Lets the command default to the active project's workspace.
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "start_background_command",
+        "description": (
+            "Start a long-lived command on Nova's own server — a dev server, a "
+            "watcher, a queue worker — and get a process_id back immediately "
+            "instead of waiting for an exit that never comes. Use this INSTEAD of "
+            "run_terminal_command whenever the command is meant to keep running. "
+            "Pass wait_for_port (or wait_for_log) so the result says whether it "
+            "actually came up: without one, 'started' only means the process was "
+            "spawned, and a server that dies on import would look healthy. If it "
+            "exits during the wait you get its exit code and output, which is how "
+            "a startup crash should be reported. The process keeps running after "
+            "the turn ends — read it with check_background_command and stop it "
+            "with stop_background_command once it is no longer needed. Do not "
+            "leave servers running that Nate did not ask for."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": (
+                "src.service.command_line_service."
+                "CommandLineService.start_background_command"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": (
+                            "The command to start. Do not add 'start' or a trailing '&'."
+                        ),
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": "Absolute path to start it in.",
+                    },
+                    "wait_for_port": {
+                        "type": "integer",
+                        "description": (
+                            "Wait until this TCP port on localhost accepts "
+                            "connections before answering. The best readiness "
+                            "signal for anything that serves requests."
+                        ),
+                    },
+                    "wait_for_log": {
+                        "type": "string",
+                        "description": (
+                            "Regular expression to wait for in the process's "
+                            "output, e.g. 'Uvicorn running'. Use when there is no "
+                            "port to check."
+                        ),
+                    },
+                    "wait_timeout_seconds": {
+                        "type": "integer",
+                        "description": (
+                            "How long to wait for readiness. Defaults to 20, maximum 120."
+                        ),
+                    },
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "check_background_command",
+        "description": (
+            "Whether a background command is still running, and what it has "
+            "printed. Call with no process_id to list every background process — "
+            "which is also how to find one whose id was never written down, or to "
+            "check whether an old server is still holding a port. The output is "
+            "the tail of the log, so calling it again after doing something else "
+            "shows what happened in between."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": (
+                "src.service.command_line_service."
+                "CommandLineService.check_background_command"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": (
+                            "The id from start_background_command. Omit to list "
+                            "everything running."
+                        ),
+                    }
+                },
+                "additionalProperties": False,
+            },
+            "optional_context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
+        "name": "stop_background_command",
+        "description": (
+            "Stop a background command and everything it started. Use this when "
+            "the process is no longer needed, when a port needs freeing before "
+            "restarting something, and before finishing a turn in which a server "
+            "was started only to test something."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": (
+                "src.service.command_line_service."
+                "CommandLineService.stop_background_command"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "process_id": {
+                        "type": "string",
+                        "description": "The process to stop.",
+                    }
+                },
+                "required": ["process_id"],
+                "additionalProperties": False,
+            },
             "optional_context_kwargs": ["conversation_uuid"],
         },
     },

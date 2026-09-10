@@ -12,6 +12,7 @@ import uuid
 from anthropic.types.message import Message
 
 from src.dao.responsibility_dao import ResponsibilityDao
+from prompting.host_environment_prompt import host_environment_prompt
 from prompting.prompt_enums import PromptEnums
 from prompting.prompt_source_prompt import PromptSourceEnum
 from src.model.conversation import Conversation
@@ -89,6 +90,11 @@ class AgentLoop:
         # Nova's identity — WHO the assistant is and HOW it behaves. Loaded
         # once per process; fails fast at startup if the file is missing.
         self.persona_prompt = PromptEnums.NOVA_PERSONA_PROMPT.load()
+        # WHERE Nova is running — the tower or the Mac itself. It decides what
+        # run_terminal_command and run_mac_command actually mean, so the model
+        # has to be told rather than left to assume the tower. Fixed for the
+        # life of the process, like the persona.
+        self.host_prompt = host_environment_prompt()
         # Live handles to background=True runs, mostly for tests and
         # observability; finished threads are pruned on the next spawn.
         self.background_threads: list[threading.Thread] = []
@@ -97,19 +103,22 @@ class AgentLoop:
         """
         Assemble the system prompt for one conversation request.
 
-        The persona is the stable prefix and carries the cache breakpoint —
-        tools render before system in the prompt, so this one marker caches
-        the tool list and persona together. The per-medium steer (e.g. the
-        spoken-reply brevity instruction) changes between chat and voice
-        turns, so it must come AFTER the breakpoint or every switch of
+        The persona and the host description are the stable prefix, and the
+        LAST of them carries the cache breakpoint — tools render before system
+        in the prompt, so this one marker caches the tool list, the persona and
+        the host together. Both are process-lifetime constants, so putting the
+        host block inside the cached span costs nothing. The per-medium steer
+        (e.g. the spoken-reply brevity instruction) changes between chat and
+        voice turns, so it must come AFTER the breakpoint or every switch of
         medium would invalidate the cache.
         """
         blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": self.persona_prompt},
             {
                 "type": "text",
-                "text": self.persona_prompt,
+                "text": self.host_prompt,
                 "cache_control": {"type": "ephemeral"},
-            }
+            },
         ]
         if steer and steer.strip():
             blocks.append({"type": "text", "text": steer})
@@ -240,6 +249,21 @@ class AgentLoop:
             ".toml": "toml",
         }.get(suffix, "")
 
+    # Every tool whose result is terminal output, on either host. Background
+    # processes are here too: a dev server's log is exactly as worth showing as
+    # a test run's, and it is the only view Nate gets of something that is
+    # still running.
+    _SHELL_TOOLS = (
+        "run_terminal_command",
+        "run_mac_command",
+        "start_background_command",
+        "check_background_command",
+        "stop_background_command",
+        "start_mac_background_command",
+        "check_mac_background_command",
+        "stop_mac_background_command",
+    )
+
     @classmethod
     def _artifact_for_tool(
         cls, tool_name: str, arguments: dict[str, Any], result: Any
@@ -284,15 +308,26 @@ class AgentLoop:
                 "tool": tool_name,
             }
 
-        if tool_name == "run_terminal_command":
-            streams = [payload.get("stdout") or "", payload.get("stderr") or ""]
+        if tool_name in cls._SHELL_TOOLS:
+            # Two output shapes reach here. A command that finishes returns the
+            # two streams separately; a long-lived one returns a single
+            # interleaved `output`, because for a server the ordering between
+            # stdout and stderr is the thing you need and there is no final
+            # exit code to wait for.
+            streams = [
+                payload.get("stdout") or "",
+                payload.get("stderr") or "",
+                payload.get("output") or "",
+            ]
             content = "\n".join(part for part in streams if part.strip())
             if not content:
                 return None
             return {
                 "type": "artifact",
                 "kind": "terminal",
-                "title": arguments.get("command", ""),
+                # check/stop are given a process_id rather than a command, so
+                # the command comes back from the payload for those.
+                "title": arguments.get("command") or payload.get("command") or "",
                 "content": content,
                 "language": "bash",
                 "tool": tool_name,

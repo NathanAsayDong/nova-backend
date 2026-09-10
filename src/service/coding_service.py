@@ -265,6 +265,87 @@ class CodingService:
             timeout=timeout + 30,
         )
 
+    # ---------- long-lived commands on the Mac ----------
+
+    async def bg_start_on_mac(
+        self,
+        command: str,
+        cwd: str | None,
+        wait_for_port: int | None,
+        wait_for_log: str | None,
+        wait_timeout_seconds: int | None,
+    ) -> dict:
+        """
+        Start a dev server (or any command that never exits) on the Mac.
+
+        The nesting rule from exec_on_mac applies here too, against the
+        readiness wait rather than a command timeout: the Mac may spend up to
+        `wait_timeout_seconds` watching for a port to open, so the websocket
+        call has to outlast that or Nova reports a 504 over a server that came
+        up perfectly well.
+        """
+        wait = int(wait_timeout_seconds or 20)
+        return await self.link.call(
+            "bg_start",
+            timeout=wait + 20,
+            cmd=command,
+            cwd=cwd,
+            wait_for_port=wait_for_port,
+            wait_for_log=wait_for_log,
+            wait_timeout_seconds=wait,
+        )
+
+    async def bg_check_on_mac(self, process_id: str | None) -> dict:
+        return await self.link.call("bg_check", timeout=30, process_id=process_id)
+
+    async def bg_stop_on_mac(self, process_id: str) -> dict:
+        return await self.link.call("bg_stop", timeout=45, process_id=process_id)
+
+    def start_mac_background_command(
+        self,
+        command: str,
+        working_directory: str | None = None,
+        wait_for_port: int | None = None,
+        wait_for_log: str | None = None,
+        wait_timeout_seconds: int | None = None,
+        conversation_uuid: str | None = None,
+    ) -> dict:
+        """
+        Tool entry point: start something long-lived on the Mac and say if it came up.
+
+        Returns a process_id straight away instead of waiting for an exit that
+        is never coming. The readiness arguments are what make the answer worth
+        having — without one, "started" only means the process was spawned, and
+        Nova would announce a working server moments before the first request
+        got connection refused.
+        """
+        wait = int(wait_timeout_seconds or 20)
+        wait = max(0, min(wait, 120))
+        return self._run(
+            self.bg_start_on_mac(
+                command, working_directory, wait_for_port, wait_for_log, wait
+            ),
+            timeout=wait + 40,
+        )
+
+    def check_mac_background_command(
+        self, process_id: str | None = None, conversation_uuid: str | None = None
+    ) -> dict:
+        """
+        Tool entry point: output and status for one background process, or all of them.
+
+        With no process_id this lists everything still running on the Mac,
+        which is both the question usually asked out loud ("is the server still
+        up?") and the way to find a process whose id nobody wrote down.
+        """
+        return self._run(self.bg_check_on_mac(process_id), timeout=60)
+
+    def stop_mac_background_command(
+        self, process_id: str, conversation_uuid: str | None = None
+    ) -> dict:
+        """Tool entry point: stop a background process on the Mac, and its whole tree."""
+        return self._run(self.bg_stop_on_mac(process_id), timeout=75)
+
     # ---------- the agent's events ----------
 
     def record_event(self, event: dict) -> None:
