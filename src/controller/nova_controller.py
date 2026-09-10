@@ -148,8 +148,13 @@ async def chat_stream(payload: dict = Body(...)) -> StreamingResponse:
     async def event_source():
         yield sse_event({"type": "start", "conversationId": str(conversation_id)})
 
+        # The row fetched for the closed check above is handed to the loop so
+        # it does not fetch it a second time.
         event_stream = agent_loop.conversation_loop_events(
-            message, conversation_id, prompt_source=PromptSourceEnum.CHAT_PROMPT
+            message,
+            conversation_id,
+            prompt_source=PromptSourceEnum.CHAT_PROMPT,
+            conversation=existing,
         )
         parts: list[str] = []
         final_text: str | None = None
@@ -324,6 +329,7 @@ async def send_assistant_text(
     seq: int,
     conversation_id: UUID,
     markdown_display: str | None = None,
+    send_lock: asyncio.Lock | None = None,
 ) -> None:
     event: dict[str, object] = {
         "type": "assistant_text",
@@ -333,7 +339,29 @@ async def send_assistant_text(
     }
     if markdown_display is not None:
         event["markdownDisplay"] = markdown_display
-    await websocket.send_json(event)
+    await _send_locked(websocket, event, send_lock)
+
+
+async def _send_locked(
+    websocket: WebSocket, payload: dict, send_lock: asyncio.Lock | None
+) -> None:
+    """
+    send_json, serialized behind `send_lock` when one is given.
+
+    A voice turn now writes to the socket from two tasks — the one relaying
+    the agent loop's events and the one speaking — and the lock keeps their
+    frames from interleaving. Callers with a single writer pass None.
+    """
+    if send_lock is None:
+        await websocket.send_json(payload)
+        return
+    async with send_lock:
+        await websocket.send_json(payload)
+
+
+# Returned by the TTS generator's `next` when it is exhausted, so the call can
+# run on a worker thread without StopIteration crossing the thread boundary.
+_TTS_EXHAUSTED = object()
 
 
 async def stream_tts_audio(
@@ -342,6 +370,7 @@ async def stream_tts_audio(
     *,
     role: str,
     iteration: int | None = None,
+    send_lock: asyncio.Lock | None = None,
 ) -> bool:
     """
     Speak `text` to the client as a chunked audio stream.
@@ -353,6 +382,11 @@ async def stream_tts_audio(
     on a stream that will never arrive) plus an error message saying why
     there is no audio. Websocket send failures still propagate — a dead
     socket ends the turn either way.
+
+    The provider's generator does blocking HTTP, so each pull runs on a
+    worker thread. Stepped inline, as it used to be, it stalled the event
+    loop — every other socket on the process, and the agent loop's own
+    event relay — for the length of each clip.
     """
     stream_id = str(uuid.uuid4())
     response_mime = tts_service.output_mime_type()
@@ -366,46 +400,52 @@ async def stream_tts_audio(
     if iteration is not None:
         start_event["iteration"] = iteration
 
-    await websocket.send_json(start_event)
+    await _send_locked(websocket, start_event, send_lock)
 
     sequence = 0
     tts_error: str | None = None
     audio_chunks = tts_service.stream_text_to_speech(text)
     while True:
         try:
-            audio_chunk = next(audio_chunks)
-        except StopIteration:
-            break
+            audio_chunk = await asyncio.to_thread(next, audio_chunks, _TTS_EXHAUSTED)
         except Exception as exc:
             tts_error = str(exc)
+            break
+        if audio_chunk is _TTS_EXHAUSTED:
             break
 
         sequence += 1
         chunk_b64 = base64.b64encode(audio_chunk).decode("ascii")
-        await websocket.send_json(
+        await _send_locked(
+            websocket,
             {
                 "type": "assistant_audio_stream_chunk",
                 "streamId": stream_id,
                 "chunkBase64": chunk_b64,
                 "seq": sequence,
-            }
+            },
+            send_lock,
         )
 
     if tts_error is not None:
         print(f"TTS stream {stream_id} failed after {sequence} chunks: {tts_error}")
         preview = tts_error if len(tts_error) <= 300 else tts_error[:300] + "…"
-        await websocket.send_json(
+        await _send_locked(
+            websocket,
             {
                 "type": "error",
                 "message": f"Voice playback failed — continuing without audio. ({preview})",
-            }
+            },
+            send_lock,
         )
 
-    await websocket.send_json(
+    await _send_locked(
+        websocket,
         {
             "type": "assistant_audio_stream_end",
             "streamId": stream_id,
-        }
+        },
+        send_lock,
     )
     return tts_error is None
 
@@ -886,6 +926,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             chunks.clear()
                             continue
 
+                    existing = None
                     if conversation_id is None:
                         conversation_id = agent_loop.new_conversation_id()
                     else:
@@ -899,6 +940,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         )
                         if existing is not None and existing.is_closed:
                             conversation_id = agent_loop.new_conversation_id()
+                            existing = None
 
                     # Echo what was heard so the transcript shows the spoken
                     # turn the same way it shows a typed one.
@@ -926,72 +968,112 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         transcript,
                         conversation_id,
                         prompt_source=PromptSourceEnum.SPEECH_PROMPT,
+                        conversation=existing,
                     )
                     display_parts: list[str] = []
                     final_text: str | None = None
-                    tts_available = True
-                    async for event in iter_in_thread(event_stream):
-                        event_type = event.get("type")
 
-                        if event_type == "text":
-                            display_parts.append(event["text"])
-                            await send_assistant_text(
+                    # Speech runs on its own task. The agent loop is pulled
+                    # one event at a time (iter_in_thread), so awaiting TTS
+                    # inline in the relay below meant that for as long as
+                    # Nova was saying a progress line, nobody was pulling the
+                    # model stream — the narration paused the work it was
+                    # narrating. Lines go on a queue instead and are spoken
+                    # in order while the turn carries on; the client already
+                    # queues the audio streams the same way.
+                    send_lock = asyncio.Lock()
+                    speech_queue: asyncio.Queue[tuple[str, str] | None] = (
+                        asyncio.Queue()
+                    )
+
+                    async def speak_queued_lines() -> None:
+                        # One failure mutes TTS for the rest of the turn:
+                        # every remaining line would fail the same way and
+                        # spam the client with error toasts. The text was
+                        # already sent, so the turn degrades to text-only
+                        # instead of dying.
+                        tts_available = True
+                        while True:
+                            item = await speech_queue.get()
+                            if item is None:
+                                return
+                            if not tts_available:
+                                continue
+                            line, line_role = item
+                            tts_available = await stream_tts_audio(
                                 websocket,
-                                event["text"],
-                                seq=len(display_parts),
-                                conversation_id=conversation_id,
+                                line,
+                                role=line_role,
+                                send_lock=send_lock,
                             )
-                        elif event_type == "speech_text":
-                            # Sent to the client as well as to TTS: the audio
-                            # arrives as opaque chunks, so this is the only way
-                            # the UI can know what is being said.
-                            await websocket.send_json(
-                                {
-                                    "type": "speech_text",
-                                    "text": event["text"],
-                                    "role": event.get("role", "final"),
-                                    "conversationId": str(conversation_id),
-                                }
-                            )
-                            # One failure mutes TTS for the rest of the turn:
-                            # every remaining line would fail the same way and
-                            # spam the client with error toasts. The text was
-                            # already sent, so the turn degrades to text-only
-                            # instead of dying.
-                            if tts_available:
-                                tts_available = await stream_tts_audio(
+
+                    speaker = asyncio.create_task(speak_queued_lines())
+
+                    async def send(payload: dict) -> None:
+                        await _send_locked(websocket, payload, send_lock)
+
+                    try:
+                        async for event in iter_in_thread(event_stream):
+                            event_type = event.get("type")
+
+                            if event_type == "text":
+                                display_parts.append(event["text"])
+                                await send_assistant_text(
                                     websocket,
                                     event["text"],
-                                    role=event.get("role", "final"),
+                                    seq=len(display_parts),
+                                    conversation_id=conversation_id,
+                                    send_lock=send_lock,
                                 )
-                        elif event_type == "status_text":
-                            # Pre-tool acknowledgment. Shown here, spoken by
-                            # the speech_text event that follows it — and kept
-                            # out of display_parts either way, because the
-                            # turn's assistantText is the final answer, not the
-                            # "on it" line.
-                            await websocket.send_json(
-                                {
-                                    "type": "status_text",
-                                    "text": event["text"],
-                                    "conversationId": str(conversation_id),
-                                }
-                            )
-                        elif event_type == "text_final":
-                            final_text = event["text"]
-                            await websocket.send_json(
-                                {
-                                    "type": "text_final",
-                                    "text": final_text,
-                                    "format": "markdown",
-                                    "conversationId": str(conversation_id),
-                                }
-                            )
-                        else:
-                            # tool_call / artifact: rendered, never spoken.
-                            await websocket.send_json(
-                                {**event, "conversationId": str(conversation_id)}
-                            )
+                            elif event_type == "speech_text":
+                                # Sent to the client as well as to TTS: the
+                                # audio arrives as opaque chunks, so this is
+                                # the only way the UI can know what is being
+                                # said.
+                                line_role = event.get("role", "final")
+                                await send(
+                                    {
+                                        "type": "speech_text",
+                                        "text": event["text"],
+                                        "role": line_role,
+                                        "conversationId": str(conversation_id),
+                                    }
+                                )
+                                speech_queue.put_nowait((event["text"], line_role))
+                            elif event_type == "status_text":
+                                # Pre-tool acknowledgment. Shown here, spoken
+                                # by the speech_text event alongside it — and
+                                # kept out of display_parts either way,
+                                # because the turn's assistantText is the
+                                # final answer, not the "on it" line.
+                                await send(
+                                    {
+                                        "type": "status_text",
+                                        "text": event["text"],
+                                        "conversationId": str(conversation_id),
+                                    }
+                                )
+                            elif event_type == "text_final":
+                                final_text = event["text"]
+                                await send(
+                                    {
+                                        "type": "text_final",
+                                        "text": final_text,
+                                        "format": "markdown",
+                                        "conversationId": str(conversation_id),
+                                    }
+                                )
+                            else:
+                                # tool_call / artifact: rendered, never spoken.
+                                await send(
+                                    {**event, "conversationId": str(conversation_id)}
+                                )
+                    finally:
+                        # Every queued line is spoken before the turn is
+                        # reported done, so the client sees the order it
+                        # always has: the audio, then "done".
+                        speech_queue.put_nowait(None)
+                        await speaker
 
                     await websocket.send_json(
                         {

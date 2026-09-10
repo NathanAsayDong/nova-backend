@@ -10,7 +10,9 @@ property of the system, not a hope about the model.
 import unittest
 
 from src.harness.spoken_reply import (
+    LIVE_HOLD_CHARS,
     MAX_SPOKEN_CHARS,
+    LiveReply,
     SpokenLineWatcher,
     clamp_spoken,
     speech_summary,
@@ -178,3 +180,120 @@ class SpokenLineWatcherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveReplyTests(unittest.TestCase):
+    """
+    One round of a reply, read as it is written.
+
+    The hard question is not the spoken line — the watcher handles that — but
+    when prose may go to the screen. A round's first sentence looks the same
+    whether it is the answer or a pre-tool "let me check", so prose is held
+    until the text itself, a tool_use start, or the end of the round settles
+    which it was.
+    """
+
+    def test_a_short_reply_is_held_then_released_whole(self):
+        live = LiveReply()
+
+        self.assertEqual(live.push("Sure thing. "), [])
+        self.assertEqual(live.push("Here it is."), [])
+        self.assertEqual(
+            live.finish(), [{"type": "text", "text": "Sure thing. Here it is."}]
+        )
+
+    def test_a_long_reply_goes_live_once_it_is_plainly_an_answer(self):
+        live = LiveReply()
+        opening = "x" * LIVE_HOLD_CHARS
+
+        self.assertEqual(live.push(opening), [{"type": "text", "text": opening}])
+        # Live from here: every delta passes straight through, whitespace intact.
+        self.assertEqual(live.push(" more"), [{"type": "text", "text": " more"}])
+        self.assertEqual(live.finish(), [])
+        self.assertEqual(live.streamed, opening + " more")
+
+    def test_an_acknowledgment_never_reaches_the_screen_as_prose(self):
+        live = LiveReply()
+
+        self.assertEqual(live.push("Let me check your calendar."), [])
+        self.assertEqual(live.tool_use_started(), [])
+        self.assertEqual(live.finish(), [])
+        self.assertTrue(live.tool_round)
+        self.assertEqual(live.streamed, "")
+
+    def test_a_tagged_acknowledgment_is_a_status_line_the_moment_the_tool_opens(self):
+        live = LiveReply()
+
+        # Closed, but whose line is it? Not knowable yet.
+        self.assertEqual(live.push("<speak>Checking your calendar.</speak>"), [])
+        self.assertEqual(
+            live.tool_use_started(),
+            [{"type": "speech_text", "text": "Checking your calendar.", "role": "status"}],
+        )
+        self.assertEqual(live.finish(), [])
+
+    def test_a_tagged_line_followed_by_prose_is_the_answer(self):
+        live = LiveReply()
+
+        self.assertEqual(live.push("<speak>Both passed.</speak>"), [])
+        # Whitespace after the tag settles nothing.
+        self.assertEqual(live.push("\n\n"), [])
+        self.assertEqual(
+            live.push("## Results"),
+            [{"type": "speech_text", "text": "Both passed.", "role": "final"}],
+        )
+        # The prose is short of going live, so it is released at the end —
+        # exactly as written, tag excluded.
+        self.assertEqual(live.finish(), [{"type": "text", "text": "\n\n## Results"}])
+
+    def test_a_tagged_line_alone_is_the_answer_at_the_end(self):
+        live = LiveReply()
+        live.push("<speak>Done.</speak>")
+
+        self.assertEqual(
+            live.finish(), [{"type": "speech_text", "text": "Done.", "role": "final"}]
+        )
+
+    def test_a_round_handed_in_complete_is_told_what_it_was(self):
+        live = LiveReply()
+        live.push("<speak>On it.</speak>")
+
+        self.assertEqual(
+            live.finish(tool_round=True),
+            [{"type": "speech_text", "text": "On it.", "role": "status"}],
+        )
+        self.assertTrue(live.tool_round)
+
+    def test_an_unclosed_tag_never_reaches_the_screen(self):
+        live = LiveReply()
+
+        events = live.push("<speak>Still talking and never closing. " * 10)
+
+        self.assertEqual(events, [])
+        self.assertEqual(live.finish(), [])
+        self.assertEqual(live.streamed, "")
+
+    def test_a_block_on_a_chat_turn_is_still_not_prose(self):
+        """The loop drops the speech on a chat turn; the tag stays off screen either way."""
+        live = LiveReply()
+        prose = "y" * LIVE_HOLD_CHARS
+
+        events = live.push("<speak>Hi.</speak>" + prose)
+
+        self.assertEqual(
+            events,
+            [
+                {"type": "speech_text", "text": "Hi.", "role": "final"},
+                {"type": "text", "text": prose},
+            ],
+        )
+
+    def test_prose_that_went_live_before_a_tool_call_is_remembered(self):
+        """So the end-of-round path can skip captioning what is already on screen."""
+        live = LiveReply()
+        preamble = "p" * LIVE_HOLD_CHARS
+
+        self.assertEqual(live.push(preamble), [{"type": "text", "text": preamble}])
+        self.assertEqual(live.tool_use_started(), [])
+        self.assertEqual(live.streamed, preamble)
+        self.assertTrue(live.tool_round)

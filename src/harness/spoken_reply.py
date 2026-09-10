@@ -87,6 +87,7 @@ class SpokenLineWatcher:
     def __init__(self) -> None:
         self._buffer = ""
         self._finished = False
+        self._no_block = False
 
     def push(self, delta: str) -> str | None:
         if self._finished:
@@ -109,12 +110,164 @@ class SpokenLineWatcher:
         self._finished = True
         return match.group(1).strip() or None
 
+    @property
+    def no_block(self) -> bool:
+        """True once it is clear no `<speak>` block is coming this round."""
+        return self._no_block
+
     def _give_up_if_no_opener(self) -> None:
         """Stop watching once it is clear the model declined the format."""
         if len(self._buffer) < _OPENER_GRACE_CHARS:
             return
         if _UNCLOSED_SPEAK.search(self._buffer) is None:
             self._finished = True
+            self._no_block = True
+
+
+# How much prose is held back before the screen goes live. A pre-tool
+# acknowledgment is one sentence; an answer is longer than this within its
+# first second of generation. Matching the opener grace keeps one rule: by the
+# time this much has arrived, both questions — is there a spoken line, and is
+# this the answer — have been settled by the text itself.
+LIVE_HOLD_CHARS = _OPENER_GRACE_CHARS
+
+
+class LiveReply:
+    """
+    One round of a reply, read as it is written.
+
+    Two things leave a round while the model is still writing it. The spoken
+    line goes the moment its closing tag lands — that part `SpokenLineWatcher`
+    already did. The written answer now goes too, streamed to the screen as
+    prose once it is clear that prose is what it is.
+
+    That last clause is the hard part. The first sentence of a round looks the
+    same whether it is the answer or a "let me check your calendar" that
+    precedes a tool call, and the latter must not land on the screen as the
+    answer's opening paragraph. So prose is held until one of three things
+    settles it: enough has arrived that it is plainly an answer
+    (`LIVE_HOLD_CHARS`), the model opened a tool_use block (it was an
+    acknowledgment — dropped here, shown by the end-of-round path as a status
+    line), or the round ended.
+
+    The same ambiguity decides the spoken line's role. A closed `<speak>` block
+    followed by prose is the answer; followed by a tool call it is a progress
+    line. The line is held for exactly that one next event — a token or a
+    block start, never more than a few milliseconds — so it can go out labelled
+    correctly rather than be relabelled later.
+
+    Events come out as the same dicts the agent loop yields, unclamped and
+    ungated: `{"type": "speech_text", ...}` with a role of "status" or "final",
+    and `{"type": "text", ...}` carrying whitespace-exact prose. The loop
+    applies the length ceiling and the progress limits, because those are
+    turn-level decisions and this object sees one round.
+    """
+
+    def __init__(self) -> None:
+        self._watcher = SpokenLineWatcher()
+        self._text = ""
+        self._settled = False
+        self._pending_line: str | None = None
+        self._display = ""
+        self._live = False
+        self._streamed = ""
+        self._tool_round = False
+
+    @property
+    def streamed(self) -> str:
+        """Prose already sent to the screen this round, whitespace-exact."""
+        return self._streamed
+
+    @property
+    def tool_round(self) -> bool:
+        return self._tool_round
+
+    def push(self, delta: str) -> list[dict]:
+        events: list[dict] = []
+        self._text += delta
+
+        if not self._settled:
+            line = self._watcher.push(delta)
+            if line is not None:
+                # Everything after the closing tag is for the screen; the
+                # block itself never is.
+                self._settled = True
+                self._pending_line = line
+                match = _SPEAK_BLOCK.search(self._text)
+                self._display = self._text[match.end():] if match else ""
+            elif self._watcher.no_block:
+                self._settled = True
+                self._display = self._text
+            else:
+                # Still could be a block, or an unclosed one. Hold everything:
+                # a raw tag must never reach the screen.
+                return events
+        else:
+            self._display += delta
+
+        if self._pending_line is not None and self._display.strip():
+            # Prose after the block means this round is the answer, and the
+            # line is the answer's — say it now.
+            events.append(self._speech("final"))
+
+        events.extend(self._maybe_go_live())
+        return events
+
+    def tool_use_started(self) -> list[dict]:
+        """The model opened a tool call: this round was an acknowledgment."""
+        self._tool_round = True
+        events: list[dict] = []
+        if self._pending_line is not None:
+            events.append(self._speech("status"))
+        # Whatever prose was being held was the acknowledgment. It is not the
+        # answer, so it does not stream as one; the end-of-round path captions
+        # it as a status line, where it belongs.
+        self._display = ""
+        return events
+
+    def finish(self, *, tool_round: bool = False) -> list[dict]:
+        """
+        The round ended. Release whatever is still held.
+
+        `tool_round` is for a turn that arrived complete rather than live —
+        it never saw `tool_use_started`, so the caller says what the message
+        turned out to contain. A line still pending is then a progress line
+        or the answer's accordingly. Prose still held is flushed only when
+        the round settled what it was; an unclosed `<speak>` never settles,
+        and the end-of-round split handles that text whole, tags stripped.
+        """
+        if tool_round and not self._tool_round:
+            return self.tool_use_started()
+        if not self._settled and _UNCLOSED_SPEAK.search(self._text) is None:
+            # Too short for the watcher to have given up, but the round is
+            # over and there is no tag anywhere in it: it was all prose.
+            self._settled = True
+            self._display = self._text
+        events: list[dict] = []
+        if self._pending_line is not None:
+            events.append(self._speech("final"))
+        if self._settled and not self._tool_round and self._display:
+            events.append(self._flush())
+        return events
+
+    def _speech(self, role: str) -> dict:
+        line = self._pending_line or ""
+        self._pending_line = None
+        return {"type": "speech_text", "text": line, "role": role}
+
+    def _maybe_go_live(self) -> list[dict]:
+        if self._live:
+            return [self._flush()] if self._display else []
+        if len(self._display) >= LIVE_HOLD_CHARS:
+            self._live = True
+            return [self._flush()]
+        return []
+
+    def _flush(self) -> dict:
+        chunk = self._display
+        self._display = ""
+        self._streamed += chunk
+        return {"type": "text", "text": chunk}
 
 
 def split_spoken_reply(text: str) -> tuple[str, str | None]:

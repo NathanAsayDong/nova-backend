@@ -24,11 +24,46 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"false", "0", "no", "off"}
 
 
+class ToolUseStarted:
+    """
+    Marker yielded by a TurnStream the moment the model opens a tool_use block.
+
+    It arrives after the round's text and before the (often very long) tool
+    arguments. That position is the whole point: it is the earliest moment a
+    reader can know that the text it has seen so far was a pre-tool
+    acknowledgment and not the answer, which is what lets the agent loop speak
+    the acknowledgment now instead of after the arguments finish.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "TOOL_USE_STARTED"
+
+
+TOOL_USE_STARTED = ToolUseStarted()
+
+# Model families that take `output_config.effort`. Everything older (Haiku 4.5,
+# the 4.5 line and before) rejects the parameter outright.
+_EFFORT_MODEL_PREFIXES = (
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "claude-mythos-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+)
+_EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
+
+
 class TurnStream:
     """
     One model turn, readable while it is still being written.
 
-    Iterating yields text deltas in arrival order. Once iteration finishes,
+    Iterating yields text deltas in arrival order, plus a `TOOL_USE_STARTED`
+    marker at the point the model begins a tool call. Once iteration finishes,
     `message` holds the assembled Message — the content blocks and tool_use
     the agent loop needs to decide what happens next.
 
@@ -53,7 +88,7 @@ class TurnStream:
         self._drained = message is not None
         self._started = False
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[str | ToolUseStarted]:
         if self._open_stream is None:
             # An already-complete turn. Replay its text so anything watching
             # the stream sees the same content — all at once, which is what a
@@ -71,10 +106,22 @@ class TurnStream:
             raise RuntimeError("A TurnStream can only be read once.")
         self._started = True
 
+        # The SDK stream is iterated event by event rather than through
+        # `text_stream`, because the latter hides the one non-text event this
+        # needs: the start of a tool_use block. Text deltas are surfaced as
+        # the SDK's synthetic `text` events; thinking, citations and tool
+        # argument JSON all pass by unyielded.
         with self._open_stream() as stream:
-            for delta in stream.text_stream:
-                if delta:
-                    yield delta
+            for event in stream:
+                event_type = getattr(event, "type", None)
+                if event_type == "text":
+                    delta = getattr(event, "text", "")
+                    if delta:
+                        yield delta
+                elif event_type == "content_block_start":
+                    block = getattr(event, "content_block", None)
+                    if getattr(block, "type", None) == "tool_use":
+                        yield TOOL_USE_STARTED
             self._message = stream.get_final_message()
         self._drained = True
 
@@ -103,7 +150,19 @@ class ClaudeService:
 
         self.settings_service = SettingsService()
         self.MODEL = self.settings_service.get_current_model()
-        self.max_tokens = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
+        # Thinking tokens count against this on the models that think, and a
+        # tool call cut off mid-JSON is a failed turn, so the ceiling leaves
+        # room for both. Every request streams, so the size costs nothing.
+        self.max_tokens = int(os.getenv("CLAUDE_MAX_TOKENS", "8192"))
+        # How hard the model thinks before it writes. Nova's replies are
+        # spoken, and the first word cannot go out until thinking ends, so the
+        # default is the low end — a conversational turn does not need the
+        # deliberation a coding task does. Only sent to models that take it.
+        # Namespaced because a bare CLAUDE_EFFORT is set by other tooling.
+        self.effort = (os.getenv("NOVA_CLAUDE_EFFORT") or "low").strip().lower()
+        if self.effort not in _EFFORT_LEVELS:
+            print(f"Unknown NOVA_CLAUDE_EFFORT {self.effort!r}; using 'low'.")
+            self.effort = "low"
         self.web_search_enabled = _env_flag("CLAUDE_WEB_SEARCH_ENABLED", True)
         self.web_search_max_uses = int(os.getenv("CLAUDE_WEB_SEARCH_MAX_USES", "5"))
 
@@ -161,6 +220,27 @@ class ClaudeService:
     def get_current_model(self) -> str:
         """The model this service is currently pointing at."""
         return self.MODEL
+
+    def _generation_kwargs(self) -> dict[str, Any]:
+        """
+        Per-model generation settings.
+
+        Opus 5 and Sonnet 5 think by default, at `high` effort, with the
+        thinking hidden — which from a voice turn's point of view is a long
+        silence before the first word, since the `<speak>` line cannot start
+        until the thinking is done. `effort` is the lever that shortens it;
+        thinking itself is left adaptive, because switching it off entirely
+        on these models can push tool calls into visible text. Haiku 4.5 and
+        older models reject the parameter, so they get nothing here.
+
+        Matched on the configured id as-is. Both forms it takes — the alias
+        (`claude-haiku-4-5`) and the dated snapshot it resolves to — share
+        the family prefix, and resolving it properly means the Models API,
+        which has no place on the path of every request.
+        """
+        if self.MODEL.startswith(_EFFORT_MODEL_PREFIXES):
+            return {"output_config": {"effort": self.effort}}
+        return {}
 
     def _build_tools(self, tools: Optional[list]) -> Optional[list]:
         """Combine caller-supplied client tools with Anthropic's server tools."""
@@ -264,6 +344,7 @@ class ClaudeService:
             messages=self._build_messages(prompt, context),
             max_tokens=self.max_tokens,
             cache_control={"type": "ephemeral"},
+            **self._generation_kwargs(),
             **self._build_kwargs(tools, system, mcp_servers),
         )
         if mcp_servers:
@@ -299,6 +380,7 @@ class ClaudeService:
             messages=self._build_messages(prompt, context),
             max_tokens=self.max_tokens,
             cache_control={"type": "ephemeral"},
+            **self._generation_kwargs(),
             **self._build_kwargs(tools, system, mcp_servers),
         )
         if mcp_servers:

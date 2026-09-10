@@ -20,14 +20,17 @@ from src.model.message import MessageRole
 from src.model.report_type import ReportType
 from src.harness.spoken_reply import (
     SCREEN_ONLY_LINE,
-    SpokenLineWatcher,
+    LiveReply,
     clamp_spoken,
     is_repeat,
     speech_summary,
     split_spoken_reply,
 )
-from src.service.claude_service import ClaudeService
-from src.service.conversation_service import ConversationService
+from src.service.claude_service import TOOL_USE_STARTED, ClaudeService
+from src.service.conversation_service import (
+    ConversationClosedError,
+    ConversationService,
+)
 from src.service.mcp_server_service import McpServerService
 from src.service.memory_chunk_service import MemoryChunkService
 from src.service.tool_service import ToolExecutionError, ToolService
@@ -44,10 +47,16 @@ _AGENT_MAX_ITERATIONS = 50
 _MAX_SPOKEN_PROGRESS_LINES = 3
 _AGENT_LOOP_TIMEOUT_SECONDS = 120.0
 
-# Memory retrieval is overlapped with the turn's other setup work, so it needs
-# somewhere to run. Small and shared: at most one retrieval is in flight per
-# turn, and the sockets serve one user.
-_RETRIEVAL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nova-retrieval")
+# The turn's setup work — memory retrieval, the tool list, the MCP registry —
+# and its write-behind persistence all run here, so they overlap instead of
+# queueing behind one another on the way to the first word. Small and shared:
+# a turn submits a handful of jobs, and the sockets serve one user.
+_SETUP_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="nova-setup")
+
+# How long the end of a turn waits for a write-behind insert that has not
+# landed yet. They normally finish during the model request; this only bounds
+# the wait when the database is having a bad day.
+_WRITE_BEHIND_TIMEOUT_SECONDS = 5.0
 
 # Hard ceiling on how long a turn will wait for memory it did not ask for.
 # Retrieval normally finishes inside the setup work it overlaps with; if the
@@ -151,7 +160,7 @@ class AgentLoop:
         if not (prompt or "").strip():
             return None
         try:
-            return _RETRIEVAL_POOL.submit(
+            return _SETUP_POOL.submit(
                 self._retrieve_memory, prompt, conversation.project_id
             )
         except Exception as exc:
@@ -206,6 +215,33 @@ class AgentLoop:
             self.conversation_service.record_message(conversation, role, content)
         except Exception as exc:
             print(f"Failed to persist {role} message for conversation {conversation.uuid}: {exc}")
+
+    def _persist_message_later(
+        self,
+        conversation: Conversation,
+        role: MessageRole,
+        content: str,
+    ) -> Future:
+        """
+        `_persist_message`, off the turn's critical path.
+
+        The insert runs on the pool while the model request goes out. The
+        caller keeps the future and collects it before the turn is handed
+        back (`_await_writes`), so the transcript is whole by then and message
+        order in the table is preserved.
+        """
+        return _SETUP_POOL.submit(self._persist_message, conversation, role, content)
+
+    @staticmethod
+    def _await_writes(pending: list[Future]) -> None:
+        for future in pending:
+            try:
+                future.result(timeout=_WRITE_BEHIND_TIMEOUT_SECONDS)
+            except FutureTimeout:
+                print("A write-behind message insert is still running; not waiting on it.")
+            except Exception as exc:
+                # _persist_message swallows its own errors; this is the pool.
+                print(f"Write-behind message insert failed: {exc}")
 
     def conversation_loop_stream(
         self,
@@ -490,13 +526,16 @@ class AgentLoop:
         prompt: str,
         conversation_uuid: UUID,
         prompt_source: PromptSourceEnum = PromptSourceEnum.CHAT_PROMPT,
+        conversation: Conversation | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Run a single conversation turn as a bounded ReAct loop, as an event stream.
 
         Yields dicts the transport layer renders however it likes:
-          {"type": "text", "text": ...}        sentence chunk of the written
-                                               reply, for the screen
+          {"type": "text", "text": ...}        a piece of the written reply,
+                                               whitespace-exact, for the
+                                               screen — streamed as the model
+                                               writes it
           {"type": "speech_text", "text": ...} the ONLY thing meant to be read
                                                aloud, with a "role" of
                                                "status" or "final"
@@ -513,9 +552,11 @@ class AgentLoop:
         question deserves, because a screen can be skimmed. A transport that
         speaks anything other than `speech_text` has reunited them by mistake.
 
-        Text chunks are sentence-sized so the chat panel can stream them in;
-        the chat path reassembles them. Tool calls run inline between Claude
-        rounds.
+        Prose is streamed as the model writes it, held back only for as long
+        as it takes to tell an answer from a pre-tool acknowledgment (see
+        `LiveReply`); `text_final` then carries the whole reply, tags
+        stripped, so a renderer can swap in exactly what was written. Tool
+        calls run inline between Claude rounds.
 
         `prompt_source` steers the reply for the medium it will be delivered
         in, and decides whether there is a spoken track at all — see
@@ -523,22 +564,60 @@ class AgentLoop:
         history, so a spoken turn does not shorten later typed turns in the
         same conversation.
 
+        `conversation` is the row for `conversation_uuid` when the caller has
+        already fetched it (transports check for a closed conversation before
+        opening their stream); it saves the loop fetching it again.
+
         Turns are persisted to the conversation/message tables. Raises
         ConversationClosedError before yielding anything if the conversation
         has been closed — closed conversations can never be continued.
         """
+        pending_writes: list[Future] = []
+        try:
+            yield from self._conversation_turn(
+                prompt, conversation_uuid, prompt_source, conversation, pending_writes
+            )
+        finally:
+            # Write-behind persistence is collected here rather than left to
+            # finish on its own, so the transcript is complete by the time
+            # the caller sees the turn end.
+            self._await_writes(pending_writes)
+
+    def _conversation_turn(
+        self,
+        prompt: str,
+        conversation_uuid: UUID,
+        prompt_source: PromptSourceEnum,
+        conversation: Conversation | None,
+        pending_writes: list[Future],
+    ) -> Iterator[dict[str, Any]]:
         if self.tool_service is None:
             self.tool_service = ToolService()
         if self.conversation_service is None:
             self.conversation_service = ConversationService()
 
+        # Everything the request needs that does not depend on the
+        # conversation goes out first, in parallel. The tool list and the MCP
+        # registry are database round trips that used to run one after the
+        # other, after the conversation lookups; now they overlap with them
+        # and with each other, and are collected below.
+        tools_future = _SETUP_POOL.submit(self.tool_service.list_tools)
+        mcp_future = _SETUP_POOL.submit(self._load_mcp_servers)
+
         # Gate the turn on the persisted conversation state (may raise
-        # ConversationClosedError), creating the row on first use.
-        conversation = self.conversation_service.ensure_open_conversation(conversation_uuid)
+        # ConversationClosedError), creating the row on first use. A caller
+        # that already fetched the row hands it in; the gate still applies.
+        if conversation is None or str(conversation.uuid) != str(conversation_uuid):
+            conversation = self.conversation_service.ensure_open_conversation(
+                conversation_uuid
+            )
+        elif conversation.is_closed:
+            raise ConversationClosedError(
+                f"Conversation {conversation_uuid} is closed and cannot be continued."
+            )
 
         # Kick off memory retrieval now and collect it just before the request
-        # goes out. The turn's remaining setup is three network round trips
-        # (history, tools, MCP registry) that do not depend on it, so the
+        # goes out. The history load below does not depend on it, so the
         # embed-and-search runs inside time the turn was already spending.
         memory_future = self._start_memory_retrieval(prompt, conversation)
 
@@ -550,12 +629,26 @@ class AgentLoop:
             )
         history = self.conversations[conversation_uuid]
 
+        def persist(role: MessageRole, content: str) -> None:
+            """
+            Persist a message of this turn, in order.
+
+            The user's message was written behind (below); everything after it
+            waits for that write to land first, so the table never shows a
+            reply ahead of the question it answers. By the time anything else
+            is persisted the model has replied, so the wait is free.
+            """
+            if pending_writes:
+                self._await_writes(pending_writes)
+                pending_writes.clear()
+            self._persist_message(conversation, role, content)
+
         tool_context = {"conversation_uuid": str(conversation_uuid)}
 
         started_at = time.monotonic()
 
         try:
-            tools = self.tool_service.list_tools()
+            tools = tools_future.result()
         except Exception:
             tools = []
 
@@ -585,8 +678,9 @@ class AgentLoop:
         system_blocks = self._system_blocks(str(prompt_source))
 
         # Remote MCP servers, resolved once per turn so a registry change
-        # mid-turn can't flip the tool list between iterations.
-        mcp_servers = self._load_mcp_servers() or None
+        # mid-turn can't flip the tool list between iterations. The lookup
+        # never raises (see _load_mcp_servers).
+        mcp_servers = mcp_future.result() or None
 
         # Everything the retrieval was overlapping with is done; collect it and
         # open the turn.
@@ -600,7 +694,11 @@ class AgentLoop:
         # memory is derived, and re-derives on rehydration.
         memory_block = self._collect_memory(memory_future)
         history.append({"role": "user", "content": self._augment(prompt, memory_block)})
-        self._persist_message(conversation, MessageRole.USER, prompt)
+        # Write-behind. The message is already in history; the model request
+        # should not wait on the insert. Collected before the turn returns.
+        pending_writes.append(
+            self._persist_message_later(conversation, MessageRole.USER, prompt)
+        )
 
         # Progress reporting across a multi-round turn.
         #
@@ -618,11 +716,46 @@ class AgentLoop:
         last_progress = ""
         status_shown = False
 
+        # Which track this turn speaks on. The live events below carry speech
+        # regardless — a model that writes a <speak> block on a chat turn has
+        # still written one — and this is where a chat turn drops it.
+        speak = prompt_source.wants_spoken_summary()
+        early_line: str | None = None
+
+        def deliver(events: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+            """
+            Yield a round's live events under the turn's limits.
+
+            `LiveReply` decides WHAT a round says and shows and WHEN; this
+            decides WHETHER, which is a turn-level question: a progress line
+            past the narration cap, or one that repeats the last, is dropped
+            here exactly as the end-of-round path would drop it. What was said
+            is noted in `early_line` so the end of the round never says it
+            again.
+            """
+            nonlocal early_line
+            for event in events:
+                if event["type"] == "text":
+                    yield event
+                    continue
+                if not speak:
+                    continue
+                say = clamp_spoken(event["text"])
+                if not say:
+                    continue
+                if event["role"] == "status" and (
+                    progress_spoken >= _MAX_SPOKEN_PROGRESS_LINES
+                    or is_repeat(say, last_progress)
+                ):
+                    continue
+                early_line = say
+                yield {"type": "speech_text", "text": say, "role": event["role"]}
+
         for _ in range(_AGENT_MAX_ITERATIONS):
             if time.monotonic() - started_at > _AGENT_LOOP_TIMEOUT_SECONDS:
                 fallback = "I hit a time limit while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
-                self._persist_message(conversation, MessageRole.NOVA, fallback)
+                persist(MessageRole.NOVA, fallback)
                 yield from self._failure_events(prompt_source, fallback)
                 return
 
@@ -630,10 +763,8 @@ class AgentLoop:
             # read as it is written, so the spoken line usually goes out well
             # before the round finishes; the end-of-round paths below check
             # this so a turn never says the same thing twice.
-            early_line: str | None = None
-            watcher = (
-                SpokenLineWatcher() if prompt_source.wants_spoken_summary() else None
-            )
+            early_line = None
+            live = LiveReply()
 
             try:
                 turn = self.claude_service.stream_response(
@@ -643,44 +774,38 @@ class AgentLoop:
                     system=system_blocks,
                     mcp_servers=mcp_servers,
                 )
-                # This is the latency win. The `<speak>` block is written
-                # first, so its closing tag lands while the markdown answer
-                # beneath it is still being generated — and the moment it
-                # does, TTS can start. Waiting for the final message here (as
+                # This is the latency win, on both tracks. The `<speak>` block
+                # is written first, so its closing tag lands while the markdown
+                # answer beneath it is still being generated — and the moment
+                # it does, TTS can start. The prose then streams to the screen
+                # as it is written, and a pre-tool acknowledgment is spoken
+                # the instant the tool_use block opens rather than after its
+                # arguments finish. Waiting for the final message here (as
                 # this used to) meant every voice turn paid for the length of
-                # the WRITTEN answer before a word of the spoken one was said.
-                for delta in turn:
-                    if watcher is None:
-                        continue
-                    line = watcher.push(delta)
-                    if line is None:
-                        continue
-                    say = clamp_spoken(line)
-                    # The turn's limits apply here too, or a model that wraps
-                    # every pre-tool line in <speak> narrates its way straight
-                    # around them. If this round turns out to be the answer,
-                    # the end-of-round path speaks it instead — later than it
-                    # could have, but never lost.
-                    if (
-                        say
-                        and progress_spoken < _MAX_SPOKEN_PROGRESS_LINES
-                        and not is_repeat(say, last_progress)
-                    ):
-                        early_line = say
-                        yield {"type": "speech_text", "text": say, "role": "final"}
+                # the WRITTEN answer before a word of the spoken one was said,
+                # and every chat turn saw nothing until the last token.
+                for item in turn:
+                    if item is TOOL_USE_STARTED:
+                        yield from deliver(live.tool_use_started())
+                    else:
+                        yield from deliver(live.push(item))
                 response = turn.message
             except TimeoutError:
+                # A line that had closed but was still waiting on its role is
+                # said now: the stream got far enough to say it.
+                yield from deliver(live.finish())
                 fallback = "I hit a backend timeout while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
-                self._persist_message(conversation, MessageRole.NOVA, fallback)
+                persist(MessageRole.NOVA, fallback)
                 yield from self._failure_events(
                     prompt_source, fallback, early_line is not None
                 )
                 return
             except Exception as exc:
+                yield from deliver(live.finish())
                 fallback = f"Agent loop failed: {str(exc)}"
                 history.append({"role": "assistant", "content": fallback})
-                self._persist_message(conversation, MessageRole.NOVA, fallback)
+                persist(MessageRole.NOVA, fallback)
                 yield from self._failure_events(
                     prompt_source, fallback, early_line is not None
                 )
@@ -696,29 +821,25 @@ class AgentLoop:
             assistant_blocks = self._serialize_blocks(response)
 
             for record in self._describe_server_tool_uses(response):
-                self._persist_message(
-                    conversation, MessageRole.TOOL, json.dumps(record)
-                )
+                persist(MessageRole.TOOL, json.dumps(record))
 
             # MCP calls already ran server-side; surface them to the UI the
             # same way client tool calls are surfaced, and keep an audit row.
             for record in self._describe_mcp_tool_uses(response):
-                self._persist_message(
-                    conversation, MessageRole.TOOL, json.dumps(record)
-                )
+                persist(MessageRole.TOOL, json.dumps(record))
                 yield {
                     "type": "tool_call",
                     "tool": record["tool"],
                     "input": record["input"],
                 }
 
-            if not tool_uses:
+            if not tool_uses and getattr(response, "stop_reason", None) == "pause_turn":
                 # A long server-side search can pause the turn; replay the
                 # assistant message unchanged to let it finish.
-                if getattr(response, "stop_reason", None) == "pause_turn":
-                    history.append({"role": "assistant", "content": assistant_blocks})
-                    continue
+                history.append({"role": "assistant", "content": assistant_blocks})
+                continue
 
+            if not tool_uses:
                 raw_text = self._extract_text(response)
                 display_text, spoken_text = split_spoken_reply(raw_text)
                 # required: this is the answer the user asked for out loud.
@@ -732,8 +853,14 @@ class AgentLoop:
                 # record: the spoken line is a lossy view of it, and a
                 # transcript reread later should show what was actually said
                 # in full, not the summary that went to the speaker.
-                self._persist_message(conversation, MessageRole.NOVA, display_text)
+                persist(MessageRole.NOVA, display_text)
                 try:
+                    # The round is over: whatever LiveReply was still holding
+                    # — a spoken line waiting on its role, prose short of
+                    # going live — goes out first. Inside the try, so a
+                    # consumer that stops reading after the first piece still
+                    # leaves the reply in history.
+                    yield from deliver(live.finish())
                     # Speech first. It is the only thing the user is actually
                     # waiting on — the written answer arrives faster than it
                     # can be read either way — so the transport gets it before
@@ -745,11 +872,13 @@ class AgentLoop:
                             "role": "final",
                         }
                     if display_text:
-                        for chunk in self.iter_sentence_chunks([display_text]):
-                            yield {"type": "text", "text": chunk}
-                        # Sentence chunks are stripped, which destroys the
-                        # newlines markdown lists and code fences need. Emit
-                        # the whole text so a renderer can restore fidelity.
+                        # The prose normally reached the screen as it was
+                        # written; a round too short to have gone live sends
+                        # it whole here. Either way the final event carries
+                        # the tag-stripped text so a renderer can replace what
+                        # it streamed with exactly what was written.
+                        if not live.streamed:
+                            yield {"type": "text", "text": display_text}
                         yield {"type": "text_final", "text": display_text}
                 finally:
                     # Keep the full blocks (citations, search results) in
@@ -764,6 +893,11 @@ class AgentLoop:
 
             history.append({"role": "assistant", "content": assistant_blocks})
 
+            # A turn handed in complete never saw the tool_use marker, so
+            # LiveReply is told what the round was; a line it was still
+            # holding is spoken here as the progress line it is.
+            yield from deliver(live.finish(tool_round=True))
+
             # What this round said before reaching for its tools.
             status_display, status_tagged = split_spoken_reply(
                 self._extract_text(response).strip()
@@ -774,7 +908,8 @@ class AgentLoop:
                 progress_spoken += 1
                 last_progress = early_line
                 status_shown = True
-                yield {"type": "status_text", "text": status_display}
+                if not live.streamed:
+                    yield {"type": "status_text", "text": status_display}
 
             elif status_display:
                 # The line goes through the same ceiling as the answer, so a
@@ -795,7 +930,10 @@ class AgentLoop:
                 # medium without a speaker still gets.
                 if say_it or not status_shown:
                     status_shown = True
-                    yield {"type": "status_text", "text": status_display}
+                    # Unless the prose already streamed as prose — a long
+                    # preamble before a tool call is on the screen already.
+                    if not live.streamed:
+                        yield {"type": "status_text", "text": status_display}
 
                 if say_it:
                     progress_spoken += 1
@@ -818,8 +956,7 @@ class AgentLoop:
                             "is_error": True,
                         }
                     )
-                    self._persist_message(
-                        conversation,
+                    persist(
                         MessageRole.TOOL,
                         json.dumps({"tool": block.name, "error": "Unknown tool."}),
                     )
@@ -847,16 +984,14 @@ class AgentLoop:
                     artifact = self._artifact_for_tool(block.name, arguments, result)
                     if artifact is not None:
                         yield artifact
-                    self._persist_message(
-                        conversation,
+                    persist(
                         MessageRole.TOOL,
                         json.dumps(
                             {"tool": block.name, "input": arguments, "result": content}
                         ),
                     )
                 except ToolExecutionError as exc:
-                    self._persist_message(
-                        conversation,
+                    persist(
                         MessageRole.TOOL,
                         json.dumps(
                             {"tool": block.name, "input": arguments, "error": str(exc)}
@@ -865,7 +1000,7 @@ class AgentLoop:
                     if not exc.recoverable:
                         fallback = "I ran into a tool execution issue and had to stop."
                         history.append({"role": "assistant", "content": fallback})
-                        self._persist_message(conversation, MessageRole.NOVA, fallback)
+                        persist(MessageRole.NOVA, fallback)
                         yield from self._failure_events(
                             prompt_source, fallback, early_line is not None
                         )
@@ -883,7 +1018,7 @@ class AgentLoop:
 
         fallback = "I hit a loop limit while working on that and had to stop."
         history.append({"role": "assistant", "content": fallback})
-        self._persist_message(conversation, MessageRole.NOVA, fallback)
+        persist(MessageRole.NOVA, fallback)
         yield from self._failure_events(prompt_source, fallback)
 
     def run_agent(
