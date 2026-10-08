@@ -69,10 +69,16 @@ def suffix_for_mime(mime_type: str) -> str:
     return ".webm"
 
 
-def transcribe_serialized(file_path: Path, language: str | None) -> str:
-    """Flat transcription for an assistant turn. Takes priority on the GPU."""
+def transcribe_serialized(
+    file_path: Path, language: str | None, fast: bool = False
+) -> str:
+    """Flat transcription for an assistant turn. Takes priority on the GPU.
+
+    `fast` is for live captions: greedy decoding, since the caption is redrawn
+    a second later and the final pass decodes properly.
+    """
     with asr_lock.priority():
-        return asr_service.transcribe_file_path(file_path, language)
+        return asr_service.transcribe_file_path(file_path, language, fast=fast)
 
 
 def transcribe_segments_serialized(

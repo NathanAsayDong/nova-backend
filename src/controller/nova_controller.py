@@ -241,8 +241,24 @@ def normalize_wake_text(value: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip()
 
 
-def has_wake_phrase(value: str) -> bool:
+# How speech recognizers mishear "Nova" on a one-second wake clip. "Noah" is
+# the big one: a real name the model's prior favours over a rare word.
+_WAKE_NAME_VARIANTS = frozenset({"nova", "novah", "nover", "noah", "noba", "novaa"})
+
+
+def _canonical_wake_text(value: str) -> str:
+    """Normalized text with misheard spellings of the wake word folded to "nova"."""
     normalized = normalize_wake_text(value)
+    # A split decoding: "no va", "no vah".
+    normalized = re.sub(r"\bno (?:va|vah|ver)\b", "nova", normalized)
+    return " ".join(
+        "nova" if token in _WAKE_NAME_VARIANTS else token
+        for token in normalized.split(" ")
+    )
+
+
+def has_wake_phrase(value: str) -> bool:
+    normalized = _canonical_wake_text(value)
     if not normalized:
         return False
 
@@ -572,7 +588,9 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 temp.write(audio_bytes)
                 file_path = Path(temp.name)
 
-            text = await asyncio.to_thread(transcribe_serialized, file_path, language)
+            text = await asyncio.to_thread(
+                transcribe_serialized, file_path, language, fast=True
+            )
             text = (text or "").strip()
 
             if generation != partial_state["generation"]:

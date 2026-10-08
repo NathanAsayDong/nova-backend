@@ -55,7 +55,7 @@ class TranscribeSocketTests(unittest.TestCase):
         self.asr_calls: list[str] = []
         self.transcripts: dict[str, str | list[str]] = {}
 
-        def fake_transcribe(file_path, language):
+        def fake_transcribe(file_path, language, fast=False):
             marker = "".join(sorted(set(file_path.read_bytes().decode())))
             self.asr_calls.append(marker)
             reply = self.transcripts.get(marker, f"audio[{marker}]")

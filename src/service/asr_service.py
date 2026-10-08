@@ -12,9 +12,21 @@ if TYPE_CHECKING:
 
 ELEVEN_LABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 DEFAULT_ELEVEN_LABS_STT_MODEL_ID = "scribe_v2"
-DEFAULT_WHISPER_MODEL_SIZE = "distil-large-v3" #NOTE: Options are base, and distil-large-v3
-DEFAULT_COMPUTE_TYPE = "int8"
+# large-v3-turbo rather than distil-large-v3: same speed class on a GPU, and
+# measurably fewer word errors, worst on exactly the short noisy turns Nova
+# hears. The Mac path already used turbo; this brings the tower in line.
+DEFAULT_WHISPER_MODEL_SIZE = "large-v3-turbo"
 DEFAULT_MLX_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
+# NVIDIA Parakeet TDT, English. Tops Whisper on accuracy at a fraction of the
+# compute, and as a transducer it does not invent text on silence the way an
+# autoregressive decoder does. v3 is the multilingual sibling.
+DEFAULT_PARAKEET_MODEL = "nemo-parakeet-tdt-0.6b-v2"
+# Parakeet is trained on utterances up to ~20-30s; longer audio is split at
+# pauses by VAD before it reaches the model.
+PARAKEET_MAX_CHUNK_SECONDS = 20.0
+# Words Whisper should expect. Its prior has heard "Noah" far more often than
+# "Nova", so without a nudge the wake word is the word it gets wrong most.
+DEFAULT_HOTWORDS = "Nova"
 
 SAMPLE_RATE = 16000
 
@@ -108,6 +120,52 @@ def _setup_cuda_libraries() -> dict:
     return report
 
 
+def _hotwords() -> str | None:
+    """Vocabulary hint for Whisper, from ASR_HOTWORDS (empty disables it)."""
+    value = os.getenv("ASR_HOTWORDS", DEFAULT_HOTWORDS).strip()
+    return value or None
+
+
+def _load_parakeet():
+    """
+    Load Parakeet through ONNX Runtime, on the GPU when one is usable.
+
+    ONNX Runtime keeps CUDA optional: when the CUDA provider cannot load its
+    libraries it logs the reason and runs on the CPU instead, which for a
+    0.6B transducer is still faster than real time. PARAKEET_DEVICE forces
+    "cpu" or "cuda"; the default "auto" uses the GPU when one is visible.
+    """
+    import onnx_asr
+    import onnxruntime as ort
+
+    requested = (os.getenv("PARAKEET_DEVICE") or "auto").strip().lower()
+    model_name = os.getenv("PARAKEET_MODEL", DEFAULT_PARAKEET_MODEL)
+
+    use_cuda = False
+    if requested in ("auto", "cuda"):
+        if sys.platform == "win32":
+            # Same NVIDIA wheels CTranslate2 uses; ORT >= 1.21 can also load
+            # them from site-packages itself, which covers cuFFT and cudart.
+            _setup_cuda_libraries()
+            if hasattr(ort, "preload_dlls"):
+                try:
+                    ort.preload_dlls()
+                except Exception as exc:  # noqa: BLE001 - CPU still works
+                    print(f"[asr] onnxruntime could not preload CUDA DLLs: {exc}")
+        use_cuda = "CUDAExecutionProvider" in ort.get_available_providers()
+        if requested == "cuda" and not use_cuda:
+            print("[asr] PARAKEET_DEVICE=cuda but onnxruntime has no CUDA provider; using CPU.")
+
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_cuda else ["CPUExecutionProvider"]
+    # Full precision on the GPU; the int8 export is the CPU speed path.
+    quantization = None if use_cuda else "int8"
+    print(
+        f"[asr] parakeet ({model_name}) on {'cuda' if use_cuda else 'cpu'}"
+        f"{' (int8)' if quantization else ''}"
+    )
+    return onnx_asr.load_model(model_name, quantization=quantization, providers=providers)
+
+
 def missing_cuda_libraries() -> list[str]:
     """CUDA libraries CTranslate2 needs that cannot be loaded the way it asks."""
     if sys.platform != "win32":
@@ -135,7 +193,7 @@ def _resolve_whisper_device() -> tuple[str, str]:
     import ctranslate2
 
     requested = (os.getenv("WHISPER_DEVICE") or "auto").strip().lower()
-    compute_type = (os.getenv("WHISPER_COMPUTE_TYPE") or DEFAULT_COMPUTE_TYPE).strip()
+    requested_compute = (os.getenv("WHISPER_COMPUTE_TYPE") or "").strip()
     device = requested
 
     if requested in ("auto", "cuda"):
@@ -153,6 +211,10 @@ def _resolve_whisper_device() -> tuple[str, str]:
             device = "cpu"
         else:
             device = "cuda"
+
+    # float16 on a GPU: int8 weights cost accuracy for a memory saving a
+    # 10 GB card does not need. int8 on CPU, where float16 is not an option.
+    compute_type = requested_compute or ("float16" if device == "cuda" else "int8")
 
     # int8 keeps memory low and is supported everywhere; a device that cannot do
     # the requested precision would otherwise fail when the model is built.
@@ -183,6 +245,10 @@ class ASRService:
         - "faster_whisper": runs locally via CTranslate2 (CUDA or CPU), no
           ffmpeg needed. Tune with WHISPER_DEVICE ("auto"/"cuda"/"cpu") and
           WHISPER_COMPUTE_TYPE ("int8"/"float16"/...).
+        - "parakeet": NVIDIA Parakeet TDT via ONNX Runtime (CUDA or CPU).
+          English-only by default; set PARAKEET_MODEL to
+          "nemo-parakeet-tdt-0.6b-v3" for multilingual. Tune with
+          PARAKEET_DEVICE ("auto"/"cuda"/"cpu").
         - "elevenlabs": ElevenLabs Scribe API. Scribe has no downloadable weights,
           so this provider requires ELEVEN_LABS_API_KEY and internet access.
 
@@ -193,16 +259,19 @@ class ASRService:
         self.provider = (provider or os.getenv("ASR_PROVIDER") or "auto").strip().lower()
         if self.provider == "auto":
             self.provider = _platform_default_provider()
-        if self.provider not in ("mlx_whisper", "faster_whisper", "elevenlabs"):
+        if self.provider not in ("mlx_whisper", "faster_whisper", "parakeet", "elevenlabs"):
             raise ValueError(
                 f"Unknown ASR provider '{self.provider}'. "
-                "Expected 'auto', 'mlx_whisper', 'faster_whisper', or 'elevenlabs'."
+                "Expected 'auto', 'mlx_whisper', 'faster_whisper', 'parakeet', or 'elevenlabs'."
             )
+        self.hotwords = _hotwords()
 
         if self.provider == "mlx_whisper":
             import mlx_whisper  # fail fast at startup if the dependency is missing
 
             self.mlx_model_repo = os.getenv("MLX_WHISPER_MODEL", DEFAULT_MLX_WHISPER_MODEL)
+        elif self.provider == "parakeet":
+            self.parakeet = _load_parakeet()
         elif self.provider == "elevenlabs":
             self.eleven_labs_api_key = os.getenv("ELEVEN_LABS_API_KEY") or os.getenv("ELEVEN_LABS_API")
             if not self.eleven_labs_api_key:
@@ -218,13 +287,24 @@ class ASRService:
             print(f"[asr] faster-whisper on {device} ({compute_type}), model {model_size}")
             self.whisper = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-    def transcribe_file_path(self, file_path: str | Path, language: str | None = None) -> str:
+    def transcribe_file_path(
+        self, file_path: str | Path, language: str | None = None, fast: bool = False
+    ) -> str:
+        """
+        Flat transcript of a file.
+
+        `fast` trades a little accuracy for latency — greedy decoding instead
+        of beam search — for live captions, which are redrawn every second and
+        replaced by a full-quality pass when the turn ends.
+        """
         if self.provider == "elevenlabs":
             with open(file_path, "rb") as audio:
                 return self._transcribe_eleven_labs(audio, language)
         if self.provider == "mlx_whisper":
             return self._transcribe_mlx(str(file_path), language)
-        return self._transcribe_whisper(str(file_path), language)
+        if self.provider == "parakeet":
+            return self._transcribe_parakeet(str(file_path))
+        return self._transcribe_whisper(str(file_path), language, fast=fast)
 
     def transcribe(self, file: BinaryIO, language: str | None = None) -> str:
         # Accepts raw binary streams and FastAPI UploadFile objects (which wrap the stream in .file)
@@ -233,6 +313,8 @@ class ASRService:
             return self._transcribe_eleven_labs(audio, language)
         if self.provider == "mlx_whisper":
             return self._transcribe_mlx(audio, language)
+        if self.provider == "parakeet":
+            return self._transcribe_parakeet(audio)
         return self._transcribe_whisper(audio, language)
 
     # ---------- timed transcription ----------
@@ -268,7 +350,49 @@ class ASRService:
             return self._segments_eleven_labs(audio, language)
         if self.provider == "mlx_whisper":
             return self._segments_mlx(audio, language)
+        if self.provider == "parakeet":
+            return self._segments_parakeet(audio)
         return self._segments_whisper(audio, language)
+
+    def _parakeet_chunks(
+        self, audio: "str | Path | BinaryIO | np.ndarray"
+    ) -> list[TranscriptSegment]:
+        """
+        Speech-only chunks of `audio`, each recognized by Parakeet.
+
+        VAD does two jobs here: it keeps silence and room noise away from the
+        model, and it splits long audio at pauses into pieces no longer than
+        the model was trained on. Chunks are recognized as one batch.
+        """
+        import numpy as np
+        from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+        samples = audio if isinstance(audio, np.ndarray) else self.decode_audio(audio)
+        speech = get_speech_timestamps(
+            samples, VadOptions(max_speech_duration_s=PARAKEET_MAX_CHUNK_SECONDS)
+        )
+        if not speech:
+            return []
+        pieces = [samples[chunk["start"] : chunk["end"]] for chunk in speech]
+        texts = self.parakeet.recognize(pieces, sample_rate=SAMPLE_RATE)
+        return [
+            TranscriptSegment(
+                start=chunk["start"] / SAMPLE_RATE,
+                end=chunk["end"] / SAMPLE_RATE,
+                text=text.strip(),
+            )
+            for chunk, text in zip(speech, texts)
+            if text and text.strip()
+        ]
+
+    def _segments_parakeet(
+        self, audio: "str | Path | BinaryIO | np.ndarray"
+    ) -> list[TranscriptSegment]:
+        # VAD chunk boundaries are already in original time; nothing to map.
+        return self._parakeet_chunks(audio)
+
+    def _transcribe_parakeet(self, audio: "str | Path | BinaryIO | np.ndarray") -> str:
+        return " ".join(segment.text for segment in self._parakeet_chunks(audio)).strip()
 
     def _segments_mlx(
         self, audio: "str | Path | BinaryIO | np.ndarray", language: str | None
@@ -294,6 +418,7 @@ class ASRService:
             path_or_hf_repo=self.mlx_model_repo,
             language=language,
             condition_on_previous_text=False,
+            initial_prompt=self.hotwords,
         )
 
         # Undo the VAD trimming so the times mean something to the caller.
@@ -320,7 +445,14 @@ class ASRService:
         # faster-whisper restores timestamps itself when vad_filter is on, so
         # this path must NOT map them a second time.
         segments, _ = self.whisper.transcribe(
-            audio, language=language, beam_size=5, vad_filter=True
+            audio,
+            language=language,
+            beam_size=5,
+            vad_filter=True,
+            # Feeding each 30s window's text into the next is how Whisper
+            # falls into repetition loops on long meetings.
+            condition_on_previous_text=False,
+            hotwords=self.hotwords,
         )
         return [
             TranscriptSegment(
@@ -404,15 +536,20 @@ class ASRService:
             path_or_hf_repo=self.mlx_model_repo,
             language=language,
             condition_on_previous_text=False,
+            initial_prompt=self.hotwords,
         )
         return (result.get("text") or "").strip()
 
-    def _transcribe_whisper(self, audio: str | BinaryIO, language: str | None) -> str:
+    def _transcribe_whisper(
+        self, audio: str | BinaryIO, language: str | None, fast: bool = False
+    ) -> str:
         segments, _ = self.whisper.transcribe(
             audio,
             language=language,
-            beam_size=5,
+            beam_size=1 if fast else 5,
             vad_filter=True,
+            condition_on_previous_text=False,
+            hotwords=self.hotwords,
         )
         # segments is a lazy generator; joining consumes it and runs the transcription
         return " ".join(segment.text.strip() for segment in segments).strip()

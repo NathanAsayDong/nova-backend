@@ -40,8 +40,16 @@ dependencies = [
     "networkx==3.6.1",
     "numba==0.65.0",
     "numpy==2.4.4",
+    "nvidia-cuda-runtime-cu12 ; sys_platform == 'win32'",
+    "nvidia-cufft-cu12 ; sys_platform == 'win32'",
     "nvidia-cublas-cu12>=12.9.2.10 ; sys_platform == 'win32'",
     "nvidia-cudnn-cu12>=9 ; sys_platform == 'win32'",
+    "onnx-asr[hub]>=0.12.0",
+    # GPU build on the Windows tower. 1.22-1.23 because they are the last
+    # releases built against CUDA 12 by default, the same CUDA CTranslate2
+    # uses, so both engines share one set of NVIDIA wheels. Every other
+    # platform keeps faster-whisper's CPU onnxruntime (see the override below).
+    "onnxruntime-gpu>=1.22,<1.24 ; sys_platform == 'win32'",
     "openai==2.30.0",
     "pgvector>=0.4.2",
     "psycopg2-binary>=2.9.12",
@@ -80,3 +88,10 @@ dependencies = [
     "watchfiles==1.1.1",
     "websockets>=15,<16",
 ]
+
+[tool.uv]
+# faster-whisper depends on the CPU onnxruntime, which installs the same
+# `onnxruntime` module as onnxruntime-gpu; with both present whichever wins
+# the file race decides whether Parakeet sees a GPU. On Windows only the GPU
+# build is installed (it carries the CPU provider too, for faster-whisper's VAD).
+override-dependencies = ["onnxruntime ; sys_platform != 'win32'"]

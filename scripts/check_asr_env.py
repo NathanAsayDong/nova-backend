@@ -3,7 +3,8 @@ Report what speech-to-text will actually run on, without loading a model.
 
 Checks each link in the order it fails in practice: which provider this machine
 resolves to, whether the NVIDIA library wheels are installed and loadable,
-whether CTranslate2 can see a GPU, and the device/precision that results. Use
+whether CTranslate2 can see a GPU, the device/precision that results, and
+whether ONNX Runtime (the Parakeet engine) has its CUDA provider. Use
 it when transcription silently falls back to CPU, or fails with a message like
 "Library cublas64_12.dll is not found or cannot be loaded".
 
@@ -55,6 +56,16 @@ def main() -> int:
 
     device, compute_type = _resolve_whisper_device()
     print(f"resolved device   : {device} ({compute_type})")
+
+    # Parakeet runs on ONNX Runtime, which finds the GPU on its own terms.
+    try:
+        import onnxruntime as ort
+
+        if sys.platform == "win32" and hasattr(ort, "preload_dlls"):
+            ort.preload_dlls()
+        print(f"onnxruntime       : {ort.__version__}, providers: {ort.get_available_providers()}")
+    except Exception as exc:  # noqa: BLE001 - report rather than crash
+        print(f"onnxruntime       : unavailable ({exc})")
 
     if device == "cpu" and sys.platform == "win32":
         print(
