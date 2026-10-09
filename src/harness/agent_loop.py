@@ -24,7 +24,7 @@ from src.harness.spoken_reply import (
     clamp_spoken,
     is_repeat,
     speech_summary,
-    split_spoken_reply,
+    strip_speak_tags,
 )
 from src.service.claude_service import TOOL_USE_STARTED, ClaudeService
 from src.service.conversation_service import (
@@ -479,7 +479,7 @@ class AgentLoop:
         with "I had to stop" out loud, it just shows the failure on screen.
         """
         if not spoke_early:
-            spoken = self._spoken_track(prompt_source, text, text)
+            spoken = self._spoken_track(prompt_source, text)
             if spoken:
                 yield {"type": "speech_text", "text": spoken, "role": "final"}
         yield {"type": "text", "text": text}
@@ -487,23 +487,21 @@ class AgentLoop:
     @staticmethod
     def _spoken_track(
         prompt_source: PromptSourceEnum,
-        tagged: str | None,
         written: str,
         *,
         required: bool = False,
     ) -> str | None:
         """
-        Decide what, if anything, this turn should say out loud.
+        Decide what, if anything, a reply that arrived complete should say.
 
         Returns None for every medium that does not deliver a reply to an ear
         and a screen at once — a phone call and an SMS are already written for
         their one audience, and a chat turn has no audience for audio.
 
-        For the voice UI: the model's own `<speak>` line when it wrote one,
-        and otherwise the opening of the written answer, reduced to something
-        sayable. Either way the result goes through the length ceiling. The
-        prompt asks for brevity, which a model can decline; this is where it
-        stops being optional.
+        For the voice UI: the written prose, said as written, with the
+        markdown (code, tables, lists) left on the screen. Nothing is
+        shortened or rewritten; the live path says exactly the same words as
+        the stream goes by.
 
         `required` marks the place where saying nothing is not an option. An
         answer made entirely of table rows or a code block reduces to no
@@ -514,7 +512,7 @@ class AgentLoop:
         """
         if not prompt_source.wants_spoken_summary():
             return None
-        spoken = clamp_spoken(tagged) if tagged else speech_summary(written)
+        spoken = speech_summary(written)
         if spoken:
             return spoken
         if required and written.strip():
@@ -536,8 +534,9 @@ class AgentLoop:
                                                whitespace-exact, for the
                                                screen — streamed as the model
                                                writes it
-          {"type": "speech_text", "text": ...} the ONLY thing meant to be read
-                                               aloud, with a "role" of
+          {"type": "speech_text", "text": ...} what is read aloud: the prose of
+                                               the written reply, markdown
+                                               left out, with a "role" of
                                                "status" or "final"
           {"type": "status_text", "text": ...} acknowledgment shown before tool
                                                work starts
@@ -545,12 +544,12 @@ class AgentLoop:
           {"type": "artifact", "kind": ...}    renderable output of a tool
                                                (diff, file, terminal)
 
-        Written text and spoken text are two different tracks, not one text
-        used twice. `speech_text` carries what goes to TTS — at most a couple
-        of sentences, because audio has to be listened through in real time.
-        `text` / `text_final` carry the full answer at whatever length the
-        question deserves, because a screen can be skimmed. A transport that
-        speaks anything other than `speech_text` has reunited them by mistake.
+        What is spoken is what is written, minus the markdown. `speech_text`
+        carries the prose of the reply a sentence or two at a time, as it is
+        written, so a transport can start talking before the answer is done;
+        code blocks, tables and lists appear only in `text` / `text_final`.
+        A transport speaks `speech_text` and nothing else, because that is
+        where the markdown has already been taken out.
 
         Prose is streamed as the model writes it, held back only for as long
         as it takes to tell an answer from a pre-tool acknowledgment (see
@@ -716,9 +715,8 @@ class AgentLoop:
         last_progress = ""
         status_shown = False
 
-        # Which track this turn speaks on. The live events below carry speech
-        # regardless — a model that writes a <speak> block on a chat turn has
-        # still written one — and this is where a chat turn drops it.
+        # Whether this turn has a speaker. The live events below carry speech
+        # regardless, and this is where a chat turn drops it.
         speak = prompt_source.wants_spoken_summary()
         early_line: str | None = None
 
@@ -740,7 +738,13 @@ class AgentLoop:
                     continue
                 if not speak:
                     continue
-                say = clamp_spoken(event["text"])
+                # Progress lines are held to a couple of sentences; an answer
+                # is said as written.
+                say = (
+                    clamp_spoken(event["text"])
+                    if event["role"] == "status"
+                    else event["text"].strip()
+                )
                 if not say:
                     continue
                 if event["role"] == "status" and (
@@ -841,18 +845,15 @@ class AgentLoop:
 
             if not tool_uses:
                 raw_text = self._extract_text(response)
-                display_text, spoken_text = split_spoken_reply(raw_text)
+                display_text = strip_speak_tags(raw_text)
                 # required: this is the answer the user asked for out loud.
                 # A reply that is all table or all code reduces to no sayable
                 # prose, and ending a turn in silence reads as failure.
                 spoken_text = self._spoken_track(
-                    prompt_source, spoken_text, display_text, required=True
+                    prompt_source, display_text, required=True
                 )
                 # Persist before yielding so a client disconnect mid-stream
-                # can't lose the reply. The written answer is the turn of
-                # record: the spoken line is a lossy view of it, and a
-                # transcript reread later should show what was actually said
-                # in full, not the summary that went to the speaker.
+                # can't lose the reply.
                 persist(MessageRole.NOVA, display_text)
                 try:
                     # The round is over: whatever LiveReply was still holding
@@ -861,10 +862,8 @@ class AgentLoop:
                     # consumer that stops reading after the first piece still
                     # leaves the reply in history.
                     yield from deliver(live.finish())
-                    # Speech first. It is the only thing the user is actually
-                    # waiting on — the written answer arrives faster than it
-                    # can be read either way — so the transport gets it before
-                    # the prose and can start synthesizing immediately.
+                    # Speech first, so the transport can start synthesizing
+                    # before the prose is sent.
                     if spoken_text and early_line is None:
                         yield {
                             "type": "speech_text",
@@ -883,9 +882,7 @@ class AgentLoop:
                 finally:
                     # Keep the full blocks (citations, search results) in
                     # history so follow-up turns stay valid; fall back to raw
-                    # text when the model returned nothing to serialize. The
-                    # <speak> block is deliberately left in history — seeing
-                    # its own format is what keeps the model producing it.
+                    # text when the model returned nothing to serialize.
                     history.append(
                         {"role": "assistant", "content": assistant_blocks or raw_text}
                     )
@@ -899,9 +896,7 @@ class AgentLoop:
             yield from deliver(live.finish(tool_round=True))
 
             # What this round said before reaching for its tools.
-            status_display, status_tagged = split_spoken_reply(
-                self._extract_text(response).strip()
-            )
+            status_display = strip_speak_tags(self._extract_text(response))
             if status_display and early_line is not None:
                 # Already said out loud, mid-generation, having passed the same
                 # limits below. Count it, caption it, do not repeat it.
@@ -915,9 +910,9 @@ class AgentLoop:
                 # The line goes through the same ceiling as the answer, so a
                 # model that turns chatty before a tool call cannot stall the
                 # turn with narration the user has to sit through.
-                progress_line = self._spoken_track(
-                    prompt_source, status_tagged, status_display
-                )
+                progress_line = self._spoken_track(prompt_source, status_display)
+                if progress_line:
+                    progress_line = clamp_spoken(progress_line)
                 say_it = (
                     progress_line is not None
                     and progress_spoken < _MAX_SPOKEN_PROGRESS_LINES

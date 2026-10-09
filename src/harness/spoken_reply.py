@@ -1,177 +1,208 @@
 """
-Separating what Nova SAYS from what Nova WRITES.
+Turning what Nova WRITES into what Nova SAYS.
 
-A spoken reply and a written one want opposite things. On screen, a long
-markdown answer costs nothing — it streams in faster than it can be read, and
-the reader skims to the part they wanted. Read aloud, that same answer is a
-minute of audio the user has to sit through before they can respond, and there
-is no skimming.
+The spoken reply is the written reply, read aloud. Nothing is rewritten for the
+ear and nothing is summarised: every sentence of prose Nova writes is a
+sentence Nova says. The one exception is markdown. Code blocks, tables and
+lists have no spoken form, so they stay on the screen and are skipped by the
+voice; inline markup (emphasis, links, headings, inline code) is stripped down
+to the words.
 
-So a voice turn asks the model for both: a short line wrapped in
-`<speak>...</speak>` for the ear, and the full markdown answer for the screen.
-This module is the seam between them — it pulls the two apart, and it holds the
-line on brevity when the model does not, because a prompt is a request and this
-is a guarantee.
+This module is the seam between the two. `LiveReply` reads a round as it is
+written and releases sentences to the speaker as they complete, so speech can
+start long before the answer is finished.
 """
 
 import re
 
-# The tag the speech prompt asks for. Case-insensitive and tolerant of
-# attributes, because a model that mostly follows the format should not lose
-# its whole spoken line to a stray space.
-_SPEAK_BLOCK = re.compile(r"<speak\b[^>]*>(.*?)</speak>", re.DOTALL | re.IGNORECASE)
+# A `<speak>` tag the model was never asked for. Earlier versions of the voice
+# prompt requested one, and a conversation that still has them in its history
+# may keep producing them. The words inside are ordinary prose now; only the
+# markup is dropped.
+_SPEAK_TAG = re.compile(r"</?speak\b[^>]*>", re.IGNORECASE)
 
-# An unclosed <speak> tag: the model opened the block and then never shut it.
-# Treat everything after it as the spoken line rather than leaking a raw tag
-# into the transcript.
-_UNCLOSED_SPEAK = re.compile(r"<speak\b[^>]*>", re.IGNORECASE)
 
-# How many sentences the spoken line may run to. Two is the ceiling the user
-# set; one is usually better, and the prompt says so.
+# How many sentences a pre-tool progress line may run to. Answers are never
+# clamped, but "let me check that" followed by a paragraph is not a progress
+# line, and a model that turns chatty before a tool call must not stall the turn.
 MAX_SPOKEN_SENTENCES = 2
 
 # What Nova says when a reply has no sayable prose in it at all — an answer
-# that is entirely a table, a code block, or a diff.
+# that is entirely a table, a code block, or a list.
 #
-# Silence was the old behaviour and it is the wrong one. A turn that called
-# tools has already spent the user's patience on "let me pull that up"
-# followed by however long the work took; ending it with nothing reads as
-# Nova having failed, when in fact the answer is sitting on the screen. This
-# is only ever a floor — the model's own `<speak>` line, or the opening of its
-# prose, is used whenever either exists.
+# Silence is the wrong behaviour. A turn that called tools has already spent
+# the user's patience on "let me pull that up" followed by however long the
+# work took; ending it with nothing reads as Nova having failed, when in fact
+# the answer is sitting on the screen. This is only ever a floor.
 SCREEN_ONLY_LINE = "I've put the details on screen."
 
-# A backstop on top of the sentence count, because "sentence" is not a bound —
-# a single one can run for a paragraph. Roughly 20 seconds of speech.
+# A backstop on top of the sentence count for progress lines, because
+# "sentence" is not a bound. Roughly 20 seconds of speech.
 MAX_SPOKEN_CHARS = 320
 
+# Sentences are batched up to about this many characters before they go to the
+# speaker. One TTS request per short sentence is choppy and slow; a clause or
+# two per request sounds like a person talking.
+MIN_SPOKEN_CHUNK_CHARS = 60
+
+_SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s*$")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])[\"')\]]*\s+")
 
-# Markdown that has no spoken form. Stripped only on the fallback path, where
-# the model ignored the tag and its prose has to be salvaged into something
-# sayable.
-_FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
+# Markdown that has no spoken form.
+_FENCE = re.compile(r"^\s*(```|~~~)")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
-_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
-_BLOCKQUOTE = re.compile(r"^\s{0,3}>\s?", re.MULTILINE)
-_LIST_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+", re.MULTILINE)
-_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
+_BLOCKQUOTE = re.compile(r"^\s{0,3}>\s?")
+_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_TABLE_ROW = re.compile(r"^\s*\|")
+_RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
 _EMPHASIS = re.compile(r"(\*{1,3}|_{1,3}|~~)(?=\S)(.+?)(?<=\S)\1", re.DOTALL)
 _WHITESPACE = re.compile(r"\s+")
 
-
-# How much of a reply may go by without a `<speak>` opener before the watcher
-# concludes none is coming. The prompt asks for the block FIRST, so anything
-# past a sentence or two of prose means the model chose not to use it.
-_OPENER_GRACE_CHARS = 200
+# Enough of a line to tell whether it is prose or the start of a markdown
+# block ("- ", "1. ", "| ", "```").
+_LINE_DECISION_CHARS = 4
 
 
-class SpokenLineWatcher:
+class SpokenProse:
     """
-    Reports the spoken line the instant it is finished, mid-generation.
+    Pulls the sayable prose out of streamed markdown, sentence by sentence.
 
-    The `<speak>` block is asked for first precisely so this can exist. The
-    two sentences Nova says are done long before the markdown answer beneath
-    them, and the whole felt cost of a voice turn is the wait for those two
-    sentences — so the turn should not have to see its own last token before
-    it can start talking.
-
-    Feed it deltas as they arrive. `push` returns the finished line exactly
-    once, on the delta that completes the closing tag, and None every other
-    time. A model that never opens the block, or opens it and never closes it,
-    simply never fires: the end-of-turn path picks those up instead.
+    Feed it deltas as they arrive. `push` returns the lines ready to be said,
+    each one a batch of whole sentences. Code fences, table rows and list items
+    are skipped; everything else is spoken in the order it was written. Call
+    `finish` at the end of the round for whatever is left.
     """
 
     def __init__(self) -> None:
-        self._buffer = ""
-        self._finished = False
-        self._no_block = False
+        self._line = ""
+        self._taken = 0  # chars of the current line already moved to `_open`
+        self._in_fence = False
+        self._open = ""  # prose of the current paragraph, sentence not yet done
+        self._ready: list[str] = []  # whole sentences waiting to reach the chunk size
 
-    def push(self, delta: str) -> str | None:
-        if self._finished:
+    def push(self, delta: str) -> list[str]:
+        out: list[str] = []
+        parts = delta.split("\n")
+        for index, part in enumerate(parts):
+            self._line += part
+            out.extend(self._take(complete=False))
+            if index < len(parts) - 1:
+                out.extend(self._end_line())
+        return out
+
+    def finish(self) -> list[str]:
+        out = self._end_line()
+        out.extend(self._flush_ready())
+        return out
+
+    def _kind(self, line_ended: bool) -> str | None:
+        """'prose', 'skip', or None while a line is still too short to tell."""
+        if self._in_fence or _FENCE.match(self._line):
+            return "skip"
+        stripped = self._line.lstrip()
+        if not line_ended and len(stripped) < _LINE_DECISION_CHARS:
             return None
+        if (
+            _TABLE_ROW.match(self._line)
+            or _LIST_ITEM.match(self._line)
+            or _HEADING.match(self._line)
+            or _RULE.match(self._line)
+        ):
+            return "skip"
+        return "prose"
 
-        self._buffer += delta
+    def _take(self, *, complete: bool) -> list[str]:
+        if self._kind(complete) != "prose":
+            return []
+        self._open += self._line[self._taken :]
+        self._taken = len(self._line)
+        return self._drain(complete=complete)
 
-        # The delta that completes `</speak>` necessarily contains its final
-        # ">", so anything without one cannot be the delta we are waiting for.
-        # Cheap, and it keeps this off the hot path of a long generation.
-        if ">" not in delta:
-            self._give_up_if_no_opener()
-            return None
+    def _end_line(self) -> list[str]:
+        out = self._take(complete=True)
+        if _FENCE.match(self._line):
+            self._in_fence = not self._in_fence
+        # A line break ends the sentence: headings and one-line paragraphs
+        # carry no final punctuation to split on.
+        out.extend(self._drain(complete=True))
+        self._line = ""
+        self._taken = 0
+        return out
 
-        match = _SPEAK_BLOCK.search(self._buffer)
-        if match is None:
-            self._give_up_if_no_opener()
-            return None
+    def _drain(self, *, complete: bool) -> list[str]:
+        sentences = [p for p in _SENTENCE_SPLIT.split(self._open) if p.strip()]
+        # The last piece is still being written unless the buffer ends in a
+        # finished sentence followed by whitespace. It goes back untouched,
+        # trailing space included, so the next delta joins it cleanly.
+        finished = (
+            complete
+            or not sentences
+            or (self._open[-1:].isspace() and _SENTENCE_END.search(sentences[-1]))
+        )
+        if finished:
+            self._open = ""
+        else:
+            self._open = sentences.pop()
+        for sentence in sentences:
+            said = _plain_text(sentence)
+            if said:
+                self._ready.append(said)
+        if complete:
+            return self._flush_ready()
+        if sum(len(r) for r in self._ready) >= MIN_SPOKEN_CHUNK_CHARS:
+            return self._flush_ready()
+        return []
 
-        self._finished = True
-        return match.group(1).strip() or None
-
-    @property
-    def no_block(self) -> bool:
-        """True once it is clear no `<speak>` block is coming this round."""
-        return self._no_block
-
-    def _give_up_if_no_opener(self) -> None:
-        """Stop watching once it is clear the model declined the format."""
-        if len(self._buffer) < _OPENER_GRACE_CHARS:
-            return
-        if _UNCLOSED_SPEAK.search(self._buffer) is None:
-            self._finished = True
-            self._no_block = True
+    def _flush_ready(self) -> list[str]:
+        if not self._ready:
+            return []
+        line = " ".join(self._ready)
+        self._ready = []
+        return [line]
 
 
-# How much prose is held back before the screen goes live. A pre-tool
-# acknowledgment is one sentence; an answer is longer than this within its
-# first second of generation. Matching the opener grace keeps one rule: by the
-# time this much has arrived, both questions — is there a spoken line, and is
-# this the answer — have been settled by the text itself.
-LIVE_HOLD_CHARS = _OPENER_GRACE_CHARS
+# How much prose is held back before the round is treated as the answer. A
+# pre-tool acknowledgment is one sentence; an answer is longer than this within
+# its first second of generation.
+LIVE_HOLD_CHARS = 200
 
 
 class LiveReply:
     """
     One round of a reply, read as it is written.
 
-    Two things leave a round while the model is still writing it. The spoken
-    line goes the moment its closing tag lands — that part `SpokenLineWatcher`
-    already did. The written answer now goes too, streamed to the screen as
-    prose once it is clear that prose is what it is.
+    Two things leave a round while the model is still writing it: the prose,
+    streamed to the screen, and the same prose, sentence by sentence, to the
+    speaker.
 
-    That last clause is the hard part. The first sentence of a round looks the
-    same whether it is the answer or a "let me check your calendar" that
-    precedes a tool call, and the latter must not land on the screen as the
-    answer's opening paragraph. So prose is held until one of three things
+    The first sentence of a round looks the same whether it is the answer or a
+    "let me check your calendar" that precedes a tool call, and the latter must
+    neither land on the screen as the answer's opening paragraph nor be said as
+    though it were the answer. So both are held until one of three things
     settles it: enough has arrived that it is plainly an answer
     (`LIVE_HOLD_CHARS`), the model opened a tool_use block (it was an
-    acknowledgment — dropped here, shown by the end-of-round path as a status
-    line), or the round ended.
-
-    The same ambiguity decides the spoken line's role. A closed `<speak>` block
-    followed by prose is the answer; followed by a tool call it is a progress
-    line. The line is held for exactly that one next event — a token or a
-    block start, never more than a few milliseconds — so it can go out labelled
-    correctly rather than be relabelled later.
+    acknowledgment — dropped from the screen, said as a "status" line), or the
+    round ended.
 
     Events come out as the same dicts the agent loop yields, unclamped and
     ungated: `{"type": "speech_text", ...}` with a role of "status" or "final",
     and `{"type": "text", ...}` carrying whitespace-exact prose. The loop
-    applies the length ceiling and the progress limits, because those are
-    turn-level decisions and this object sees one round.
+    applies the progress limits, because those are turn-level decisions and
+    this object sees one round.
     """
 
     def __init__(self) -> None:
-        self._watcher = SpokenLineWatcher()
-        self._text = ""
+        self._prose = SpokenProse()
         self._settled = False
-        self._pending_line: str | None = None
+        self._queued: list[str] = []
         self._display = ""
         self._live = False
         self._streamed = ""
         self._tool_round = False
+        self._said = False
 
     @property
     def streamed(self) -> str:
@@ -184,31 +215,18 @@ class LiveReply:
 
     def push(self, delta: str) -> list[dict]:
         events: list[dict] = []
-        self._text += delta
+        self._display += delta
+        lines = self._prose.push(delta)
 
         if not self._settled:
-            line = self._watcher.push(delta)
-            if line is not None:
-                # Everything after the closing tag is for the screen; the
-                # block itself never is.
-                self._settled = True
-                self._pending_line = line
-                match = _SPEAK_BLOCK.search(self._text)
-                self._display = self._text[match.end():] if match else ""
-            elif self._watcher.no_block:
-                self._settled = True
-                self._display = self._text
-            else:
-                # Still could be a block, or an unclosed one. Hold everything:
-                # a raw tag must never reach the screen.
+            self._queued.extend(lines)
+            if len(self._display) < LIVE_HOLD_CHARS:
                 return events
+            self._settled = True
+            events.extend(self._speech(self._queued, "final"))
+            self._queued = []
         else:
-            self._display += delta
-
-        if self._pending_line is not None and self._display.strip():
-            # Prose after the block means this round is the answer, and the
-            # line is the answer's — say it now.
-            events.append(self._speech("final"))
+            events.extend(self._speech(lines, "final"))
 
         events.extend(self._maybe_go_live())
         return events
@@ -217,12 +235,16 @@ class LiveReply:
         """The model opened a tool call: this round was an acknowledgment."""
         self._tool_round = True
         events: list[dict] = []
-        if self._pending_line is not None:
-            events.append(self._speech("status"))
-        # Whatever prose was being held was the acknowledgment. It is not the
-        # answer, so it does not stream as one; the end-of-round path captions
-        # it as a status line, where it belongs.
-        self._display = ""
+        tail = self._prose.finish()
+        if self._settled:
+            events.extend(self._speech(tail, "final"))
+        else:
+            # Whatever was being held was the acknowledgment. It is said as one
+            # status line and not shown as the answer; the end-of-round path
+            # captions it.
+            events.extend(self._speech(self._queued + tail, "status", join=True))
+            self._queued = []
+            self._display = ""
         return events
 
     def finish(self, *, tool_round: bool = False) -> list[dict]:
@@ -231,29 +253,29 @@ class LiveReply:
 
         `tool_round` is for a turn that arrived complete rather than live —
         it never saw `tool_use_started`, so the caller says what the message
-        turned out to contain. A line still pending is then a progress line
-        or the answer's accordingly. Prose still held is flushed only when
-        the round settled what it was; an unclosed `<speak>` never settles,
-        and the end-of-round split handles that text whole, tags stripped.
+        turned out to contain.
         """
         if tool_round and not self._tool_round:
             return self.tool_use_started()
-        if not self._settled and _UNCLOSED_SPEAK.search(self._text) is None:
-            # Too short for the watcher to have given up, but the round is
-            # over and there is no tag anywhere in it: it was all prose.
-            self._settled = True
-            self._display = self._text
         events: list[dict] = []
-        if self._pending_line is not None:
-            events.append(self._speech("final"))
-        if self._settled and not self._tool_round and self._display:
+        tail = self._prose.finish()
+        if not self._settled:
+            self._settled = True
+            events.extend(self._speech(self._queued + tail, "final"))
+            self._queued = []
+        else:
+            events.extend(self._speech(tail, "final"))
+        if not self._tool_round and self._display:
             events.append(self._flush())
         return events
 
-    def _speech(self, role: str) -> dict:
-        line = self._pending_line or ""
-        self._pending_line = None
-        return {"type": "speech_text", "text": line, "role": role}
+    def _speech(self, lines: list[str], role: str, *, join: bool = False) -> list[dict]:
+        lines = [line for line in lines if line.strip()]
+        if join and lines:
+            lines = [" ".join(lines)]
+        if lines:
+            self._said = True
+        return [{"type": "speech_text", "text": line, "role": role} for line in lines]
 
     def _maybe_go_live(self) -> list[dict]:
         if self._live:
@@ -270,64 +292,39 @@ class LiveReply:
         return {"type": "text", "text": chunk}
 
 
-def split_spoken_reply(text: str) -> tuple[str, str | None]:
+def strip_speak_tags(text: str) -> str:
     """
-    Pull a `<speak>` block out of a reply.
+    Drop `<speak>` markup from a reply, keeping the words inside it.
 
-    Returns `(display_text, spoken_text)`. `spoken_text` is None when the model
-    wrote no block — the caller decides whether that is fine (a typed turn) or
-    something to fall back from (a spoken one).
-
-    The tag never survives into `display_text` in either case: a model that
-    emits one on a chat turn should not put markup on the user's screen.
+    Voice turns no longer ask for the tag, but a conversation whose history
+    still shows it can keep producing it, and markup must never reach the
+    screen.
     """
-    if not text:
-        return "", None
-
-    match = _SPEAK_BLOCK.search(text)
-    if match is not None:
-        spoken = match.group(1).strip()
-        display = (text[: match.start()] + text[match.end():]).strip()
-    else:
-        unclosed = _UNCLOSED_SPEAK.search(text)
-        if unclosed is None:
-            return text, None
-        spoken = text[unclosed.end():].strip()
-        display = text[: unclosed.start()].strip()
-
-    # A reply that was ONLY the spoken line still needs something on screen.
-    # Showing the same sentence is right: there was no longer answer to show.
-    if not display:
-        display = spoken
-
-    return display, (spoken or None)
+    text = text or ""
+    if _SPEAK_TAG.search(text) is None:
+        return text
+    return _SPEAK_TAG.sub("", text).strip()
 
 
 def speech_summary(text: str) -> str:
     """
-    Reduce written prose to something worth reading aloud.
+    The sayable prose of a whole written reply, markdown left out.
 
-    Used when the model skipped the `<speak>` block. Strips the markdown that
-    has no spoken form, then keeps the opening sentences — the opening is where
-    an answer's headline lives, and everything after it is the detail the
-    screen is already showing.
-
-    Returns "" when nothing sayable is left (a reply that was only a code
-    block, say); the caller stays silent rather than reading punctuation.
+    For a reply that arrived complete rather than live. Returns "" when
+    nothing sayable is left (a reply that was only a code block, say); the
+    caller decides whether that means silence or `SCREEN_ONLY_LINE`.
     """
-    plain = _plain_text(text)
-    if not plain:
-        return ""
-    return _clamp(plain)
+    prose = SpokenProse()
+    lines = prose.push(text or "") + prose.finish()
+    return " ".join(lines)
 
 
 def clamp_spoken(text: str) -> str:
     """
-    Hold an already-conversational line to the spoken budget.
+    Hold a pre-tool progress line to the spoken budget.
 
-    For text the model intended to be spoken — a `<speak>` block, or a pre-tool
-    acknowledgment — where the markdown stripping `speech_summary` does would
-    be pointless but the length ceiling still has to hold.
+    Only for progress lines. An answer is said in full; a "let me check that"
+    that grows into a paragraph is not an answer and must not stall the turn.
     """
     collapsed = _WHITESPACE.sub(" ", (text or "").strip())
     if not collapsed:
@@ -351,15 +348,12 @@ def _comparable(text: str) -> str:
 
 
 def _plain_text(text: str) -> str:
-    """Markdown to bare prose, dropping anything with no spoken form."""
-    stripped = _FENCED_CODE.sub(" ", text or "")
-    stripped = _TABLE_ROW.sub(" ", stripped)
+    """One piece of prose to bare words, dropping markup with no spoken form."""
+    stripped = _SPEAK_TAG.sub(" ", text or "")
     stripped = _IMAGE.sub(" ", stripped)
     stripped = _LINK.sub(r"\1", stripped)
     stripped = _INLINE_CODE.sub(r"\1", stripped)
-    stripped = _HEADING.sub("", stripped)
     stripped = _BLOCKQUOTE.sub("", stripped)
-    stripped = _LIST_BULLET.sub("", stripped)
     stripped = _EMPHASIS.sub(r"\2", stripped)
     return _WHITESPACE.sub(" ", stripped).strip()
 

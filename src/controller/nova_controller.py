@@ -975,13 +975,11 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     # calls and artifacts.
                     #
                     # What differs is that this transport has a speaker as well
-                    # as a screen, and the two get different tracks. `text`
-                    # events are the written answer and are only ever
-                    # displayed; `speech_text` events are the short spoken line
-                    # and are the only thing handed to TTS. Speaking the
-                    # written answer here is exactly the coupling this split
-                    # exists to remove — it is what made a long reply mean a
-                    # long wait.
+                    # as a screen. `text` events are displayed; `speech_text`
+                    # events are the same prose with the markdown (code,
+                    # tables, lists) already taken out, delivered a sentence or
+                    # two at a time as it is written, and are the only thing
+                    # handed to TTS.
                     event_stream = agent_loop.conversation_loop_events(
                         transcript,
                         conversation_id,

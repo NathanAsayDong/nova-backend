@@ -281,8 +281,9 @@ class PromptSourceTests(ConversationLoopStreamTests):
         blocks = systems[0]
         self.assertEqual(len(blocks), 3)
         self.assertIn("Nova", blocks[0]["text"])
-        self.assertIn("<speak></speak>", blocks[2]["text"])
-        self.assertIn("two sentences", blocks[2]["text"])
+        self.assertIn("read aloud", blocks[2]["text"])
+        self.assertIn("Markdown is the exception", blocks[2]["text"])
+        self.assertNotIn("<speak>", blocks[2]["text"])
         # The steer varies per medium, so it must sit AFTER the cache
         # breakpoint — a cached steer would invalidate the prefix whenever
         # the user switches between chat and voice.
@@ -293,7 +294,7 @@ class PromptSourceTests(ConversationLoopStreamTests):
 
         list(self.agent_loop.conversation_loop_stream("hi", self.conversation_id))
 
-        self.assertIn("<speak></speak>", systems[0][-1]["text"])
+        self.assertIn("read aloud", systems[0][-1]["text"])
 
     def test_chat_default_is_unsteered(self):
         systems = self._capture_systems()
@@ -318,18 +319,17 @@ class PromptSourceTests(ConversationLoopStreamTests):
 
         history = self.agent_loop.conversations[self.conversation_id]
         serialized = json.dumps(history)
-        self.assertNotIn("<speak></speak>", serialized)
+        self.assertNotIn("Markdown is the exception", serialized)
         self.assertNotIn("read aloud", serialized)
 
 
 class SpokenTrackTests(unittest.TestCase):
     """
-    The event stream carries two tracks, and a turn is only correct when they
-    disagree in the right direction: short in the ear, complete on screen.
+    A voice turn says what it writes, and leaves the markdown on the screen.
     """
 
     LONG_REPLY = (
-        "<speak>Both checks passed.</speak>\n\n"
+        "Both checks passed.\n\n"
         "## Results\n\n"
         "The unit suite passed in 4.2 seconds. The integration suite passed in "
         "31 seconds. Coverage held at 87 percent. Nothing regressed against "
@@ -362,24 +362,34 @@ class SpokenTrackTests(unittest.TestCase):
             )
         )
 
-    def test_speech_turn_speaks_the_short_line_and_shows_the_long_one(self):
+    def test_speech_turn_speaks_the_prose_and_leaves_the_markdown_on_screen(self):
         self._set_stream(self.LONG_REPLY)
 
         events = self._run(PromptSourceEnum.SPEECH_PROMPT)
 
         spoken = [event for event in events if event["type"] == "speech_text"]
-        self.assertEqual(len(spoken), 1)
-        self.assertEqual(spoken[0]["text"], "Both checks passed.")
-        self.assertEqual(spoken[0]["role"], "final")
+        self.assertTrue(spoken)
+        self.assertTrue(all(event["role"] == "final" for event in spoken))
+        said = " ".join(event["text"] for event in spoken)
+        self.assertEqual(
+            said,
+            "Both checks passed. The unit suite passed in 4.2 seconds. The "
+            "integration suite passed in 31 seconds. Coverage held at 87 "
+            "percent. Nothing regressed against the previous run, and the "
+            "flaky socket test stayed green this time.",
+        )
+        # Headings and code are written, never said.
+        self.assertNotIn("Results", said)
+        self.assertNotIn("pytest", said)
 
         final = next(event for event in events if event["type"] == "text_final")
         self.assertIn("Coverage held at 87 percent", final["text"])
         self.assertIn("```bash", final["text"])
 
-    def test_the_spoken_line_arrives_before_the_prose(self):
+    def test_speech_arrives_before_the_prose(self):
         """
-        TTS is the only part of a turn the user waits on in real time, so the
-        line that feeds it has to reach the transport first.
+        TTS is the part of a turn the user waits on in real time, so what
+        feeds it has to reach the transport first.
         """
         self._set_stream(self.LONG_REPLY)
 
@@ -402,11 +412,8 @@ class SpokenTrackTests(unittest.TestCase):
         self.assertIn("Coverage held at 87 percent", nova_rows[0])
         self.assertNotIn("<speak>", nova_rows[0])
 
-    def test_no_speak_block_falls_back_to_the_opening_sentences(self):
-        """
-        The ceiling cannot depend on the model remembering the format, so a
-        reply that ignores it is summarized rather than read out whole.
-        """
+    def test_the_whole_reply_is_spoken_not_just_the_opening(self):
+        """Nothing is summarised for the ear: the spoken reply is the written one."""
         self._set_stream(
             "The migration finished. It touched 12 tables. "
             "Nothing needs your attention. Here is the full log."
@@ -414,9 +421,11 @@ class SpokenTrackTests(unittest.TestCase):
 
         events = self._run(PromptSourceEnum.SPEECH_PROMPT)
 
-        spoken = next(event for event in events if event["type"] == "speech_text")
+        spoken = " ".join(e["text"] for e in events if e["type"] == "speech_text")
         self.assertEqual(
-            spoken["text"], "The migration finished. It touched 12 tables."
+            spoken,
+            "The migration finished. It touched 12 tables. "
+            "Nothing needs your attention. Here is the full log.",
         )
         final = next(event for event in events if event["type"] == "text_final")
         self.assertIn("Here is the full log.", final["text"])
@@ -454,7 +463,7 @@ class SpokenTrackTests(unittest.TestCase):
                     FakeToolUseBlock(id="t1", name="missing_tool", input={}),
                 ]
             ),
-            FakeMessage(content=[FakeTextBlock(text="<speak>All clear.</speak>Details.")]),
+            FakeMessage(content=[FakeTextBlock(text="All clear. Details.")]),
         ]
 
         def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
@@ -510,19 +519,18 @@ class ScriptedTurnStream:
 
 class StreamedSpeechTests(unittest.TestCase):
     """
-    The spoken line has to leave before the written answer is finished.
+    Speech has to leave before the written answer is finished.
 
-    That is the whole point of putting `<speak>` first: two sentences are done
-    in a fraction of the time a markdown answer takes, and a voice turn should
-    not pay for the difference.
+    The first sentences of a long answer are done long before its last token,
+    and a voice turn should not pay for the difference.
     """
 
-    # Split the way a real stream splits — mid-word, mid-tag.
+    # Split the way a real stream splits — mid-word, mid-sentence.
     DELTAS = [
-        "<spe", "ak>Both checks", " passed.</spe", "ak>",
-        "\n\n## Results\n\nThe unit suite passed in 4.2 seconds. ",
-        "The integration suite passed in 31 seconds. ",
-        "Coverage held at 87 percent.",
+        "Both checks passed, and nothing regressed against the previous run. ",
+        "The unit suite took 4.2 seconds and the integration suite took 31 ",
+        "seconds, so the whole thing is comfortably inside the budget we set. ",
+        "\n\n## Results\n\n- Coverage held at 87 percent.\n",
     ]
 
     def setUp(self):
@@ -555,15 +563,15 @@ class StreamedSpeechTests(unittest.TestCase):
         first = next(events)
 
         self.assertEqual(first["type"], "speech_text")
-        self.assertEqual(first["text"], "Both checks passed.")
+        self.assertEqual(
+            first["text"], "Both checks passed, and nothing regressed against the previous run."
+        )
         self.assertEqual(first["role"], "final")
-        # The assertion that matters: deltas are still unread. Under the old
-        # code this event could not exist until the last one had arrived.
-        # The line waits for exactly one delta past its closing tag — the
-        # one that says prose follows, so this is the answer and not a
-        # pre-tool acknowledgment — and no more.
+        # The assertion that matters: deltas are still unread. The first
+        # sentence is held until the text is plainly an answer rather than a
+        # pre-tool acknowledgment, which takes three deltas here — not four.
         self.assertFalse(stream.finished)
-        self.assertEqual(stream.consumed, self.DELTAS[:5])
+        self.assertEqual(stream.consumed, self.DELTAS[:3])
 
         list(events)  # drain, so the turn finishes cleanly
 
@@ -574,28 +582,40 @@ class StreamedSpeechTests(unittest.TestCase):
 
         final = next(event for event in events if event["type"] == "text_final")
         self.assertIn("## Results", final["text"])
-        self.assertIn("Coverage held at 87 percent", final["text"])
-        self.assertNotIn("<speak>", final["text"])
+        self.assertIn("- Coverage held at 87 percent.", final["text"])
 
-    def test_a_line_spoken_early_is_not_spoken_again_at_the_end(self):
+    def test_the_markdown_is_written_but_never_said(self):
         self._script(self.DELTAS)
 
         events = list(self._events())
 
-        spoken = [event for event in events if event["type"] == "speech_text"]
-        self.assertEqual(len(spoken), 1)
+        said = " ".join(e["text"] for e in events if e["type"] == "speech_text")
+        self.assertEqual(
+            said,
+            "Both checks passed, and nothing regressed against the previous "
+            "run. The unit suite took 4.2 seconds and the integration suite "
+            "took 31 seconds, so the whole thing is comfortably inside the budget we set.",
+        )
 
-    def test_a_chat_turn_never_watches_the_stream(self):
+    def test_a_sentence_spoken_live_is_not_spoken_again_at_the_end(self):
+        self._script(self.DELTAS)
+
+        events = list(self._events())
+
+        spoken = [event["text"] for event in events if event["type"] == "speech_text"]
+        self.assertEqual(len(spoken), len(set(spoken)))
+
+    def test_a_chat_turn_never_speaks(self):
         self._script(self.DELTAS)
 
         events = list(self._events(PromptSourceEnum.CHAT_PROMPT))
 
         self.assertEqual([e for e in events if e["type"] == "speech_text"], [])
 
-    def test_an_unclosed_block_falls_back_to_the_end_of_turn_path(self):
+    def test_a_stray_speak_tag_is_never_said(self):
         """
-        Nothing fires mid-stream, but the turn still says something: the
-        end-of-turn split handles the unclosed tag.
+        A conversation whose history still shows the old format can keep
+        producing the tag. The words are ordinary prose; the markup is not.
         """
         self._script(["<speak>Still ", "talking and never closing"])
 
@@ -604,8 +624,10 @@ class StreamedSpeechTests(unittest.TestCase):
         spoken = [event for event in events if event["type"] == "speech_text"]
         self.assertEqual(len(spoken), 1)
         self.assertEqual(spoken[0]["text"], "Still talking and never closing")
+        final = next(event for event in events if event["type"] == "text_final")
+        self.assertNotIn("<speak>", final["text"])
 
-    def test_a_reply_with_no_block_still_speaks_from_the_end(self):
+    def test_a_short_reply_is_spoken_at_the_end_of_the_round(self):
         self._script(["The migration finished. ", "It touched 12 tables. ", "Details below."])
 
         events = list(self._events())
@@ -613,7 +635,8 @@ class StreamedSpeechTests(unittest.TestCase):
         spoken = [event for event in events if event["type"] == "speech_text"]
         self.assertEqual(len(spoken), 1)
         self.assertEqual(
-            spoken[0]["text"], "The migration finished. It touched 12 tables."
+            spoken[0]["text"],
+            "The migration finished. It touched 12 tables. Details below.",
         )
 
 
@@ -884,7 +907,7 @@ class ToolTurnSpeechTests(unittest.TestCase):
         self._rounds([
             self._tool_round("Checking your calendar.", "t1"),
             self._tool_round("Now cross-referencing the invites.", "t2"),
-            FakeMessage(content=[FakeTextBlock(text="<speak>Three meetings.</speak>Details.")]),
+            FakeMessage(content=[FakeTextBlock(text="Three meetings. Details.")]),
         ])
 
         spoken, shown = self._spoken()
@@ -894,7 +917,7 @@ class ToolTurnSpeechTests(unittest.TestCase):
             [
                 ("status", "Checking your calendar."),
                 ("status", "Now cross-referencing the invites."),
-                ("final", "Three meetings."),
+                ("final", "Three meetings. Details."),
             ],
         )
         # Every spoken line is captioned; audio with no text is worse than none.
@@ -905,7 +928,7 @@ class ToolTurnSpeechTests(unittest.TestCase):
     def test_progress_stops_before_it_becomes_a_monologue(self):
         self._rounds(
             [self._tool_round(f"Step {n}.", f"t{n}") for n in range(1, 6)]
-            + [FakeMessage(content=[FakeTextBlock(text="<speak>All set.</speak>Details.")])]
+            + [FakeMessage(content=[FakeTextBlock(text="All set. Details.")])]
         )
 
         spoken, shown = self._spoken()
@@ -915,14 +938,14 @@ class ToolTurnSpeechTests(unittest.TestCase):
         # Past the cap nothing is said and nothing is shown — the turn just works.
         self.assertEqual(shown, ["Step 1.", "Step 2.", "Step 3."])
         # And the answer still lands.
-        self.assertEqual(spoken[-1], ("final", "All set."))
+        self.assertEqual(spoken[-1], ("final", "All set. Details."))
 
     def test_a_model_stuck_on_one_phrase_only_says_it_once(self):
         self._rounds([
             self._tool_round("Let me check that.", "t1"),
             self._tool_round("Let me check that!", "t2"),
             self._tool_round("Still checking that", "t3"),
-            FakeMessage(content=[FakeTextBlock(text="<speak>Found it.</speak>Details.")]),
+            FakeMessage(content=[FakeTextBlock(text="Found it. Details.")]),
         ])
 
         spoken, _ = self._spoken()
@@ -930,46 +953,35 @@ class ToolTurnSpeechTests(unittest.TestCase):
         progress = [text for role, text in spoken if role == "status"]
         self.assertEqual(progress, ["Let me check that.", "Still checking that"])
 
-    def test_a_tagged_acknowledgment_is_not_said_twice(self):
+    def test_an_acknowledgment_is_not_said_twice(self):
         """
-        The model wrapped its pre-tool line in <speak>, so the stream already
-        spoke it mid-generation. The round must not repeat it.
+        The acknowledgment is spoken when the tool call opens. The end of the
+        round must not say it again.
         """
         self._rounds([
-            self._tool_round("<speak>Let me pull that up.</speak>", "t1"),
-            FakeMessage(content=[FakeTextBlock(text="<speak>Three meetings.</speak>Details.")]),
+            self._tool_round("Let me pull that up.", "t1"),
+            FakeMessage(content=[FakeTextBlock(text="Three meetings. Details.")]),
         ])
 
         spoken, _ = self._spoken()
 
         self.assertEqual(
             [text for _role, text in spoken],
-            ["Let me pull that up.", "Three meetings."],
+            ["Let me pull that up.", "Three meetings. Details."],
         )
 
-    def test_tagging_every_round_does_not_narrate_around_the_cap(self):
-        """
-        Tagged progress lines are the format now — they are what lets a
-        pre-tool line be spoken before the tool arguments are written. The
-        stream path applies the same cap as the end-of-round path, or a model
-        that narrates every step would talk straight through the limit.
-        """
-        self._rounds(
-            [
-                self._tool_round(f"<speak>Step {n}.</speak>", f"t{n}")
-                for n in range(1, 6)
-            ]
-            + [FakeMessage(content=[FakeTextBlock(text="<speak>All set.</speak>Details.")])]
-        )
+    def test_a_long_answer_is_said_in_full(self):
+        """No ceiling on an answer: what is written is what is said."""
+        answer = " ".join(f"Sentence number {n} of the answer." for n in range(1, 9))
+        self._rounds([
+            self._tool_round("On it.", "t1"),
+            FakeMessage(content=[FakeTextBlock(text=answer)]),
+        ])
 
-        spoken, shown = self._spoken()
+        spoken, _ = self._spoken()
 
-        progress = [text for role, text in spoken if role == "status"]
-        self.assertEqual(progress, ["Step 1.", "Step 2.", "Step 3."])
-        self.assertEqual(spoken[-1], ("final", "All set."))
-        # Captioned like any other progress line: the block was the whole
-        # message, so the caption is the line itself.
-        self.assertEqual(shown, ["Step 1.", "Step 2.", "Step 3."])
+        final = " ".join(text for role, text in spoken if role == "final")
+        self.assertEqual(final, answer)
 
     def test_chat_still_gets_exactly_one_status_line(self):
         """
@@ -1301,7 +1313,7 @@ class LiveScreenTests(unittest.TestCase):
         self.assertEqual(streamed, self.ANSWER)
         self.assertEqual(rest[-1], {"type": "text_final", "text": self.ANSWER})
 
-    def test_a_tagged_acknowledgment_is_spoken_when_the_tool_call_opens(self):
+    def test_an_acknowledgment_is_spoken_when_the_tool_call_opens(self):
         """
         The line is in the first twenty tokens; the tool arguments can run to
         thousands. It is spoken on the tool_use marker, not after the message.
@@ -1315,15 +1327,15 @@ class LiveScreenTests(unittest.TestCase):
                 return super().message
 
         first_round = RecordingStream(
-            ["<speak>Checking your", " calendar.</speak>", TOOL_USE_STARTED],
+            ["Checking your", " calendar.", TOOL_USE_STARTED],
             FakeMessage(
                 content=[
-                    FakeTextBlock(text="<speak>Checking your calendar.</speak>"),
+                    FakeTextBlock(text="Checking your calendar."),
                     FakeToolUseBlock(id="t1", name="missing_tool", input={}),
                 ]
             ),
         )
-        second_round = ScriptedTurnStream(["<speak>Three meetings.</speak>", "Details."])
+        second_round = ScriptedTurnStream(["Three meetings. ", "Details."])
         self._rounds([first_round, second_round])
         events = self._events(PromptSourceEnum.SPEECH_PROMPT)
 
@@ -1340,20 +1352,19 @@ class LiveScreenTests(unittest.TestCase):
             [(e["type"], e.get("text")) for e in rest if e["type"] != "tool_call"],
             [
                 ("status_text", "Checking your calendar."),
-                ("speech_text", "Three meetings."),
-                ("text", "Details."),
-                ("text_final", "Details."),
+                ("speech_text", "Three meetings. Details."),
+                ("text", "Three meetings. Details."),
+                ("text_final", "Three meetings. Details."),
             ],
         )
 
-    def test_a_chat_turn_still_drops_the_spoken_line(self):
-        self._rounds([ScriptedTurnStream(["<speak>Hi.</speak>", self.ANSWER])])
+    def test_a_chat_turn_has_no_speech(self):
+        self._rounds([ScriptedTurnStream([self.ANSWER])])
 
         events = list(self._events(PromptSourceEnum.CHAT_PROMPT))
 
         self.assertEqual([e for e in events if e["type"] == "speech_text"], [])
         self.assertEqual("".join(e["text"] for e in events if e["type"] == "text"), self.ANSWER)
-        self.assertNotIn("<speak>", events[-1]["text"])
 
 
 class PrefetchedConversationTests(unittest.TestCase):

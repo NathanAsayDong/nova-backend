@@ -1,10 +1,9 @@
 """
-Unit coverage for the seam between what Nova says and what Nova writes.
+Unit coverage for the seam between what Nova writes and what Nova says.
 
-The prompt asks the model for a `<speak>` block. These tests are about what
-happens when it complies, when it half-complies, and when it ignores the
-instruction entirely — because the brevity of the spoken track has to be a
-property of the system, not a hope about the model.
+The spoken reply is the written reply, read aloud, minus the markdown that has
+no spoken form. These tests are about where that line falls, and about saying
+it as the text streams in rather than after the last token.
 """
 
 import unittest
@@ -13,67 +12,42 @@ from src.harness.spoken_reply import (
     LIVE_HOLD_CHARS,
     MAX_SPOKEN_CHARS,
     LiveReply,
-    SpokenLineWatcher,
+    SpokenProse,
     clamp_spoken,
+    is_repeat,
     speech_summary,
-    split_spoken_reply,
+    strip_speak_tags,
 )
 
 
-class SplitSpokenReplyTests(unittest.TestCase):
-    def test_pulls_speak_block_out_of_the_written_answer(self):
-        display, spoken = split_spoken_reply(
-            "<speak>Deploy's live.</speak>\n\n## Deploy\n\nAll three checks passed."
+def _said(*deltas: str) -> str:
+    prose = SpokenProse()
+    lines: list[str] = []
+    for delta in deltas:
+        lines.extend(prose.push(delta))
+    lines.extend(prose.finish())
+    return " ".join(lines)
+
+
+class StripSpeakTagsTests(unittest.TestCase):
+    def test_keeps_the_words_and_drops_the_markup(self):
+        self.assertEqual(
+            strip_speak_tags("<speak>Done.</speak>\n\nDetails."), "Done.\n\nDetails."
         )
 
-        self.assertEqual(spoken, "Deploy's live.")
-        self.assertEqual(display, "## Deploy\n\nAll three checks passed.")
+    def test_an_unclosed_tag_does_not_leak_markup(self):
+        self.assertEqual(strip_speak_tags("<speak>Still talking"), "Still talking")
 
-    def test_written_answer_keeps_its_markdown_intact(self):
-        display, _ = split_spoken_reply(
-            "<speak>Here's the fix.</speak>\n"
-            "```python\nx = 1\n```\n"
-            "- first\n- second\n"
-        )
-
-        self.assertIn("```python\nx = 1\n```", display)
-        self.assertIn("- first\n- second", display)
-
-    def test_no_block_leaves_the_reply_untouched(self):
-        display, spoken = split_spoken_reply("Just an ordinary chat reply.")
-
-        self.assertEqual(display, "Just an ordinary chat reply.")
-        self.assertIsNone(spoken)
-
-    def test_block_only_reply_still_has_something_to_show(self):
-        """A one-line answer has no longer written form; show the line."""
-        display, spoken = split_spoken_reply("<speak>It's 3pm.</speak>")
-
-        self.assertEqual(spoken, "It's 3pm.")
-        self.assertEqual(display, "It's 3pm.")
-
-    def test_unclosed_tag_does_not_leak_markup_onto_the_screen(self):
-        display, spoken = split_spoken_reply("<speak>Running it now.")
-
-        self.assertEqual(spoken, "Running it now.")
-        self.assertNotIn("<speak", display)
-
-    def test_tag_is_stripped_even_when_the_medium_did_not_ask_for_one(self):
-        """
-        A chat turn has no spoken track, but a model that emits the tag anyway
-        must not put raw markup in the transcript.
-        """
-        display, _ = split_spoken_reply("<SPEAK>Hi.</SPEAK> The long version.")
-
-        self.assertNotIn("SPEAK", display)
-        self.assertEqual(display, "The long version.")
+    def test_text_without_a_tag_is_untouched(self):
+        text = "Plain reply.\n\n- one\n- two\n"
+        self.assertEqual(strip_speak_tags(text), text)
 
 
 class SpeechSummaryTests(unittest.TestCase):
-    def test_keeps_at_most_two_sentences(self):
-        summary = speech_summary("One. Two. Three. Four.")
-
-        self.assertEqual(summary, "One. Two.")
+    def test_says_every_sentence(self):
+        self.assertEqual(
+            speech_summary("One. Two. Three. Four."), "One. Two. Three. Four."
+        )
 
     def test_drops_code_blocks_and_tables(self):
         summary = speech_summary(
@@ -83,32 +57,83 @@ class SpeechSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary, "Here's the patch.")
 
-    def test_reads_list_items_as_prose_not_bullets(self):
-        summary = speech_summary("- Migrations ran.\n- Cache is warm.\n- Done.")
+    def test_lists_are_markdown_and_stay_on_screen(self):
+        summary = speech_summary("Three things happened.\n\n- Migrations ran.\n- Cache is warm.")
 
-        self.assertNotIn("-", summary)
-        self.assertEqual(summary, "Migrations ran. Cache is warm.")
+        self.assertEqual(summary, "Three things happened.")
 
-    def test_unwraps_headings_links_and_emphasis(self):
+    def test_numbered_lists_stay_on_screen_too(self):
+        self.assertEqual(speech_summary("1. First step.\n2. Second step."), "")
+
+    def test_headings_are_skipped_and_inline_markup_is_unwrapped(self):
         summary = speech_summary(
-            "## Status\n\nThe **build** passed on [main](https://example.com/x)."
+            "## Status\n\nThe **build** passed on [main](https://example.com/x), "
+            "see `ci.yml`."
         )
 
-        self.assertEqual(summary, "Status The build passed on main.")
+        self.assertEqual(summary, "The build passed on main, see ci.yml.")
+
+    def test_a_hashtag_is_not_a_heading(self):
+        self.assertEqual(speech_summary("#winning today."), "#winning today.")
 
     def test_nothing_sayable_yields_silence(self):
         self.assertEqual(speech_summary("```\nnot speech\n```"), "")
 
-    def test_one_runaway_sentence_is_cut_at_a_word_boundary(self):
-        summary = speech_summary("word " * 400)
+    def test_text_after_a_code_block_is_spoken_again(self):
+        summary = speech_summary("Before.\n\n```\nx = 1\n```\n\nAfter.")
 
-        self.assertLessEqual(len(summary), MAX_SPOKEN_CHARS + 1)
-        self.assertTrue(summary.endswith("…"))
-        self.assertFalse(summary.endswith("wor…"))
+        self.assertEqual(summary, "Before. After.")
+
+
+class SpokenProseTests(unittest.TestCase):
+    def test_a_sentence_is_released_when_it_is_finished_not_before(self):
+        prose = SpokenProse()
+        first = "The unit suite passed in four seconds and nothing regressed. "
+
+        self.assertEqual(prose.push(first[:30]), [])
+        self.assertEqual(
+            prose.push(first[30:] + "Next"),
+            ["The unit suite passed in four seconds and nothing regressed."],
+        )
+        self.assertEqual(prose.finish(), ["Next"])
+
+    def test_whitespace_survives_being_split_across_deltas(self):
+        self.assertEqual(
+            _said("The migration finished. ", "It touched 12 tables."),
+            "The migration finished. It touched 12 tables.",
+        )
+
+    def test_short_sentences_are_batched_into_one_line(self):
+        prose = SpokenProse()
+
+        lines = prose.push("Yes. ") + prose.push("Done. ") + prose.finish()
+
+        self.assertEqual(lines, ["Yes. Done."])
+
+    def test_a_code_fence_split_across_deltas_is_still_skipped(self):
+        self.assertEqual(
+            _said("Here it is.\n\n``", "`python\nprint(1)\n``", "`\n\nThat is all."),
+            "Here it is. That is all.",
+        )
+
+    def test_a_table_split_across_deltas_is_still_skipped(self):
+        self.assertEqual(
+            _said("Two rows.\n\n| a", " | b |\n| - | - |\n"),
+            "Two rows.",
+        )
+
+    def test_a_list_marker_split_across_deltas_is_still_skipped(self):
+        self.assertEqual(_said("Items:\n\n-", " first item\n- second item\n"), "Items:")
+
+    def test_a_line_break_ends_a_sentence_without_punctuation(self):
+        self.assertEqual(_said("Heads up\nNext line."), "Heads up Next line.")
+
+    def test_a_stray_speak_tag_is_not_said(self):
+        self.assertEqual(_said("<speak>Hi there.</speak>"), "Hi there.")
 
 
 class ClampSpokenTests(unittest.TestCase):
-    def test_a_model_that_ignores_the_ceiling_is_held_to_it_anyway(self):
+    def test_a_chatty_progress_line_is_held_to_a_couple_of_sentences(self):
         clamped = clamp_spoken("One. Two. Three. Four. Five.")
 
         self.assertEqual(clamped, "One. Two.")
@@ -122,75 +147,33 @@ class ClampSpokenTests(unittest.TestCase):
     def test_empty_stays_empty(self):
         self.assertEqual(clamp_spoken("   "), "")
 
+    def test_one_runaway_sentence_is_cut_at_a_word_boundary(self):
+        clamped = clamp_spoken("word " * 400)
 
-class SpokenLineWatcherTests(unittest.TestCase):
-    """
-    Reading the reply as it is written. A real stream splits wherever the
-    tokenizer happens to split, so the tag arrives in pieces.
-    """
-
-    @staticmethod
-    def _feed(deltas: list[str]) -> list[tuple[int, str]]:
-        """Every line the watcher reported, with the delta index that did it."""
-        watcher = SpokenLineWatcher()
-        fired = []
-        for index, delta in enumerate(deltas):
-            line = watcher.push(delta)
-            if line is not None:
-                fired.append((index, line))
-        return fired
-
-    def test_fires_on_the_delta_that_closes_the_tag(self):
-        fired = self._feed(
-            ["<spe", "ak>Both checks", " passed.</spe", "ak>", "\n\n## Results", " and more"]
-        )
-
-        self.assertEqual(fired, [(3, "Both checks passed.")])
-
-    def test_never_fires_twice(self):
-        fired = self._feed(
-            ["<speak>One.</speak>", "<speak>Two.</speak>", "trailing"]
-        )
-
-        self.assertEqual(len(fired), 1)
-        self.assertEqual(fired[0][1], "One.")
-
-    def test_an_unclosed_block_never_fires(self):
-        self.assertEqual(self._feed(["<speak>Still going", " and going"]), [])
-
-    def test_a_reply_that_declines_the_format_never_fires(self):
-        self.assertEqual(
-            self._feed(["Plain prose. ", "More prose. ", "Even more."]), []
-        )
-
-    def test_stops_watching_once_the_opener_is_clearly_not_coming(self):
-        """
-        The block is asked for first, so a page of prose without it settles
-        the question — and a long generation should not keep re-scanning.
-        """
-        watcher = SpokenLineWatcher()
-        watcher.push("Prose with an angle bracket > in it. " * 12)
-
-        # A tag this late is not the opening block; it is content.
-        self.assertIsNone(watcher.push("<speak>too late</speak>"))
-
-    def test_an_empty_block_reports_nothing_to_say(self):
-        self.assertEqual(self._feed(["<speak></speak>", "the answer"]), [])
+        self.assertLessEqual(len(clamped), MAX_SPOKEN_CHARS + 1)
+        self.assertTrue(clamped.endswith("…"))
+        self.assertFalse(clamped.endswith("wor…"))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class IsRepeatTests(unittest.TestCase):
+    def test_punctuation_and_case_do_not_make_a_new_line(self):
+        self.assertTrue(is_repeat("On it!", "on it."))
+
+    def test_different_lines_are_not_repeats(self):
+        self.assertFalse(is_repeat("On it.", "Done."))
+
+    def test_nothing_repeats_nothing(self):
+        self.assertFalse(is_repeat("", ""))
 
 
 class LiveReplyTests(unittest.TestCase):
     """
     One round of a reply, read as it is written.
 
-    The hard question is not the spoken line — the watcher handles that — but
-    when prose may go to the screen. A round's first sentence looks the same
-    whether it is the answer or a pre-tool "let me check", so prose is held
-    until the text itself, a tool_use start, or the end of the round settles
-    which it was.
+    A round's first sentence looks the same whether it is the answer or a
+    pre-tool "let me check", so both the prose on screen and the speech are
+    held until the text itself, a tool_use start, or the end of the round
+    settles which it was.
     """
 
     def test_a_short_reply_is_held_then_released_whole(self):
@@ -199,64 +182,56 @@ class LiveReplyTests(unittest.TestCase):
         self.assertEqual(live.push("Sure thing. "), [])
         self.assertEqual(live.push("Here it is."), [])
         self.assertEqual(
-            live.finish(), [{"type": "text", "text": "Sure thing. Here it is."}]
+            live.finish(),
+            [
+                {"type": "speech_text", "text": "Sure thing. Here it is.", "role": "final"},
+                {"type": "text", "text": "Sure thing. Here it is."},
+            ],
         )
 
     def test_a_long_reply_goes_live_once_it_is_plainly_an_answer(self):
         live = LiveReply()
-        opening = "x" * LIVE_HOLD_CHARS
+        opening = ("A sentence that is long enough to be said. " * 6).rstrip()
 
-        self.assertEqual(live.push(opening), [{"type": "text", "text": opening}])
-        # Live from here: every delta passes straight through, whitespace intact.
-        self.assertEqual(live.push(" more"), [{"type": "text", "text": " more"}])
-        self.assertEqual(live.finish(), [])
-        self.assertEqual(live.streamed, opening + " more")
+        events = live.push(opening)
+
+        self.assertGreaterEqual(len(opening), LIVE_HOLD_CHARS)
+        self.assertEqual(events[-1], {"type": "text", "text": opening})
+        self.assertTrue(
+            all(e["type"] == "speech_text" and e["role"] == "final" for e in events[:-1])
+        )
+        self.assertTrue(events[:-1])
+        # Live from here: text passes straight through, whitespace intact, and
+        # each finished sentence is said as it lands.
+        more = live.push(" And one more. Then")
+        self.assertEqual(more[-1], {"type": "text", "text": " And one more. Then"})
+        self.assertEqual(live.streamed, opening + " And one more. Then")
 
     def test_an_acknowledgment_never_reaches_the_screen_as_prose(self):
         live = LiveReply()
 
         self.assertEqual(live.push("Let me check your calendar."), [])
-        self.assertEqual(live.tool_use_started(), [])
+        self.assertEqual(
+            live.tool_use_started(),
+            [{"type": "speech_text", "text": "Let me check your calendar.", "role": "status"}],
+        )
         self.assertEqual(live.finish(), [])
         self.assertTrue(live.tool_round)
         self.assertEqual(live.streamed, "")
 
-    def test_a_tagged_acknowledgment_is_a_status_line_the_moment_the_tool_opens(self):
+    def test_a_multi_sentence_acknowledgment_is_one_status_line(self):
         live = LiveReply()
+        live.push("Let me check. ")
+        live.push("One moment.")
 
-        # Closed, but whose line is it? Not knowable yet.
-        self.assertEqual(live.push("<speak>Checking your calendar.</speak>"), [])
         self.assertEqual(
             live.tool_use_started(),
-            [{"type": "speech_text", "text": "Checking your calendar.", "role": "status"}],
-        )
-        self.assertEqual(live.finish(), [])
-
-    def test_a_tagged_line_followed_by_prose_is_the_answer(self):
-        live = LiveReply()
-
-        self.assertEqual(live.push("<speak>Both passed.</speak>"), [])
-        # Whitespace after the tag settles nothing.
-        self.assertEqual(live.push("\n\n"), [])
-        self.assertEqual(
-            live.push("## Results"),
-            [{"type": "speech_text", "text": "Both passed.", "role": "final"}],
-        )
-        # The prose is short of going live, so it is released at the end —
-        # exactly as written, tag excluded.
-        self.assertEqual(live.finish(), [{"type": "text", "text": "\n\n## Results"}])
-
-    def test_a_tagged_line_alone_is_the_answer_at_the_end(self):
-        live = LiveReply()
-        live.push("<speak>Done.</speak>")
-
-        self.assertEqual(
-            live.finish(), [{"type": "speech_text", "text": "Done.", "role": "final"}]
+            [{"type": "speech_text", "text": "Let me check. One moment.", "role": "status"}],
         )
 
     def test_a_round_handed_in_complete_is_told_what_it_was(self):
         live = LiveReply()
-        live.push("<speak>On it.</speak>")
+        live.push("On it.")
 
         self.assertEqual(
             live.finish(tool_round=True),
@@ -264,28 +239,24 @@ class LiveReplyTests(unittest.TestCase):
         )
         self.assertTrue(live.tool_round)
 
-    def test_an_unclosed_tag_never_reaches_the_screen(self):
+    def test_markdown_goes_to_the_screen_and_not_to_the_speaker(self):
         live = LiveReply()
 
-        events = live.push("<speak>Still talking and never closing. " * 10)
-
-        self.assertEqual(events, [])
-        self.assertEqual(live.finish(), [])
-        self.assertEqual(live.streamed, "")
-
-    def test_a_block_on_a_chat_turn_is_still_not_prose(self):
-        """The loop drops the speech on a chat turn; the tag stays off screen either way."""
-        live = LiveReply()
-        prose = "y" * LIVE_HOLD_CHARS
-
-        events = live.push("<speak>Hi.</speak>" + prose)
+        live.push("Two results.\n\n| a | b |\n| - | - |\n- one\n")
+        events = live.finish()
 
         self.assertEqual(
-            events,
-            [
-                {"type": "speech_text", "text": "Hi.", "role": "final"},
-                {"type": "text", "text": prose},
-            ],
+            [e for e in events if e["type"] == "speech_text"],
+            [{"type": "speech_text", "text": "Two results.", "role": "final"}],
+        )
+        self.assertIn("| a | b |", live.streamed)
+
+    def test_a_reply_that_is_all_markdown_says_nothing_itself(self):
+        live = LiveReply()
+        live.push("| a | b |\n| - | - |\n")
+
+        self.assertEqual(
+            [e for e in live.finish() if e["type"] == "speech_text"], []
         )
 
     def test_prose_that_went_live_before_a_tool_call_is_remembered(self):
@@ -294,6 +265,13 @@ class LiveReplyTests(unittest.TestCase):
         preamble = "p" * LIVE_HOLD_CHARS
 
         self.assertEqual(live.push(preamble), [{"type": "text", "text": preamble}])
-        self.assertEqual(live.tool_use_started(), [])
+        self.assertEqual(
+            live.tool_use_started(),
+            [{"type": "speech_text", "text": preamble, "role": "final"}],
+        )
         self.assertEqual(live.streamed, preamble)
         self.assertTrue(live.tool_round)
+
+
+if __name__ == "__main__":
+    unittest.main()
