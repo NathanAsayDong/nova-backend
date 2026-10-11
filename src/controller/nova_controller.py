@@ -387,6 +387,7 @@ async def stream_tts_audio(
     role: str,
     iteration: int | None = None,
     send_lock: asyncio.Lock | None = None,
+    previous_text: str | None = None,
 ) -> bool:
     """
     Speak `text` to the client as a chunked audio stream.
@@ -398,6 +399,9 @@ async def stream_tts_audio(
     on a stream that will never arrive) plus an error message saying why
     there is no audio. Websocket send failures still propagate — a dead
     socket ends the turn either way.
+
+    `previous_text` is the line spoken just before this one in the same turn,
+    so the voice carries its intonation across the sentence boundary.
 
     The provider's generator does blocking HTTP, so each pull runs on a
     worker thread. Stepped inline, as it used to be, it stalled the event
@@ -420,7 +424,7 @@ async def stream_tts_audio(
 
     sequence = 0
     tts_error: str | None = None
-    audio_chunks = tts_service.stream_text_to_speech(text)
+    audio_chunks = tts_service.stream_text_to_speech(text, previous_text=previous_text)
     while True:
         try:
             audio_chunk = await asyncio.to_thread(next, audio_chunks, _TTS_EXHAUSTED)
@@ -1009,6 +1013,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         # already sent, so the turn degrades to text-only
                         # instead of dying.
                         tts_available = True
+                        previous_line: str | None = None
                         while True:
                             item = await speech_queue.get()
                             if item is None:
@@ -1021,7 +1026,9 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                                 line,
                                 role=line_role,
                                 send_lock=send_lock,
+                                previous_text=previous_line,
                             )
+                            previous_line = line
 
                     speaker = asyncio.create_task(speak_queued_lines())
 

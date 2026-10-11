@@ -89,7 +89,7 @@ class TranscribeSocketTests(unittest.TestCase):
         self.addCleanup(lambda: [p.stop() for p in self.patches])
 
     @staticmethod
-    async def _no_tts(websocket, text, role="final", send_lock=None):
+    async def _no_tts(websocket, text, role="final", send_lock=None, previous_text=None):
         return True
 
     # ---------- helpers ----------

@@ -2,14 +2,26 @@ from collections.abc import Iterator
 import os
 import requests
 
-DEFAULT_ELEVEN_LABS_MODEL_ID = "eleven_multilingual_v2"
+# Flash is ElevenLabs' low-latency model: ~150ms to first audio against ~1.3s
+# for multilingual_v2 (measured from the Mac, 2026-10-11). Nova speaks a reply
+# a sentence or two at a time as it is written, so that wait is paid on every
+# sentence, not once per turn. Override with ELEVEN_LABS_MODEL_ID — e.g.
+# eleven_turbo_v2_5 for a little more quality at ~70ms more latency.
+DEFAULT_ELEVEN_LABS_MODEL_ID = "eleven_flash_v2_5"
 DEFAULT_ELEVEN_LABS_OUTPUT_FORMAT = "mp3_44100_128"
-DEFAULT_ELEVEN_LABS_OPTIMIZE_STREAMING_LATENCY = 3
 DEFAULT_ELEVEN_LABS_STABILITY = 0.55
 DEFAULT_ELEVEN_LABS_SIMILARITY_BOOST = 0.75
 DEFAULT_ELEVEN_LABS_STYLE = 0.50
 DEFAULT_ELEVEN_LABS_USE_SPEAKER_BOOST = True
 DEFAULT_ELEVEN_LABS_SPEED = 1.02
+
+# Connect fast or fail fast (so the caller can fall back); once connected, a
+# long clip may take a while to finish streaming.
+REQUEST_TIMEOUT_SECONDS = (5, 30)
+
+# How much of the previous line to send as context. ElevenLabs only uses it to
+# shape the intonation of the start of this clip, so the tail is what matters.
+MAX_PREVIOUS_TEXT_CHARS = 500
 
 
 class ElevenLabsService:
@@ -22,9 +34,8 @@ class ElevenLabsService:
         if not self.voice_id:
             raise ValueError("ELEVEN_LABS_VOICE_ID is not set")
 
-        self.model_id = DEFAULT_ELEVEN_LABS_MODEL_ID
+        self.model_id = os.getenv("ELEVEN_LABS_MODEL_ID") or DEFAULT_ELEVEN_LABS_MODEL_ID
         self.output_format = DEFAULT_ELEVEN_LABS_OUTPUT_FORMAT
-        self.optimize_streaming_latency = DEFAULT_ELEVEN_LABS_OPTIMIZE_STREAMING_LATENCY
 
         self.stability = DEFAULT_ELEVEN_LABS_STABILITY
         self.similarity_boost = DEFAULT_ELEVEN_LABS_SIMILARITY_BOOST
@@ -32,15 +43,28 @@ class ElevenLabsService:
         self.use_speaker_boost = DEFAULT_ELEVEN_LABS_USE_SPEAKER_BOOST
         self.speed = DEFAULT_ELEVEN_LABS_SPEED
 
-        print(f"Using voice id: {self.voice_id}")
+        # One pooled connection for every clip. A fresh request per sentence
+        # paid a TCP + TLS handshake to api.elevenlabs.io each time.
+        self.session = requests.Session()
+        self.session.headers.update({"xi-api-key": self.api_key})
 
-    def stream_text_to_speech(self, text: str, chunk_size: int = 4096) -> Iterator[bytes]:
+        print(f"ElevenLabs TTS: model {self.model_id}, voice id {self.voice_id}")
+
+    def stream_text_to_speech(
+        self,
+        text: str,
+        chunk_size: int = 4096,
+        previous_text: str | None = None,
+    ) -> Iterator[bytes]:
+        """
+        Stream `text` as MP3 chunks.
+
+        `previous_text` is the line spoken just before this one in the same
+        reply. Each sentence is its own request, and without it ElevenLabs
+        reads every one as the start of a fresh utterance — the pitch resets
+        and the reply sounds like a list of separate announcements.
+        """
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream"
-        headers = {
-            "Content-Type": "application/json",
-            "xi-api-key": self.api_key,
-            "Accept": "audio/mpeg",
-        }
         data = {
             "text": text,
             "model_id": self.model_id,
@@ -52,25 +76,21 @@ class ElevenLabsService:
                 "speed": self.speed,
             },
         }
-        params = {
-            "output_format": self.output_format,
-            "optimize_streaming_latency": self.optimize_streaming_latency,
-        }
-        response = requests.post(url, headers=headers, params=params, json=data, stream=True, timeout=60)
-        if not response.ok:
-            # Try to surface a helpful error without dumping huge bodies.
-            body_preview = ""
-            try:
-                body_preview = response.text[:1000]
-            except Exception:
-                body_preview = "<unreadable body>"
-            raise RuntimeError(
-                f"ElevenLabs TTS failed ({response.status_code}). "
-                f"Check ELEVEN_LABS_API_KEY / ELEVEN_LABS_VOICE_ID. "
-                f"Response: {body_preview}"
-            )
+        if previous_text:
+            data["previous_text"] = previous_text[-MAX_PREVIOUS_TEXT_CHARS:]
 
-        yield from response.iter_content(chunk_size=chunk_size)
+        response = self.session.post(
+            url,
+            headers={"Accept": "audio/mpeg"},
+            params={"output_format": self.output_format},
+            json=data,
+            stream=True,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        with response:
+            if not response.ok:
+                raise RuntimeError(_describe_failure(response, self.voice_id))
+            yield from response.iter_content(chunk_size=chunk_size)
 
     def text_to_speech(self, text: str) -> tuple[bytes, str]:
         audio_bytes = b"".join(self.stream_text_to_speech(text))
@@ -79,3 +99,29 @@ class ElevenLabsService:
     def output_mime_type(self) -> str:
         # With mp3_* formats, ElevenLabs returns an MP3 stream.
         return "audio/mpeg"
+
+
+def _describe_failure(response: requests.Response, voice_id: str) -> str:
+    """An error message that says what to fix, not just the status code."""
+    try:
+        body = response.text[:1000]
+    except Exception:
+        body = "<unreadable body>"
+
+    status = ""
+    try:
+        status = (response.json().get("detail") or {}).get("status") or ""
+    except Exception:
+        pass
+
+    if status == "ivc_not_permitted":
+        hint = (
+            f"Voice {voice_id} is an instant voice clone and the ElevenLabs "
+            "plan no longer includes cloned voices. Upgrade the plan or set "
+            "ELEVEN_LABS_VOICE_ID to a library voice."
+        )
+    elif status == "quota_exceeded":
+        hint = "The ElevenLabs character quota for this billing period is used up."
+    else:
+        hint = "Check ELEVEN_LABS_API_KEY / ELEVEN_LABS_VOICE_ID."
+    return f"ElevenLabs TTS failed ({response.status_code}). {hint} Response: {body}"
