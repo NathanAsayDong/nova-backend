@@ -1,11 +1,12 @@
 """
-Outbound voice calls and SMS, and the trust boundary around Twilio's webhooks.
+Outbound voice calls, and the trust boundary around Twilio's webhooks.
 
-Nova places a call or sends a text to report an update, and Twilio calls back
-into this backend to drive the conversation. Those callbacks are public HTTP
-endpoints that start an agent loop with Nova's full tool surface behind them,
-so every one of them is signature-checked here before it is allowed to do
-anything, and inbound texts are additionally gated on a sender allowlist.
+Nova places a call to report an update, and Twilio calls back into this
+backend to drive the conversation. Those callbacks are public HTTP endpoints
+that start an agent loop with Nova's full tool surface behind them, so every
+one of them is signature-checked here before it is allowed to do anything.
+Text messaging goes through Infobip instead (bip_service): Twilio messaging
+is disabled on the account.
 
 Speech-to-text and text-to-speech are Twilio's job, not ours: the call runs
 through ConversationRelay, which transcribes the caller and speaks our replies,
@@ -27,24 +28,6 @@ PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
 CALL_ANSWER_PATH = "/calls/answer"
 CALL_RELAY_PATH = "/calls/relay"
 CALL_STATUS_PATH = "/calls/status"
-SMS_INBOUND_PATH = "/sms/inbound"
-
-# Twilio rejects a body over 1600 characters outright, and segments anything
-# over 160 GSM-7 characters into separately-billed parts. Nova's replies are
-# split rather than truncated — losing the end of an answer is worse than
-# receiving two texts — with headroom for the " (1/2)" suffix.
-SMS_MAX_BODY_CHARS = 1600
-SMS_SPLIT_CHARS = 1500
-
-# One agent turn should never fan out into a bulk send. This is a blast-radius
-# cap, not a product limit; a legitimate "text these three people" is fine.
-SMS_MAX_RECIPIENTS = 10
-
-# Default country code for numbers written the way people say them out loud
-# ("801 647 7824"). Twilio itself requires E.164.
-DEFAULT_COUNTRY_CODE = "+1"
-
-_E164 = re.compile(r"^\+[1-9]\d{7,14}$")
 
 # ConversationRelay defaults to ElevenLabs for TTS, so Nova keeps the same
 # voice on the phone as in the browser by passing the existing voice id
@@ -78,10 +61,6 @@ class TwilioConfigurationError(RuntimeError):
     """Raised when a call is attempted without the configuration to place it."""
 
 
-class SmsRecipientError(ValueError):
-    """Raised when a destination number is unusable or not permitted."""
-
-
 # Twilio's exception __str__ is a multi-line block with ANSI colour codes in
 # it, which is unreadable in a log and worse in a database column.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -112,48 +91,6 @@ def is_permanent_twilio_error(exc: Exception) -> bool:
     if not isinstance(status, int):
         return False
     return 400 <= status < 500 and status != 429
-
-
-# Kept as the old private name used inside this module's SMS paths.
-_describe_twilio_exception = describe_twilio_error
-
-
-def normalize_phone_number(value: str, default_country_code: str = DEFAULT_COUNTRY_CODE) -> str:
-    """
-    Coerce a phone number into the E.164 form Twilio requires.
-
-    Accepts what a person (or a model repeating a person) actually writes:
-    "(801) 647-7824", "801-647-7824", "18016477824", "+1 801 647 7824". A
-    number that cannot be made unambiguously valid raises rather than being
-    guessed at — sending a text to the wrong number is not recoverable.
-    """
-    raw = (value or "").strip()
-    if not raw:
-        raise SmsRecipientError("A phone number is required.")
-
-    has_plus = raw.startswith("+")
-    digits = re.sub(r"\D", "", raw)
-    if not digits:
-        raise SmsRecipientError(f"'{value}' contains no digits.")
-
-    if has_plus:
-        candidate = f"+{digits}"
-    elif len(digits) == 10:
-        # Bare national number, e.g. 8016477824.
-        candidate = f"{default_country_code}{digits}"
-    elif len(digits) == 11 and digits.startswith("1"):
-        candidate = f"+{digits}"
-    else:
-        raise SmsRecipientError(
-            f"'{value}' is not a phone number I can send to. Write it in "
-            "international format, like +18015551234."
-        )
-
-    if not _E164.match(candidate):
-        raise SmsRecipientError(
-            f"'{value}' does not resolve to a valid number (got '{candidate}')."
-        )
-    return candidate
 
 
 class TwilioService:
@@ -368,201 +305,3 @@ class TwilioService:
             self.client.calls(call_sid).update(status="completed")
         except Exception as exc:
             print(f"Failed to end call {call_sid}: {exc}")
-
-    # ---------- SMS ----------
-
-    @staticmethod
-    def allowed_sms_recipients() -> set[str] | None:
-        """
-        Numbers Nova may text, or None when unrestricted.
-
-        NOVA_SMS_ALLOWED_RECIPIENTS is a comma-separated allowlist. Leaving it
-        unset permits any destination, which is the right default for a tool
-        the user explicitly asks to text someone with — the guardrail there is
-        the tool description telling Nova to confirm first. Setting it turns
-        that into a hard limit that no prompt can talk its way around, which is
-        what you want if Nova is ever driven by input you don't fully control.
-        """
-        raw = (os.getenv("NOVA_SMS_ALLOWED_RECIPIENTS") or "").strip()
-        if not raw:
-            return None
-        allowed: set[str] = set()
-        for entry in raw.split(","):
-            entry = entry.strip()
-            if not entry:
-                continue
-            try:
-                allowed.add(normalize_phone_number(entry))
-            except SmsRecipientError:
-                print(f"Ignoring unparseable NOVA_SMS_ALLOWED_RECIPIENTS entry '{entry}'.")
-        return allowed or None
-
-    @staticmethod
-    def allowed_sms_senders() -> set[str]:
-        """
-        Numbers whose inbound texts may drive the agent.
-
-        Defaults to the user's own number. This is a real security boundary,
-        not a convenience: an inbound text starts an agent loop holding
-        run_terminal_command and run_sql, and anyone can text a public Twilio
-        number. Unrecognised senders are ignored rather than answered.
-        """
-        raw = (os.getenv("NOVA_SMS_ALLOWED_SENDERS") or "").strip()
-        if not raw:
-            raw = os.getenv("TWILIO_TARGET_NUMBER") or ""
-
-        allowed: set[str] = set()
-        for entry in raw.split(","):
-            entry = entry.strip()
-            if not entry:
-                continue
-            try:
-                allowed.add(normalize_phone_number(entry))
-            except SmsRecipientError:
-                print(f"Ignoring unparseable allowed SMS sender '{entry}'.")
-        return allowed
-
-    @staticmethod
-    def split_sms_body(body: str) -> list[str]:
-        """
-        Break a reply into individual messages Twilio will accept.
-
-        Splits on whitespace near the limit so words survive, and only numbers
-        the parts when there is more than one — "(1/1)" on a single text reads
-        like a bug.
-        """
-        text = (body or "").strip()
-        if not text:
-            raise ValueError("An SMS body is required.")
-        if len(text) <= SMS_MAX_BODY_CHARS:
-            return [text]
-
-        parts: list[str] = []
-        remaining = text
-        while remaining:
-            if len(remaining) <= SMS_SPLIT_CHARS:
-                parts.append(remaining)
-                break
-            window = remaining[:SMS_SPLIT_CHARS]
-            cut = window.rfind(" ")
-            if cut < SMS_SPLIT_CHARS // 2:
-                cut = SMS_SPLIT_CHARS  # one very long token; hard-split it
-            parts.append(remaining[:cut].strip())
-            remaining = remaining[cut:].strip()
-
-        total = len(parts)
-        return [f"({index}/{total}) {part}" for index, part in enumerate(parts, 1)]
-
-    def send_sms(
-        self,
-        to: list[str] | str,
-        body: str,
-        allow_unlisted: bool = False,
-    ) -> dict:
-        """
-        Text one or more people, returning what happened for each recipient.
-
-        Every recipient is attempted independently: one bad number must not
-        stop the rest, and the caller (usually the agent) gets a per-recipient
-        result rather than a single boolean it would have to guess about. A
-        body over Twilio's 1600-character limit is split into numbered parts
-        rather than truncated.
-
-        `allow_unlisted` is for internal callers that have already established
-        the destination — the update dispatcher texting the user's own number —
-        and never for numbers chosen by the model.
-        """
-        configured, problem = self.is_configured_for_sms()
-        if not configured:
-            raise TwilioConfigurationError(problem or "Twilio SMS is not configured.")
-
-        recipients = [to] if isinstance(to, str) else list(to or [])
-        if not recipients:
-            raise SmsRecipientError("At least one recipient is required.")
-        if len(recipients) > SMS_MAX_RECIPIENTS:
-            raise SmsRecipientError(
-                f"Refusing to text {len(recipients)} recipients in one call; "
-                f"the limit is {SMS_MAX_RECIPIENTS}."
-            )
-
-        parts = self.split_sms_body(body)
-        allowlist = None if allow_unlisted else self.allowed_sms_recipients()
-
-        results: list[dict] = []
-        for raw_number in recipients:
-            try:
-                number = normalize_phone_number(str(raw_number))
-            except SmsRecipientError as exc:
-                results.append({"to": str(raw_number), "status": "invalid", "error": str(exc)})
-                continue
-
-            if allowlist is not None and number not in allowlist:
-                results.append(
-                    {
-                        "to": number,
-                        "status": "not_permitted",
-                        "error": (
-                            "This number is not in NOVA_SMS_ALLOWED_RECIPIENTS, so "
-                            "Nova is not allowed to text it."
-                        ),
-                    }
-                )
-                continue
-
-            sids: list[str] = []
-            try:
-                for part in parts:
-                    message = self.client.messages.create(
-                        to=number, from_=self.from_number, body=part
-                    )
-                    sids.append(message.sid)
-                results.append(
-                    {
-                        "to": number,
-                        "status": "sent",
-                        "message_sids": sids,
-                        "segments": len(parts),
-                    }
-                )
-            except Exception as exc:
-                results.append(
-                    {
-                        "to": number,
-                        "status": "failed",
-                        "error": _describe_twilio_exception(exc),
-                        # A multi-part send that dies halfway has already
-                        # delivered the earlier parts; say so rather than
-                        # implying nothing arrived.
-                        "message_sids": sids,
-                    }
-                )
-
-        sent = sum(1 for entry in results if entry["status"] == "sent")
-        return {
-            "status": "sent" if sent == len(results) else ("partial" if sent else "failed"),
-            "sent": sent,
-            "total": len(results),
-            "parts_per_recipient": len(parts),
-            "results": results,
-        }
-
-    def is_configured_for_sms(self) -> tuple[bool, str | None]:
-        """
-        Whether a text could be sent right now, and what's missing if not.
-
-        Deliberately looser than is_configured: sending a text needs neither a
-        public URL nor a tunnel, so a deployment with no webhooks can still
-        text.
-        """
-        missing = [
-            name
-            for name, value in (
-                ("TWILIO_ACCOUNT_SID", self.account_sid),
-                ("TWILIO_AUTH_TOKEN", self.auth_token),
-                ("TWILIO_PHONE_NUMBER", self.from_number),
-            )
-            if not (value or "").strip()
-        ]
-        if missing:
-            return False, f"Missing configuration: {', '.join(missing)}."
-        return True, None

@@ -15,8 +15,10 @@ What is exempt, and why each one is:
 
   /               /health              liveness, say nothing
   /auth/login                          how you get a session
-  /calls/*        /sms/*               Twilio's webhooks, gated on Twilio's
+  /calls/*                             Twilio's webhooks, gated on Twilio's
                                        request signature instead
+  /sms/*                               Infobip's inbound forward, gated on
+                                       BIP_INBOUND_SECRET instead
   /ws/coding                           the Mac agent's socket, gated on its
                                        own shared token
   /ws/face                             the face display, deliberately open

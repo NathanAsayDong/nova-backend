@@ -19,9 +19,13 @@ from datetime import datetime, time, timezone
 
 from src.model.report_type import SUPPORTED_REPORT_TYPES, DeliveryStatus, ReportType
 from src.model.update import Update
+from src.service.bip_service import (
+    BipConfigurationError,
+    BipService,
+    user_phone_number,
+)
 from src.service.email_service import EmailService
 from src.service.twilio_service import (
-    SmsRecipientError,
     TwilioConfigurationError,
     TwilioService,
     describe_twilio_error,
@@ -69,6 +73,7 @@ class UpdateDeliveryService:
         self.update_service = UpdateService()
         self.email_service = EmailService()
         self.twilio_service = TwilioService()
+        self.bip_service = BipService()
 
     # ---------- policy ----------
 
@@ -256,12 +261,12 @@ class UpdateDeliveryService:
 
     def _deliver_sms(self, update: Update, attempts: int) -> str:
         """
-        Text the update to the user.
+        Text the update to the user through BIP.
 
-        Unlike a call, an SMS is delivered the moment Twilio accepts it —
+        Unlike a call, an SMS is delivered the moment Infobip accepts it —
         there is no session to wait on, so this settles the update itself.
         """
-        recipient = (os.getenv("TWILIO_TARGET_NUMBER") or "").strip()
+        recipient = user_phone_number()
         if not recipient:
             self.update_service.mark_delivery_failed(
                 update.id,
@@ -270,7 +275,7 @@ class UpdateDeliveryService:
             )
             return "failed"
 
-        configured, problem = self.twilio_service.is_configured_for_sms()
+        configured, problem = self.bip_service.is_configured()
         if not configured:
             self.update_service.mark_delivery_failed(
                 update.id, f"Cannot send SMS: {problem}", attempts=attempts
@@ -278,25 +283,16 @@ class UpdateDeliveryService:
             return "failed"
 
         try:
-            result = self.twilio_service.send_sms(
+            result = self.bip_service.send_sms(
                 recipient, update.update_message or "", allow_unlisted=True
             )
-        except (TwilioConfigurationError, SmsRecipientError) as exc:
+        except (BipConfigurationError, ValueError) as exc:
+            # ValueError covers SmsRecipientError (a bad TWILIO_TARGET_NUMBER)
+            # and an empty body — neither fixes itself on a later pass.
             self.update_service.mark_delivery_failed(
                 update.id, f"Cannot send SMS: {exc}", attempts=attempts
             )
             return "failed"
-        except Exception as exc:
-            reason = describe_twilio_error(exc)
-            if is_permanent_twilio_error(exc):
-                print(f"Update {update.id}: SMS rejected permanently — {reason}")
-                self.update_service.mark_delivery_failed(
-                    update.id, f"SMS rejected: {reason}", attempts=attempts
-                )
-                return "failed"
-            print(f"Update {update.id}: SMS could not be sent — {reason}")
-            self._settle_or_retry(update, attempts, f"SMS could not be sent: {reason}")
-            return "deferred"
 
         if result.get("status") == "sent":
             self.update_service.mark_delivered(update.id)
@@ -305,11 +301,21 @@ class UpdateDeliveryService:
 
         # send_sms reports per recipient and never raises for a rejected
         # number, so a non-sent status here is the failure detail.
-        failures = "; ".join(
-            entry.get("error", "unknown error")
-            for entry in result.get("results", [])
-            if entry.get("status") != "sent"
-        )
+        unsent = [
+            entry for entry in result.get("results", []) if entry.get("status") != "sent"
+        ]
+        failures = "; ".join(entry.get("error", "unknown error") for entry in unsent)
+        if unsent and all(
+            entry.get("permanent") or entry.get("status") != "failed" for entry in unsent
+        ):
+            # A bad key, sender or number is rejected again on every pass.
+            print(f"Update {update.id}: SMS rejected permanently — {failures}")
+            self.update_service.mark_delivery_failed(
+                update.id, f"SMS rejected: {failures}", attempts=attempts
+            )
+            return "failed"
+
+        print(f"Update {update.id}: SMS could not be sent — {failures}")
         self._settle_or_retry(update, attempts, f"SMS not delivered: {failures}")
         return "deferred"
 

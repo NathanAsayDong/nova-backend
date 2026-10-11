@@ -213,7 +213,7 @@ PROJECT_TOOLS: list[dict] = [
         ),
         "config": {
             "type": "service_method",
-            "callable_path": "src.service.twilio_service.TwilioService.send_sms",
+            "callable_path": "src.service.bip_service.BipService.send_sms",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -1020,9 +1020,9 @@ _REPORT_TYPE_PROPERTY = {
     "type": "string",
     "enum": ["email", "sms", "call", "chat"],
     "description": (
-        "How to report results. Only 'email' can actually be delivered today — "
-        "the others have no tool yet, so the responsibility runs but only "
-        "summarizes in its reply. Omit for no report."
+        "How to report results: 'email' emails the summary, 'sms' texts it, "
+        "and 'call' phones the user and reads it out. 'chat' has no delivery "
+        "channel, so the run only posts an update. Omit for no report."
     ),
 }
 
@@ -1257,9 +1257,10 @@ BACKGROUND_AGENT_TOOLS: list[dict] = [
                             "results worth reading rather than hearing. Only "
                             "set this when the user actually asked to be "
                             "notified; do not add it on your own initiative, "
-                            "since a phone call interrupts them. 'sms' and "
-                            "'chat' are accepted but not deliverable yet — the "
-                            "result will only appear as an update."
+                            "since a phone call interrupts them. Use 'sms' when "
+                            "they ask to be texted, for short results. 'chat' "
+                            "is accepted but not deliverable — the result will "
+                            "only appear as an update."
                         ),
                     },
                 },

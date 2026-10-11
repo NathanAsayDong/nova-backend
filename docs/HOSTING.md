@@ -49,6 +49,12 @@ MCP_OAUTH_REDIRECT_BASE=https://api.nova-api.us
 - `PUBLIC_BASE_URL` is where Twilio calls back; `MCP_OAUTH_REDIRECT_BASE` is
   where MCP OAuth providers redirect to. Both used to assume ngrok/localhost.
 - Optional: `NOVA_SESSION_DAYS` (default 30, sliding).
+- Texting runs on Infobip, not Twilio: set `BIP_BASE_URL`, `BIP_API_KEY`,
+  `BIP_SENDER` and `BIP_INBOUND_SECRET`. For inbound texts, point the sender
+  number's forward in the Infobip portal at `https://api.nova-api.us/sms/inbound`
+  (JSON format) with the secret as the Basic-auth password, or append
+  `?token=<secret>` to the URL. The number is shared with admin-api, so its
+  users' replies reach Nova too and are dropped by the sender allowlist.
 
 Then create the sessions table:
 
@@ -104,7 +110,8 @@ at `https://nova-voice-nd.web.app`, the face at `/face`.
 |---|---|
 | `/`, `/health` | liveness |
 | `/auth/login` | how you get in |
-| `/calls/*`, `/sms/*` | Twilio webhooks, gated on Twilio's request signature |
+| `/calls/*` | Twilio webhooks, gated on Twilio's request signature |
+| `/sms/*` | Infobip inbound SMS forward, gated on `BIP_INBOUND_SECRET` |
 | `/ws/coding` | the Mac agent, gated on `NOVA_CODE_TOKEN` |
 | `/ws/face` | the face display, deliberately open |
 | `/mcp-servers/oauth/callback` | the OAuth provider's redirect; carries a one-time state nonce |

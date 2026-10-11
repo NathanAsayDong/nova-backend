@@ -97,8 +97,9 @@ app.include_router(mcp_server_router)
 app.include_router(face_router)
 app.include_router(coding_router)
 app.include_router(settings_router)
-# Twilio's webhooks, not the browser client's — CORS above does not apply to
-# them, and they are gated on Twilio's request signature instead.
+# Twilio's call webhooks and Infobip's SMS forward, not the browser client's —
+# CORS above does not apply to them, and they are gated on Twilio's request
+# signature and BIP_INBOUND_SECRET respectively instead.
 app.include_router(call_router)
 app.include_router(sms_router)
 

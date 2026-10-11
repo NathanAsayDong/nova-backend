@@ -121,7 +121,9 @@ class FakeUpdateService:
         return update
 
 
-def build_service(updates=(), email_ok=True, twilio_ok=True, call_sid="CA123"):
+def build_service(
+    updates=(), email_ok=True, twilio_ok=True, bip_ok=True, call_sid="CA123"
+):
     service = UpdateDeliveryService.__new__(UpdateDeliveryService)
     service.update_service = FakeUpdateService(updates)
 
@@ -136,15 +138,16 @@ def build_service(updates=(), email_ok=True, twilio_ok=True, call_sid="CA123"):
         placed=[],
         texted=[],
         is_configured=lambda: (twilio_ok, None if twilio_ok else "Missing configuration: X."),
-        is_configured_for_sms=lambda: (
-            twilio_ok,
-            None if twilio_ok else "Missing configuration: X.",
-        ),
         place_report_call=lambda update_id: (
             service.twilio_service.placed.append(update_id) or call_sid
         ),
+    )
+
+    service.bip_service = SimpleNamespace(
+        texted=[],
+        is_configured=lambda: (bip_ok, None if bip_ok else "Missing configuration: BIP_API_KEY."),
         send_sms=lambda to, body, **kw: (
-            service.twilio_service.texted.append((to, body))
+            service.bip_service.texted.append((to, body))
             or {"status": "sent", "sent": 1, "total": 1, "results": []}
         ),
     )
@@ -365,7 +368,7 @@ class SmsDeliveryTests(unittest.TestCase):
         result = service.deliver_pending(now=at(12))
 
         self.assertEqual(result["delivered"], 1)
-        self.assertEqual(service.twilio_service.texted[0][0], "+18016477824")
+        self.assertEqual(service.bip_service.texted[0][0], "+18016477824")
         self.assertEqual(
             service.update_service.updates[1].delivery_status, DeliveryStatus.DELIVERED
         )
@@ -392,9 +395,11 @@ class SmsDeliveryTests(unittest.TestCase):
     @mock.patch.dict("os.environ", {"TWILIO_TARGET_NUMBER": "+18016477824"})
     def test_partial_send_is_requeued_not_marked_delivered(self):
         service = build_service([make_update(report_type=ReportType.SMS)])
-        service.twilio_service.send_sms = lambda to, body, **kw: {
+        service.bip_service.send_sms = lambda to, body, **kw: {
             "status": "failed",
-            "results": [{"to": to, "status": "failed", "error": "carrier down"}],
+            "results": [
+                {"to": to, "status": "failed", "error": "carrier down", "permanent": False}
+            ],
         }
 
         result = service.deliver_pending(now=at(12))
@@ -403,6 +408,46 @@ class SmsDeliveryTests(unittest.TestCase):
         update = service.update_service.updates[1]
         self.assertEqual(update.delivery_status, DeliveryStatus.PENDING)
         self.assertFalse(update.is_viewed)
+
+
+class SmsPermanentFailureTests(unittest.TestCase):
+    @mock.patch.dict("os.environ", {"TWILIO_TARGET_NUMBER": "+18016477824"})
+    def test_rejected_send_fails_rather_than_retrying_every_pass(self):
+        # A bad key or a rejected sender is rejected again in sixty seconds.
+        service = build_service([make_update(report_type=ReportType.SMS)])
+        service.bip_service.send_sms = lambda to, body, **kw: {
+            "status": "failed",
+            "results": [
+                {"to": to, "status": "failed", "error": "[UNAUTHORIZED] Invalid login", "permanent": True}
+            ],
+        }
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["failed"], 1)
+        update = service.update_service.updates[1]
+        self.assertEqual(update.delivery_status, DeliveryStatus.FAILED)
+        self.assertIn("Invalid login", update.delivery_error)
+
+    @mock.patch.dict("os.environ", {"TWILIO_TARGET_NUMBER": "+18016477824"})
+    def test_unconfigured_bip_fails_rather_than_looping(self):
+        service = build_service([make_update(report_type=ReportType.SMS)], bip_ok=False)
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(service.bip_service.texted, [])
+        self.assertIn("BIP_API_KEY", service.update_service.updates[1].delivery_error)
+
+    @mock.patch.dict("os.environ", {"TWILIO_TARGET_NUMBER": "+18016477824"})
+    def test_sms_does_not_touch_twilio(self):
+        # Twilio messaging is disabled on the account; only calls go there.
+        service = build_service([make_update(report_type=ReportType.SMS)])
+        service.twilio_service.send_sms = mock.Mock()
+
+        service.deliver_pending(now=at(12))
+
+        service.twilio_service.send_sms.assert_not_called()
 
 
 class UndeliverableTypeTests(unittest.TestCase):

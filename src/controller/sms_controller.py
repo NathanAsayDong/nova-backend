@@ -1,21 +1,24 @@
 """
 Nova over text message.
 
-One endpoint: Twilio POSTs here whenever the Twilio number receives an SMS,
-and Nova answers as a normal agent turn.
+One endpoint: Infobip forwards every text the BIP number receives here as JSON,
+and Nova answers each one as a normal agent turn.
 
-The shape of this is dictated by one hard constraint: Twilio gives a messaging
-webhook about 15 seconds to respond, while an agent turn is allowed 120 and
-routinely takes longer than 15 when tools are involved. So the webhook does
-not answer the text — it acknowledges Twilio immediately with empty TwiML and
-hands the turn to a background task, which sends the reply back through the
-REST API when it is ready. A text arriving a few seconds later is normal; a
-webhook timing out means Twilio retries and the user gets answered twice.
+The webhook does not answer the text itself. An agent turn is allowed 120
+seconds and routinely takes longer than a webhook should be held open when
+tools are involved, and Infobip retries a forward that doesn't get a 200 — so
+the webhook acknowledges immediately and hands the turn to a background task,
+which sends the reply through the BIP API when it is ready. A text arriving a
+few seconds later is normal; a forward timing out means Infobip retries and
+the user gets answered twice.
 
-Inbound texts are gated twice over: Twilio's request signature proves the
-request came from Twilio, and a sender allowlist decides whose texts may drive
-an agent loop at all. The second gate is the important one — anyone can text a
-public number, and this loop holds run_terminal_command and run_sql.
+Inbound texts are gated twice over. A shared secret (BIP_INBOUND_SECRET, as a
+Basic-auth password or a ?token=) proves the request came from the forward
+configured in the Infobip portal — Infobip does not sign forwards, so without
+it anyone who found this URL could post a "from" of their choosing. Then a
+sender allowlist decides whose texts may drive an agent loop at all, which
+matters doubly because the number is shared with admin-api and its users'
+replies land here too. This loop holds run_terminal_command and run_sql.
 """
 
 import asyncio
@@ -23,23 +26,21 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response
 
 from prompting.prompt_source_prompt import PromptSourceEnum
 from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
-from src.service.conversation_service import ConversationClosedError, ConversationService
-from src.service.twilio_service import (
+from src.service.bip_service import (
     SMS_INBOUND_PATH,
+    BipService,
     SmsRecipientError,
-    TwilioService,
-    describe_twilio_error,
     normalize_phone_number,
 )
+from src.service.conversation_service import ConversationClosedError, ConversationService
 
 router = APIRouter(prefix="/sms", tags=["sms"])
 
-twilio_service = TwilioService()
+bip_service = BipService()
 conversation_service = ConversationService()
 
 agent_loop = AgentLoop()
@@ -50,8 +51,6 @@ agent_loop.conversation_service = conversation_service
 # context no longer matches what the user is asking about.
 SMS_THREAD_IDLE_HOURS = 12
 
-_EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
-
 # Guards against one text turning into a runaway reply; the SMS steer already
 # asks for brevity, this is the backstop.
 _MAX_REPLY_CHARS = 1200
@@ -59,30 +58,14 @@ _MAX_REPLY_CHARS = 1200
 _RELATIVE_ROUTE = SMS_INBOUND_PATH.removeprefix(router.prefix) or "/inbound"
 
 
-def _ack() -> Response:
-    """
-    Empty TwiML: "received, nothing to say synchronously".
-
-    Every exit path returns this, including rejections. A messaging webhook
-    that returns an error status makes Twilio retry and raise account alerts,
-    and there is nothing useful to retry — the text has already arrived.
-    """
-    return Response(content=_EMPTY_TWIML, media_type="application/xml")
-
-
-async def _verified_form(request: Request) -> dict:
-    """Parse an inbound Twilio webhook body after checking its signature."""
-    form = await request.form()
-    params = {key: str(value) for key, value in form.items()}
-
-    signed_url = twilio_service.webhook_url(request.url.path)
-    if request.url.query:
-        signed_url = f"{signed_url}?{request.url.query}"
-
-    signature = request.headers.get("X-Twilio-Signature")
-    if not twilio_service.verify_signature(signed_url, params, signature):
-        raise HTTPException(status_code=403, detail="Invalid signature.")
-    return params
+def _authorize(request: Request) -> None:
+    """Refuse a forward that doesn't carry the shared secret."""
+    authorized = bip_service.verify_inbound_secret(
+        request.headers.get("Authorization"),
+        request.query_params.get("token"),
+    )
+    if not authorized:
+        raise HTTPException(status_code=403, detail="Invalid credentials.")
 
 
 def _is_stale(conversation: Conversation) -> bool:
@@ -157,43 +140,61 @@ def _run_sms_turn(phone_number: str, text: str) -> None:
     try:
         # allow_unlisted: this is a reply to someone who already passed the
         # inbound sender allowlist, not a destination the model picked.
-        twilio_service.send_sms(phone_number, reply, allow_unlisted=True)
+        result = bip_service.send_sms(phone_number, reply, allow_unlisted=True)
+        if result.get("status") != "sent":
+            print(f"SMS reply to {phone_number} not sent: {result.get('results')}")
     except Exception as exc:
-        print(f"Could not send SMS reply to {phone_number}: {describe_twilio_error(exc)}")
+        print(f"Could not send SMS reply to {phone_number}: {exc}")
 
 
-@router.post(_RELATIVE_ROUTE)
-async def inbound_sms(request: Request) -> Response:
-    """
-    An SMS arrived at the Twilio number.
-
-    Acknowledges immediately and answers out of band — see the module docstring
-    for why the reply cannot be returned from here.
-    """
-    params = await _verified_form(request)
-
-    raw_from = params.get("From") or ""
-    body = (params.get("Body") or "").strip()
+def _handle_inbound(message: dict) -> None:
+    """Gate one forwarded text and, if it passes, start answering it."""
+    raw_from = str(message.get("from") or "")
+    body = str(message.get("text") or "").strip()
 
     try:
         sender = normalize_phone_number(raw_from)
     except SmsRecipientError:
         print(f"Ignoring inbound SMS from unparseable number '{raw_from}'.")
-        return _ack()
+        return
 
-    allowed = twilio_service.allowed_sms_senders()
-    if sender not in allowed:
+    if sender not in bip_service.allowed_sms_senders():
         # Deliberately silent. Replying would confirm the number is live to
-        # whoever is probing it, and would let a stranger burn your Twilio
-        # balance by texting it repeatedly.
+        # whoever is probing it, would let a stranger burn the account balance
+        # by texting it repeatedly, and would answer admin-api's users with
+        # Nova.
         print(f"Ignoring inbound SMS from non-allowlisted sender {sender}.")
-        return _ack()
+        return
 
     if not body:
         # An MMS with no text, or an empty message. Nothing to answer.
-        return _ack()
+        return
 
     print(f"Inbound SMS from {sender}: {body[:80]}")
     # Fire-and-forget: the webhook must return long before this finishes.
     asyncio.create_task(asyncio.to_thread(_run_sms_turn, sender, body))
-    return _ack()
+
+
+@router.post(_RELATIVE_ROUTE)
+async def inbound_sms(request: Request) -> dict:
+    """
+    Infobip forwarded one or more texts the BIP number received.
+
+    Acknowledges immediately and answers out of band — see the module docstring
+    for why the reply cannot be returned from here. Every authenticated forward
+    gets a 200, including ones with nothing to act on: a non-200 makes Infobip
+    retry, and there is nothing useful to retry — the text has already arrived.
+    """
+    _authorize(request)
+
+    try:
+        payload = await request.json()
+    except ValueError:
+        print("Ignoring inbound SMS forward with a non-JSON body.")
+        return {"status": "ignored"}
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    for message in results if isinstance(results, list) else []:
+        if isinstance(message, dict):
+            _handle_inbound(message)
+    return {"status": "received"}
