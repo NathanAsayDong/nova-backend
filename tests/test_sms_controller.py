@@ -96,6 +96,70 @@ class AuthenticationTests(unittest.TestCase):
         self.assertEqual(response, {"status": "received"})
 
 
+class PathTokenRouteTests(unittest.TestCase):
+    """
+    Infobip's forward can arrive without the ?token= on its configured URL, so
+    the secret is also accepted as the last path segment. Exercised through
+    real routing, since the point is which URLs FastAPI matches.
+    """
+
+    def setUp(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        app.include_router(sms_controller.router)
+        self.client = TestClient(app)
+        self.started = []
+        for target, attribute, kwargs in (
+            (sms_controller, "_run_sms_turn", {"side_effect": lambda *a: self.started.append(a)}),
+            (sms_controller.bip_service, "allowed_sms_senders", {"return_value": {"+18016477824"}}),
+        ):
+            patcher = mock.patch.object(target, attribute, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        env = mock.patch.dict("os.environ", {"BIP_INBOUND_SECRET": "s3cret"}, clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_secret_in_the_path_is_accepted(self):
+        response = self.client.post(
+            "/sms/inbound/s3cret", json=forward(text("18016477824", "hi"))
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "received"})
+
+    def test_wrong_secret_in_the_path_is_rejected(self):
+        response = self.client.post(
+            "/sms/inbound/wrong", json=forward(text("18016477824", "hi"))
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.started, [])
+
+    def test_bare_path_without_any_secret_is_rejected(self):
+        # What Infobip sent when it dropped the query string.
+        response = self.client.post("/sms/inbound", json=forward(text("18016477824", "hi")))
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_query_token_still_works(self):
+        response = self.client.post(
+            "/sms/inbound?token=s3cret", json=forward(text("18016477824", "hi"))
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_path_token_is_not_also_a_query_parameter(self):
+        # Only ?token= is a query form; nothing else should smuggle a secret.
+        response = self.client.post(
+            "/sms/inbound?path_token=s3cret", json=forward(text("18016477824", "hi"))
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+
 class SenderGateTests(unittest.TestCase):
     """
     An inbound text starts an agent loop holding run_terminal_command and

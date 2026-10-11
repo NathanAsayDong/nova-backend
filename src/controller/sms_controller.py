@@ -13,7 +13,7 @@ few seconds later is normal; a forward timing out means Infobip retries and
 the user gets answered twice.
 
 Inbound texts are gated twice over. A shared secret (BIP_INBOUND_SECRET, as a
-Basic-auth password or a ?token=) proves the request came from the forward
+Basic-auth password, a ?token=, or the last path segment) proves the request came from the forward
 configured in the Infobip portal — Infobip does not sign forwards, so without
 it anyone who found this URL could post a "from" of their choosing. Then a
 sender allowlist decides whose texts may drive an agent loop at all, which
@@ -58,11 +58,11 @@ _MAX_REPLY_CHARS = 1200
 _RELATIVE_ROUTE = SMS_INBOUND_PATH.removeprefix(router.prefix) or "/inbound"
 
 
-def _authorize(request: Request) -> None:
+def _authorize(request: Request, path_token: str | None = None) -> None:
     """Refuse a forward that doesn't carry the shared secret."""
     authorized = bip_service.verify_inbound_secret(
         request.headers.get("Authorization"),
-        request.query_params.get("token"),
+        path_token or request.query_params.get("token"),
     )
     if not authorized:
         raise HTTPException(status_code=403, detail="Invalid credentials.")
@@ -175,17 +175,9 @@ def _handle_inbound(message: dict) -> None:
     asyncio.create_task(asyncio.to_thread(_run_sms_turn, sender, body))
 
 
-@router.post(_RELATIVE_ROUTE)
-async def inbound_sms(request: Request) -> dict:
-    """
-    Infobip forwarded one or more texts the BIP number received.
-
-    Acknowledges immediately and answers out of band — see the module docstring
-    for why the reply cannot be returned from here. Every authenticated forward
-    gets a 200, including ones with nothing to act on: a non-200 makes Infobip
-    retry, and there is nothing useful to retry — the text has already arrived.
-    """
-    _authorize(request)
+async def _receive(request: Request, path_token: str | None = None) -> dict:
+    """Authenticate a forward, then gate and start answering each text in it."""
+    _authorize(request, path_token)
 
     try:
         payload = await request.json()
@@ -198,3 +190,28 @@ async def inbound_sms(request: Request) -> dict:
         if isinstance(message, dict):
             _handle_inbound(message)
     return {"status": "received"}
+
+
+@router.post(_RELATIVE_ROUTE)
+async def inbound_sms(request: Request) -> dict:
+    """
+    Infobip forwarded one or more texts the BIP number received.
+
+    Acknowledges immediately and answers out of band — see the module docstring
+    for why the reply cannot be returned from here. Every authenticated forward
+    gets a 200, including ones with nothing to act on: a non-200 makes Infobip
+    retry, and there is nothing useful to retry — the text has already arrived.
+    """
+    return await _receive(request)
+
+
+@router.post(_RELATIVE_ROUTE + "/{token}")
+async def inbound_sms_with_path_token(request: Request, token: str) -> dict:
+    """
+    The same forward with the secret as the last path segment.
+
+    For when the portal's forward arrives without its ?token= — a path segment
+    survives where a query string may not. uvicorn's access log records the
+    path, secret included, as it does a query string.
+    """
+    return await _receive(request, path_token=token)
