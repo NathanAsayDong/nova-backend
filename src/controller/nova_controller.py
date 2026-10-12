@@ -278,6 +278,58 @@ def has_wake_phrase(value: str) -> bool:
     return len(tokens) <= 3 and "nova" in tokens
 
 
+# Captures that are a spoken turn, as opposed to a wake check. "sentry" is a
+# turn that must open with the wake phrase: the browser records locally until
+# it hears one, so the buffer it sends begins with "Hey Nova, …".
+_TURN_PURPOSES = frozenset({"turn", "sentry"})
+
+_WAKE_PREFIXES = frozenset({"hey", "hi", "hello", "ok", "okay", "yo", "alright"})
+# What can be left after a bare wake phrase without it being a request.
+_WAKE_ONLY_FILLER = frozenset({"um", "uh", "hmm", "please", "you there", "are you there"})
+_WORD = re.compile(r"[A-Za-z0-9']+")
+
+
+def split_wake_phrase(value: str) -> str | None:
+    """
+    The request that follows a wake phrase, or None if there is no wake phrase.
+
+    Strict on purpose: the wake phrase has to START the utterance ("Nova, …",
+    "Hey Nova …", "OK Nova …", or a misheard spelling of those). Sentry mode
+    runs in rooms where other people say Nova's name in passing — "I asked
+    Nova yesterday" is not a request.
+
+    The remainder keeps its original wording and punctuation, since it goes
+    to the model as the prompt. An empty string means the wake phrase was all
+    there was: the user is waiting to be asked.
+    """
+    words = list(_WORD.finditer(value or ""))
+    canonical = [
+        "nova" if w.group().lower().replace("'", "") in _WAKE_NAME_VARIANTS else w.group().lower()
+        for w in words
+    ]
+
+    index = 0
+    if canonical[:1] and canonical[0] in _WAKE_PREFIXES:
+        index = 1
+
+    end: int | None = None
+    if len(canonical) > index and canonical[index] == "nova":
+        end = words[index].end()
+    elif (
+        len(canonical) > index + 1
+        and canonical[index] == "no"
+        and canonical[index + 1] in {"va", "vah", "ver"}
+    ):
+        end = words[index + 1].end()
+    if end is None:
+        return None
+
+    remainder = value[end:].lstrip(" \t\n,.!?;:-—")
+    if normalize_wake_text(remainder) in _WAKE_ONLY_FILLER:
+        return ""
+    return remainder.strip()
+
+
 def has_stop_phrase(value: str) -> bool:
     normalized = normalize_wake_text(value)
     if not normalized:
@@ -646,7 +698,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 # the flush that carries the audio up to the pause itself.
                 # NOW the buffer covers the whole utterance — snapshot it and
                 # start transcribing while the client waits out its window.
-                if pause_pending and capture_purpose == "turn":
+                if pause_pending and capture_purpose in _TURN_PURPOSES:
                     pause_pending = False
                     invalidate_speculative()
                     speculative_task = asyncio.create_task(
@@ -665,7 +717,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 # pass started now would hold the GPU that the turn's own
                 # transcription is about to need.
                 if (
-                    capture_purpose == "turn"
+                    capture_purpose in _TURN_PURPOSES
                     and speculative_task is None
                     and (partial_task is None or partial_task.done())
                     and _partial_is_due(len(chunks), partial_state["chunks_done"])
@@ -707,7 +759,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 # While a meeting is recording, Nova transcribes the room and
                 # answers nobody — without this, any voice in the meeting
                 # would open a turn and get a spoken reply.
-                if payload.get("purpose", "turn") == "turn":
+                if payload.get("purpose", "turn") in _TURN_PURPOSES:
                     active_meeting = await asyncio.to_thread(
                         meeting_service.get_active_meeting
                     )
@@ -767,7 +819,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 # ends where the speech did.
                 if (
                     recording_started
-                    and capture_purpose == "turn"
+                    and capture_purpose in _TURN_PURPOSES
                     and speculative_task is None
                     and _speculative_asr_enabled()
                 ):
@@ -924,6 +976,28 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         recording_started = False
                         chunks.clear()
                         continue
+
+                    if purpose == "sentry":
+                        # The browser only sends a sentry capture once it has
+                        # heard the wake phrase, so the buffer opens with it.
+                        # What follows is the request; nothing following means
+                        # the user said "Hey Nova" and is waiting to be asked.
+                        request = split_wake_phrase(transcript)
+                        if request is None:
+                            # Whisper heard the opening differently from the
+                            # browser ("Hey, no."). A short clip is still just
+                            # the wake phrase; a long one is the request.
+                            request = "" if len(transcript.split()) <= 3 else transcript
+                        if not request:
+                            print(f"[sentry] wake only: {transcript!r}")
+                            await websocket.send_json(
+                                {"type": "wake_only", "message": "Listening for the request."}
+                            )
+                            recording_started = False
+                            chunks.clear()
+                            continue
+                        print(f"[sentry] request: {request!r}")
+                        transcript = request
 
                     if has_stop_phrase(transcript):
                         await websocket.send_json(
