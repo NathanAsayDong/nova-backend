@@ -30,6 +30,37 @@ DEFAULT_HOTWORDS = "Nova"
 
 SAMPLE_RATE = 16000
 
+# Whisper's own test for a segment that is not really speech: it thinks the
+# window is probably silence AND it has low confidence in the words it wrote
+# anyway. Both must hold — either alone also fires on quiet, real speech.
+# These are the thresholds OpenAI's reference decoder uses.
+NO_SPEECH_PROB_THRESHOLD = 0.6
+LOW_CONFIDENCE_LOGPROB = -1.0
+
+# What Whisper writes when handed a cough, a baby, or room noise: phrases from
+# its subtitle-heavy training data. Dropped only when they are the WHOLE
+# transcript ("you" alone), never from inside a real sentence. "Thank you"
+# is deliberately absent: it is a stop phrase people really say.
+_HALLUCINATED_TRANSCRIPTS = frozenset(
+    {
+        "you",
+        "thanks for watching",
+        "thank you for watching",
+        "thank you so much for watching",
+        "please subscribe",
+        "like and subscribe",
+        "subtitles by the amara org community",
+    }
+)
+
+
+def drop_hallucination(text: str) -> str:
+    """`text`, or "" when it is only punctuation or a known non-speech phrase."""
+    normalized = " ".join("".join(c if c.isalnum() else " " for c in text.lower()).split())
+    if not normalized or normalized in _HALLUCINATED_TRANSCRIPTS:
+        return ""
+    return text
+
 
 @dataclass(frozen=True)
 class TranscriptSegment:
@@ -299,12 +330,12 @@ class ASRService:
         """
         if self.provider == "elevenlabs":
             with open(file_path, "rb") as audio:
-                return self._transcribe_eleven_labs(audio, language)
+                return drop_hallucination(self._transcribe_eleven_labs(audio, language))
         if self.provider == "mlx_whisper":
-            return self._transcribe_mlx(str(file_path), language)
+            return drop_hallucination(self._transcribe_mlx(str(file_path), language))
         if self.provider == "parakeet":
-            return self._transcribe_parakeet(str(file_path))
-        return self._transcribe_whisper(str(file_path), language, fast=fast)
+            return drop_hallucination(self._transcribe_parakeet(str(file_path)))
+        return drop_hallucination(self._transcribe_whisper(str(file_path), language, fast=fast))
 
     def transcribe(self, file: BinaryIO, language: str | None = None) -> str:
         # Accepts raw binary streams and FastAPI UploadFile objects (which wrap the stream in .file)
@@ -551,8 +582,17 @@ class ASRService:
             condition_on_previous_text=False,
             hotwords=self.hotwords,
         )
-        # segments is a lazy generator; joining consumes it and runs the transcription
-        return " ".join(segment.text.strip() for segment in segments).strip()
+        # segments is a lazy generator; joining consumes it and runs the transcription.
+        # Segments Whisper itself judges to be non-speech are dropped: VAD let
+        # the noise through, and Whisper's answer to noise is invented words.
+        return " ".join(
+            segment.text.strip()
+            for segment in segments
+            if not (
+                segment.no_speech_prob > NO_SPEECH_PROB_THRESHOLD
+                and segment.avg_logprob < LOW_CONFIDENCE_LOGPROB
+            )
+        ).strip()
 
     def _transcribe_eleven_labs(self, audio: BinaryIO, language: str | None) -> str:
         return (self._eleven_labs_request(audio, language).get("text") or "").strip()

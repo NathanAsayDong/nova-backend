@@ -79,10 +79,10 @@ class EndpointDecisionTests(unittest.TestCase):
     # this whole thing replaced.
 
     def test_final_pronouns_do_not_hold_the_line(self):
-        # Three-word-plus clauses ending in a pronoun read as neutral; the one
+        # Unpunctuated, these lean unfinished like any open clause; the one
         # thing none of these may get is the maximum hold.
         for transcript in ("What time is it", "Can you fix it"):
-            self.assert_window(transcript, DEFAULT_SILENCE_MS, "unpunctuated_clause")
+            self.assert_window(transcript, PENDING_SILENCE_MS, "unpunctuated_clause")
         self.assertLess(
             endpoint_decision("Remember that").silence_ms, MAX_SILENCE_MS
         )
@@ -134,10 +134,20 @@ class EndpointDecisionTests(unittest.TestCase):
         self.assert_window("The migration", PENDING_SILENCE_MS, "short_fragment")
         self.assert_window("Sophie", PENDING_SILENCE_MS, "short_fragment")
 
-    def test_unpunctuated_clause_gets_the_neutral_window(self):
+    def test_unpunctuated_clause_leans_unfinished(self):
+        # Whisper punctuates sentences it hears as finished; one it left open
+        # is usually a speaker mid-thought.
         self.assert_window(
-            "deploy the backend tonight", DEFAULT_SILENCE_MS, "unpunctuated_clause"
+            "deploy the backend tonight", PENDING_SILENCE_MS, "unpunctuated_clause"
         )
+
+    def test_mid_thought_request_is_not_cut_off_at_the_neutral_window(self):
+        # A real turn that ended one second into a thinking pause.
+        transcript = (
+            "I need to call to make sure we can get a bassinet for our resort "
+            "room Do you mind actually finding"
+        )
+        self.assertGreater(endpoint_decision(transcript).silence_ms, DEFAULT_SILENCE_MS)
 
     def test_windows_are_ordered(self):
         self.assertLess(MIN_SILENCE_MS, STATEMENT_SILENCE_MS)

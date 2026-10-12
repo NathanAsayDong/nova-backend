@@ -71,9 +71,10 @@ MIN_SILENCE_MS = _ms(600)
 # between complete sentences intending to continue — so a statement gets a
 # thinking-pause of grace that a question does not need.
 STATEMENT_SILENCE_MS = _ms(850)
-# Nothing either way — no transcript yet, or a plain unpunctuated clause.
+# Nothing either way — no transcript yet.
 DEFAULT_SILENCE_MS = _ms(1000)
-# Leaning unfinished: a particle, a comma, mid-number, a short fragment.
+# Leaning unfinished: a particle, a comma, mid-number, a short fragment, or a
+# clause Whisper did not close with punctuation.
 PENDING_SILENCE_MS = _ms(1400)
 # Obviously unfinished: hold the line.
 MAX_SILENCE_MS = _ms(2200)
@@ -215,7 +216,12 @@ def endpoint_decision(transcript: str | None) -> EndpointDecision:
     if len(words) <= 2:
         return EndpointDecision(PENDING_SILENCE_MS, "short_fragment")
 
-    return EndpointDecision(DEFAULT_SILENCE_MS, "unpunctuated_clause")
+    # Whisper punctuates what it hears as a finished sentence, so a clause it
+    # left open is evidence the speaker is mid-thought ("…do you mind
+    # actually finding"). That cut real requests off at the old 1s; the cost
+    # of the longer wait is a beat on the rarer finished command that Whisper
+    # also left unpunctuated.
+    return EndpointDecision(PENDING_SILENCE_MS, "unpunctuated_clause")
 
 
 def silence_budget_ms(transcript: str | None) -> int:
