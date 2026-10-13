@@ -32,3 +32,6 @@ project_files/
 
 # Mac code agent: local venv and secrets
 mac_agent/.venv/
+
+graph.json
+graphify-out/
