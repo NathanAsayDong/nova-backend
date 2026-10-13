@@ -128,38 +128,38 @@
   "scripts/migrations/001_update_delivery.sql": {
     "mtime": 1787091587.5132003,
     "seen": 1791902973.260179,
-    "ast_hash": "5bcdc45f217db9e41fe627473c7720e4",
-    "semantic_hash": "5bcdc45f217db9e41fe627473c7720e4"
+    "ast_hash": "",
+    "semantic_hash": ""
   },
   "scripts/migrations/002_update_conversation_uuid.sql": {
     "mtime": 1787091587.5133328,
     "seen": 1791902973.260179,
-    "ast_hash": "177a1867997bb0925240de9eec38260b",
-    "semantic_hash": "177a1867997bb0925240de9eec38260b"
+    "ast_hash": "",
+    "semantic_hash": ""
   },
   "scripts/migrations/003_conversation_sms_thread.sql": {
     "mtime": 1787091587.5134587,
     "seen": 1791902973.260179,
-    "ast_hash": "def296e05d1358b02d206c3defa2ebd8",
-    "semantic_hash": "def296e05d1358b02d206c3defa2ebd8"
+    "ast_hash": "",
+    "semantic_hash": ""
   },
   "scripts/migrations/004_meetings.sql": {
     "mtime": 1787093082.0756047,
     "seen": 1791902973.26018,
-    "ast_hash": "871de10cae50f592520dea25fb299f11",
-    "semantic_hash": "871de10cae50f592520dea25fb299f11"
+    "ast_hash": "",
+    "semantic_hash": ""
   },
   "scripts/migrations/005_coding_sessions.sql": {
     "mtime": 1788472982.8597472,
     "seen": 1791902973.26018,
-    "ast_hash": "0b4f7877b86ce8cc7ca1510d865be7c8",
-    "semantic_hash": "0b4f7877b86ce8cc7ca1510d865be7c8"
+    "ast_hash": "",
+    "semantic_hash": ""
   },
   "scripts/migrations/006_nova_sessions.sql": {
     "mtime": 1789059132.9735496,
     "seen": 1791902973.260181,
-    "ast_hash": "5076967c7c00bdb5944acc80c44215bb",
-    "semantic_hash": "5076967c7c00bdb5944acc80c44215bb"
+    "ast_hash": "",
+    "semantic_hash": ""
   },
   "scripts/register_coding_tools.py": {
     "mtime": 1789055170.9039774,
@@ -168,10 +168,10 @@
     "semantic_hash": "b6abc26deaf249a1bbb4b3e18b5733ba"
   },
   "scripts/register_project_tools.py": {
-    "mtime": 1791732870.5999937,
-    "seen": 1791902973.260182,
-    "ast_hash": "c41e2e445ff492611072eb5f7f6c7513",
-    "semantic_hash": "c41e2e445ff492611072eb5f7f6c7513"
+    "mtime": 1791903265.0594678,
+    "seen": 1791903303.062749,
+    "ast_hash": "08a94e3d13b42b2568eea7b0a166ea08",
+    "semantic_hash": ""
   },
   "scripts/run_migrations.py": {
     "mtime": 1787091587.513761,
@@ -182,8 +182,8 @@
   "scripts/sql/match_memory_chunks.sql": {
     "mtime": 1786068156.7959034,
     "seen": 1791902973.260182,
-    "ast_hash": "7ecd9cadda8c3e0bca682075f83a7712",
-    "semantic_hash": "7ecd9cadda8c3e0bca682075f83a7712"
+    "ast_hash": "",
+    "semantic_hash": ""
   },
   "scripts/verify_call_setup.py": {
     "mtime": 1787091587.5139253,
@@ -852,10 +852,10 @@
     "semantic_hash": "a2c274cb65ea3192b9e59b7d46a0aabb"
   },
   "worker.py": {
-    "mtime": 1787091587.4908028,
-    "seen": 1791496295.1605408,
-    "ast_hash": "dcb23edeb2f5be0e6dd6ab77597bad10",
-    "semantic_hash": "dcb23edeb2f5be0e6dd6ab77597bad10"
+    "mtime": 1791903384.874479,
+    "seen": 1791903388.1170251,
+    "ast_hash": "f2a8be5607e846ff4695c1bd27d41fda",
+    "semantic_hash": ""
   },
   "docs/HOSTING.md": {
     "mtime": 1791732883.9650264,
@@ -940,5 +940,41 @@
     "seen": 1791902973.260221,
     "ast_hash": "de4c3a6bc7c42af2defa7e78d700dff3",
     "semantic_hash": "de4c3a6bc7c42af2defa7e78d700dff3"
+  },
+  ".claude/settings.json": {
+    "mtime": 1791902957.6397617,
+    "seen": 1791903303.0624309,
+    "ast_hash": "1370c6bcc2f1b77992c4f19948974997",
+    "semantic_hash": ""
+  },
+  "src/dao/scheduled_task_dao.py": {
+    "mtime": 1791903295.2376597,
+    "seen": 1791903303.063179,
+    "ast_hash": "21b9c0b0f7de07f3174b9ab290bba4ea",
+    "semantic_hash": ""
+  },
+  "src/model/scheduled_task.py": {
+    "mtime": 1791903221.557628,
+    "seen": 1791903303.063445,
+    "ast_hash": "3169be7903320b61001982e8940354a5",
+    "semantic_hash": ""
+  },
+  "src/service/scheduled_task_service.py": {
+    "mtime": 1791903384.8741636,
+    "seen": 1791903388.1165829,
+    "ast_hash": "716aae3afef063dee4e1b47f39def906",
+    "semantic_hash": ""
+  },
+  "tests/test_scheduled_task_service.py": {
+    "mtime": 1791903384.874605,
+    "seen": 1791903388.116896,
+    "ast_hash": "8de2bd98100c76df5d56bdbbbec0c86d",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1791902957.639492,
+    "seen": 1791903303.06436,
+    "ast_hash": "82efb97a359f5c7290bf2513d14686be",
+    "semantic_hash": ""
   }
 }

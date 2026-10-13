@@ -5,6 +5,7 @@ Entry point for scheduled jobs that run outside the request path:
 
   * process_conversations - distills closed conversations into memory chunks
   * check_for_responsibilities - runs responsibilities that are due
+  * run_scheduled_tasks - runs one-time tasks whose run_at has arrived
   * deliver_pending_updates - emails or phones out updates flagged for it
 
 Register further jobs by appending a ScheduledJob to build_jobs().
@@ -53,10 +54,22 @@ def _run_check_for_responsibilities() -> None:
     ResponsibilityService().check_for_responsibilities()
 
 
+def _run_scheduled_tasks() -> None:
+    from src.service.scheduled_task_service import ScheduledTaskService
+
+    ScheduledTaskService().run_due_tasks()
+
+
 def _run_deliver_pending_updates() -> None:
     from src.service.update_delivery_service import UpdateDeliveryService
 
     UpdateDeliveryService().deliver_pending()
+
+
+def _recover_stuck_tasks() -> None:
+    from src.service.scheduled_task_service import ScheduledTaskService
+
+    ScheduledTaskService().recover_stuck_tasks()
 
 
 def build_jobs() -> list[ScheduledJob]:
@@ -74,6 +87,14 @@ def build_jobs() -> list[ScheduledJob]:
             interval_seconds=5 * 60,
             run=_run_check_for_responsibilities,
         ),
+        # One-time tasks carry an exact run_at, so this runs every minute to
+        # keep "remind me at 3:15" within a tick or two of 3:15. The tick is
+        # 30s, so a task starts at most ~a minute and a half late.
+        ScheduledJob(
+            name="run_scheduled_tasks",
+            interval_seconds=60,
+            run=_run_scheduled_tasks,
+        ),
         # Runs often because the latency the user feels is the gap between
         # "the agent finished" and "the phone rings". The service itself
         # decides what is actually due, caps how many calls one pass may
@@ -87,6 +108,13 @@ def build_jobs() -> list[ScheduledJob]:
 
 
 def run_worker() -> None:
+    # Before the first tick: anything still marked running was cut off by the
+    # previous worker dying, since this process hasn't started any work yet.
+    try:
+        _recover_stuck_tasks()
+    except Exception as exc:
+        print(f"Stuck-task recovery failed: {exc}", flush=True)
+
     jobs = build_jobs()
     # flush so logs appear promptly when stdout is redirected to a file.
     print(f"Nova worker online. Jobs: {[job.name for job in jobs]}", flush=True)

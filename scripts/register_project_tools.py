@@ -1678,9 +1678,124 @@ SIMPL_FINANCES_TOOLS: list[dict] = [
     },
 ]
 
+# Scheduled tasks: one-time background work the worker runs at an exact moment.
+SCHEDULED_TASK_TOOLS: list[dict] = [
+    {
+        "name": "get_current_time",
+        "description": (
+            "Get the current local date, time, weekday and UTC offset. Call this "
+            "before scheduling a task, so 'tomorrow at 3pm' or 'in 20 minutes' "
+            "can be turned into an exact run_at."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.scheduled_task_service.ScheduledTaskService.get_current_time",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "create_scheduled_task",
+        "description": (
+            "Schedule a ONE-TIME background task to run once at a specific "
+            "moment, without the user present — e.g. 'check the build at 3pm', "
+            "'remind me tomorrow morning'. For work that should repeat, use "
+            "create_responsibility instead. The description is the ONLY "
+            "instruction the agent receives when it runs later, so write it as "
+            "a complete, standalone brief — not a reminder note. Call "
+            "get_current_time first to work out run_at."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.scheduled_task_service.ScheduledTaskService.create_scheduled_task",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short name, e.g. 'Check staging build'.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Full standalone instructions for the agent to carry "
+                            "out unattended."
+                        ),
+                    },
+                    "run_at": {
+                        "type": "string",
+                        "description": (
+                            "When to run, as ISO-8601 with a UTC offset, e.g. "
+                            "2026-10-14T15:00:00-06:00. Must be in the future."
+                        ),
+                    },
+                    "project_id": {
+                        "type": "integer",
+                        "description": "Optional project this work belongs to.",
+                    },
+                    "report_type": _REPORT_TYPE_PROPERTY,
+                },
+                "required": ["name", "description", "run_at"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "list_scheduled_tasks",
+        "description": (
+            "List one-time scheduled tasks, soonest first. Shows only pending "
+            "tasks unless a status is given. Use this to find a task's id "
+            "before cancelling it, or to see whether one already ran."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.scheduled_task_service.ScheduledTaskService.list_scheduled_tasks",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending", "running", "done", "failed", "cancelled", "all",
+                        ],
+                        "description": "Which tasks to list. Defaults to pending.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "name": "cancel_scheduled_task",
+        "description": (
+            "Cancel a one-time scheduled task so it never runs. Only works on "
+            "pending tasks — one that is running or finished can't be cancelled. "
+            "Call list_scheduled_tasks first to find the id."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.scheduled_task_service.ScheduledTaskService.cancel_scheduled_task",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "integer",
+                        "description": "Id of the scheduled task to cancel.",
+                    },
+                },
+                "required": ["task_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 PROJECT_TOOLS = (
     PROJECT_TOOLS + CODE_TOOLS + COMMUNICATION_TOOLS + RESPONSIBILITY_TOOLS
-    + UPDATE_TOOLS + BACKGROUND_AGENT_TOOLS + SQL_TOOLS + SIMPL_FINANCES_TOOLS
+    + SCHEDULED_TASK_TOOLS + UPDATE_TOOLS + BACKGROUND_AGENT_TOOLS + SQL_TOOLS + SIMPL_FINANCES_TOOLS
 )
 
 # Superseded tools to remove from the tool table on every run. Registration
