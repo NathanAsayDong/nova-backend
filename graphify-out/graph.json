@@ -3711,7 +3711,7 @@
       "file_type": "code",
       "norm_label": "settingsservice",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L38"
+      "source_location": "L39"
     },
     {
       "id": "tests_test_settings_service_modellisttests",
@@ -5889,14 +5889,14 @@
       "source_location": "L18"
     },
     {
-      "id": "tests_test_claude_service_generationkwargstests_test_an_unknown_effort_falls_back_to_low",
-      "label": ".test_an_unknown_effort_falls_back_to_low()",
+      "id": "tests_test_claude_service_generationkwargstests_test_an_unknown_effort_falls_back_to_medium",
+      "label": ".test_an_unknown_effort_falls_back_to_medium()",
       "_callable": true,
       "_origin": "ast",
       "community": 11,
       "community_name": "ClaudeService",
       "file_type": "code",
-      "norm_label": ".test_an_unknown_effort_falls_back_to_low()",
+      "norm_label": ".test_an_unknown_effort_falls_back_to_medium()",
       "source_file": "tests/test_claude_service.py",
       "source_location": "L44"
     },
@@ -5925,14 +5925,14 @@
       "source_location": "L21"
     },
     {
-      "id": "tests_test_claude_service_generationkwargstests_test_opus_5_is_turned_down_to_low_effort",
-      "label": ".test_opus_5_is_turned_down_to_low_effort()",
+      "id": "tests_test_claude_service_generationkwargstests_test_opus_5_is_turned_down_to_medium_effort",
+      "label": ".test_opus_5_is_turned_down_to_medium_effort()",
       "_callable": true,
       "_origin": "ast",
       "community": 11,
       "community_name": "ClaudeService",
       "file_type": "code",
-      "norm_label": ".test_opus_5_is_turned_down_to_low_effort()",
+      "norm_label": ".test_opus_5_is_turned_down_to_medium_effort()",
       "source_file": "tests/test_claude_service.py",
       "source_location": "L26"
     },
@@ -6846,7 +6846,7 @@
       "file_type": "code",
       "norm_label": "._fetch_models()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L118"
+      "source_location": "L119"
     },
     {
       "id": "tests_test_settings_service_modellisttests_test_a_model_with_no_display_name_still_renders",
@@ -8598,7 +8598,7 @@
       "file_type": "code",
       "norm_label": ".get_all_settings()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L205"
+      "source_location": "L206"
     },
     {
       "id": "tests_test_code_service_codeservicetestcase_setup",
@@ -9114,7 +9114,7 @@
       "file_type": "code",
       "norm_label": ".available_models()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L62"
+      "source_location": "L63"
     },
     {
       "id": "src_service_settings_service_settingsservice_display_name_for",
@@ -9126,7 +9126,7 @@
       "file_type": "code",
       "norm_label": ".display_name_for()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L192"
+      "source_location": "L193"
     },
     {
       "id": "src_service_settings_service_settingsservice_get_available_models",
@@ -9138,7 +9138,7 @@
       "file_type": "code",
       "norm_label": ".get_available_models()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L71"
+      "source_location": "L72"
     },
     {
       "id": "src_service_settings_service_settingsservice_get_model_options",
@@ -9150,7 +9150,7 @@
       "file_type": "code",
       "norm_label": ".get_model_options()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L82"
+      "source_location": "L83"
     },
     {
       "id": "src_service_settings_service_settingsservice_resolve_model",
@@ -9162,7 +9162,7 @@
       "file_type": "code",
       "norm_label": ".resolve_model()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L178"
+      "source_location": "L179"
     },
     {
       "id": "tests_test_settings_service_currentmodeltests_test_an_unknown_model_resolves_to_nothing",
@@ -10086,7 +10086,7 @@
       "file_type": "code",
       "norm_label": ".get_current_model()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L150"
+      "source_location": "L151"
     },
     {
       "id": "src_service_settings_service_settingsservice_set_current_model",
@@ -10098,7 +10098,7 @@
       "file_type": "code",
       "norm_label": ".set_current_model()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L159"
+      "source_location": "L160"
     },
     {
       "id": "tests_test_settings_service_currentmodeltests_test_a_model_the_account_cannot_use_is_refused",
@@ -23970,7 +23970,7 @@
       "file_type": "code",
       "norm_label": ".__init__()",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L54"
+      "source_location": "L55"
     },
     {
       "id": "tests_test_settings_service_modellisttests_test_a_failed_fetch_falls_back_rather_than_returning_nothing",
@@ -26809,7 +26809,7 @@
       "source_location": "L79"
     },
     {
-      "id": "src_service_settings_service_rationale_119",
+      "id": "src_service_settings_service_rationale_120",
       "label": "One call to the Models API, returning [] on any failure. The client is built\u2026",
       "_origin": "ast",
       "community": 118,
@@ -26817,7 +26817,7 @@
       "file_type": "rationale",
       "norm_label": "one call to the models api, returning [] on any failure. the client is built...",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L119"
+      "source_location": "L120"
     },
     {
       "id": "tests_test_settings_service_rationale_162",
@@ -27425,7 +27425,7 @@
       "source_location": ""
     },
     {
-      "id": "src_service_settings_service_rationale_206",
+      "id": "src_service_settings_service_rationale_207",
       "label": "Get all current settings.",
       "_origin": "ast",
       "community": 134,
@@ -27433,7 +27433,7 @@
       "file_type": "rationale",
       "norm_label": "get all current settings.",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L206"
+      "source_location": "L207"
     },
     {
       "id": "src_service_code_service",
@@ -27645,7 +27645,7 @@
       "source_location": "L210"
     },
     {
-      "id": "src_service_settings_service_rationale_179",
+      "id": "src_service_settings_service_rationale_180",
       "label": "The listed id `model` refers to, or None if the account has no such model. An\u2026",
       "_origin": "ast",
       "community": 144,
@@ -27653,10 +27653,10 @@
       "file_type": "rationale",
       "norm_label": "the listed id `model` refers to, or none if the account has no such model. an...",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L179"
+      "source_location": "L180"
     },
     {
-      "id": "src_service_settings_service_rationale_193",
+      "id": "src_service_settings_service_rationale_194",
       "label": "The name to show for a model id, falling back to the id itself. Used for the\u2026",
       "_origin": "ast",
       "community": 144,
@@ -27664,10 +27664,10 @@
       "file_type": "rationale",
       "norm_label": "the name to show for a model id, falling back to the id itself. used for the...",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L193"
+      "source_location": "L194"
     },
     {
-      "id": "src_service_settings_service_rationale_63",
+      "id": "src_service_settings_service_rationale_64",
       "label": "Kept as a property so existing readers of `.available_models` still work. It\u2026",
       "_origin": "ast",
       "community": 144,
@@ -27675,10 +27675,10 @@
       "file_type": "rationale",
       "norm_label": "kept as a property so existing readers of `.available_models` still work. it...",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L63"
+      "source_location": "L64"
     },
     {
-      "id": "src_service_settings_service_rationale_72",
+      "id": "src_service_settings_service_rationale_73",
       "label": "Model ids this account can actually use, newest first. Ids only, because this\u2026",
       "_origin": "ast",
       "community": 144,
@@ -27686,10 +27686,10 @@
       "file_type": "rationale",
       "norm_label": "model ids this account can actually use, newest first. ids only, because this...",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L72"
+      "source_location": "L73"
     },
     {
-      "id": "src_service_settings_service_rationale_83",
+      "id": "src_service_settings_service_rationale_84",
       "label": "Models as {id, display_name}, newest first \u2014 what a picker renders. The display\u2026",
       "_origin": "ast",
       "community": 144,
@@ -27697,7 +27697,7 @@
       "file_type": "rationale",
       "norm_label": "models as {id, display_name}, newest first \u2014 what a picker renders. the display...",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L83"
+      "source_location": "L84"
     },
     {
       "id": "tests_test_conversation_loop_rationale_749",
@@ -27876,7 +27876,7 @@
       "source_location": "L185"
     },
     {
-      "id": "src_service_settings_service_rationale_151",
+      "id": "src_service_settings_service_rationale_152",
       "label": "The currently selected model. Reads stored state only \u2014 no API call.\u2026",
       "_origin": "ast",
       "community": 16,
@@ -27884,10 +27884,10 @@
       "file_type": "rationale",
       "norm_label": "the currently selected model. reads stored state only \u2014 no api call....",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L151"
+      "source_location": "L152"
     },
     {
-      "id": "src_service_settings_service_rationale_160",
+      "id": "src_service_settings_service_rationale_161",
       "label": "Set the current model. Returns False for a model the account cannot use, so a\u2026",
       "_origin": "ast",
       "community": 16,
@@ -27895,7 +27895,7 @@
       "file_type": "rationale",
       "norm_label": "set the current model. returns false for a model the account cannot use, so a...",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L160"
+      "source_location": "L161"
     },
     {
       "id": "tests_test_settings_service_rationale_168",
@@ -34538,7 +34538,7 @@
       "source_location": "L491"
     },
     {
-      "id": "src_service_settings_service_rationale_39",
+      "id": "src_service_settings_service_rationale_40",
       "label": "Manages Nova user settings and preferences.",
       "_origin": "ast",
       "community": 86,
@@ -34546,10 +34546,10 @@
       "file_type": "rationale",
       "norm_label": "manages nova user settings and preferences.",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L39"
+      "source_location": "L40"
     },
     {
-      "id": "src_service_settings_service_rationale_55",
+      "id": "src_service_settings_service_rationale_56",
       "label": "Initialize settings service with default values.",
       "_origin": "ast",
       "community": 86,
@@ -34557,7 +34557,7 @@
       "file_type": "rationale",
       "norm_label": "initialize settings service with default values.",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L55"
+      "source_location": "L56"
     },
     {
       "id": "tests_test_settings_service_rationale_102",
@@ -45568,7 +45568,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L69",
+      "source_location": "L70",
       "weight": 1.0
     },
     {
@@ -45580,7 +45580,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L199",
+      "source_location": "L200",
       "weight": 1.0
     },
     {
@@ -45592,7 +45592,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L200",
+      "source_location": "L201",
       "weight": 1.0
     },
     {
@@ -45604,7 +45604,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L80",
+      "source_location": "L81",
       "weight": 1.0
     },
     {
@@ -45616,7 +45616,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L104",
+      "source_location": "L105",
       "weight": 1.0
     },
     {
@@ -45628,7 +45628,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L187",
+      "source_location": "L188",
       "weight": 1.0
     },
     {
@@ -45640,7 +45640,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L173",
+      "source_location": "L174",
       "weight": 1.0
     },
     {
@@ -47636,7 +47636,7 @@
       "weight": 1.0
     },
     {
-      "source": "tests_test_claude_service_generationkwargstests_test_an_unknown_effort_falls_back_to_low",
+      "source": "tests_test_claude_service_generationkwargstests_test_an_unknown_effort_falls_back_to_medium",
       "target": "src_service_claude_service_claudeservice",
       "relation": "calls",
       "_origin": "ast",
@@ -63244,7 +63244,7 @@
       "confidence_score": 1.0,
       "context": "generic_arg",
       "source_file": "src/service/settings_service.py",
-      "source_location": "L205",
+      "source_location": "L206",
       "weight": 1.0
     },
     {
@@ -84134,7 +84134,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L38",
+      "source_location": "L39",
       "weight": 1.0
     },
     {
@@ -93473,7 +93473,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L118",
+      "source_location": "L119",
       "weight": 1.0
     },
     {
@@ -93484,7 +93484,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L150",
+      "source_location": "L151",
       "weight": 1.0
     },
     {
@@ -93495,7 +93495,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L159",
+      "source_location": "L160",
       "weight": 1.0
     },
     {
@@ -93506,7 +93506,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L178",
+      "source_location": "L179",
       "weight": 1.0
     },
     {
@@ -93517,7 +93517,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L192",
+      "source_location": "L193",
       "weight": 1.0
     },
     {
@@ -93528,7 +93528,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L205",
+      "source_location": "L206",
       "weight": 1.0
     },
     {
@@ -93539,7 +93539,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L54",
+      "source_location": "L55",
       "weight": 1.0
     },
     {
@@ -93550,7 +93550,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L62",
+      "source_location": "L63",
       "weight": 1.0
     },
     {
@@ -93561,7 +93561,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L71",
+      "source_location": "L72",
       "weight": 1.0
     },
     {
@@ -93572,7 +93572,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L82",
+      "source_location": "L83",
       "weight": 1.0
     },
     {
@@ -95535,7 +95535,7 @@
     },
     {
       "source": "tests_test_claude_service_generationkwargstests",
-      "target": "tests_test_claude_service_generationkwargstests_test_opus_5_is_turned_down_to_low_effort",
+      "target": "tests_test_claude_service_generationkwargstests_test_opus_5_is_turned_down_to_medium_effort",
       "relation": "method",
       "_origin": "ast",
       "confidence": "EXTRACTED",
@@ -95568,7 +95568,7 @@
     },
     {
       "source": "tests_test_claude_service_generationkwargstests",
-      "target": "tests_test_claude_service_generationkwargstests_test_an_unknown_effort_falls_back_to_low",
+      "target": "tests_test_claude_service_generationkwargstests_test_an_unknown_effort_falls_back_to_medium",
       "relation": "method",
       "_origin": "ast",
       "confidence": "EXTRACTED",
@@ -108965,124 +108965,124 @@
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_119",
+      "source": "src_service_settings_service_rationale_120",
       "target": "src_service_settings_service_settingsservice_fetch_models",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L119",
+      "source_location": "L120",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_151",
+      "source": "src_service_settings_service_rationale_152",
       "target": "src_service_settings_service_settingsservice_get_current_model",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L151",
+      "source_location": "L152",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_160",
+      "source": "src_service_settings_service_rationale_161",
       "target": "src_service_settings_service_settingsservice_set_current_model",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L160",
+      "source_location": "L161",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_179",
+      "source": "src_service_settings_service_rationale_180",
       "target": "src_service_settings_service_settingsservice_resolve_model",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L179",
+      "source_location": "L180",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_193",
+      "source": "src_service_settings_service_rationale_194",
       "target": "src_service_settings_service_settingsservice_display_name_for",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L193",
+      "source_location": "L194",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_206",
+      "source": "src_service_settings_service_rationale_207",
       "target": "src_service_settings_service_settingsservice_get_all_settings",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L206",
+      "source_location": "L207",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_39",
+      "source": "src_service_settings_service_rationale_40",
       "target": "src_service_settings_service_settingsservice",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L39",
+      "source_location": "L40",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_55",
+      "source": "src_service_settings_service_rationale_56",
       "target": "src_service_settings_service_settingsservice_init",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L55",
+      "source_location": "L56",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_63",
+      "source": "src_service_settings_service_rationale_64",
       "target": "src_service_settings_service_settingsservice_available_models",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L63",
+      "source_location": "L64",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_72",
+      "source": "src_service_settings_service_rationale_73",
       "target": "src_service_settings_service_settingsservice_get_available_models",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L72",
+      "source_location": "L73",
       "weight": 1.0
     },
     {
-      "source": "src_service_settings_service_rationale_83",
+      "source": "src_service_settings_service_rationale_84",
       "target": "src_service_settings_service_settingsservice_get_model_options",
       "relation": "rationale_for",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "src/service/settings_service.py",
-      "source_location": "L83",
+      "source_location": "L84",
       "weight": 1.0
     },
     {
@@ -113981,7 +113981,7 @@
       "weight": 1.0
     },
     {
-      "source": "tests_test_claude_service_generationkwargstests_test_opus_5_is_turned_down_to_low_effort",
+      "source": "tests_test_claude_service_generationkwargstests_test_opus_5_is_turned_down_to_medium_effort",
       "target": "src_service_claude_service_claudeservice_generation_kwargs",
       "relation": "calls",
       "_origin": "ast",
@@ -119879,5 +119879,5 @@
       "source_file": "prompting/nova_persona_prompt.md"
     }
   ],
-  "built_at_commit": "5e2e415a4254fa127729df0628351159d1e715ed"
+  "built_at_commit": "54b46777f31dfa3237ad2a0ce825e640cf492b1a"
 }

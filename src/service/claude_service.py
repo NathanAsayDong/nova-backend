@@ -156,13 +156,13 @@ class ClaudeService:
         self.max_tokens = int(os.getenv("CLAUDE_MAX_TOKENS", "8192"))
         # How hard the model thinks before it writes. Nova's replies are
         # spoken, and the first word cannot go out until thinking ends, so the
-        # default is the low end — a conversational turn does not need the
-        # deliberation a coding task does. Only sent to models that take it.
+        # default is the middle — a conversational turn does not need the
+        # deliberation a coding task does, but low undersold it. Only sent to models that take it.
         # Namespaced because a bare CLAUDE_EFFORT is set by other tooling.
-        self.effort = (os.getenv("NOVA_CLAUDE_EFFORT") or "low").strip().lower()
+        self.effort = (os.getenv("NOVA_CLAUDE_EFFORT") or "medium").strip().lower()
         if self.effort not in _EFFORT_LEVELS:
-            print(f"Unknown NOVA_CLAUDE_EFFORT {self.effort!r}; using 'low'.")
-            self.effort = "low"
+            print(f"Unknown NOVA_CLAUDE_EFFORT {self.effort!r}; using 'medium'.")
+            self.effort = "medium"
         self.web_search_enabled = _env_flag("CLAUDE_WEB_SEARCH_ENABLED", True)
         self.web_search_max_uses = int(os.getenv("CLAUDE_WEB_SEARCH_MAX_USES", "5"))
 

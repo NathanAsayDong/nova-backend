@@ -30,6 +30,7 @@ _MODELS_TTL_SECONDS = 3600
 # an online one.
 _FALLBACK_MODELS = [
     {"id": "claude-opus-5", "display_name": "Claude Opus 5"},
+    {"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5"},
     {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5"},
     {"id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5"},
 ]
@@ -53,7 +54,7 @@ class SettingsService:
 
     def __init__(self):
         """Initialize settings service with default values."""
-        self.default_model = os.getenv("DEFAULT_CLAUDE_MODEL", "claude-haiku-4-5")
+        self.default_model = os.getenv("DEFAULT_CLAUDE_MODEL", "claude-sonnet-5-5")
         self._settings.setdefault("current_model", self.default_model)
 
     # ---------- the model list ----------

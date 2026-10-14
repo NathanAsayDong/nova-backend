@@ -23,27 +23,27 @@ class GenerationKwargsTests(unittest.TestCase):
 
         self.assertEqual(self.service._generation_kwargs(), {})
 
-    def test_opus_5_is_turned_down_to_low_effort(self):
+    def test_opus_5_is_turned_down_to_medium_effort(self):
         self.service.MODEL = "claude-opus-5"
 
         self.assertEqual(
-            self.service._generation_kwargs(), {"output_config": {"effort": "low"}}
+            self.service._generation_kwargs(), {"output_config": {"effort": "medium"}}
         )
 
     def test_sonnet_5_is_turned_down_too(self):
         self.service.MODEL = "claude-sonnet-5"
 
         self.assertEqual(
-            self.service._generation_kwargs(), {"output_config": {"effort": "low"}}
+            self.service._generation_kwargs(), {"output_config": {"effort": "medium"}}
         )
 
     def test_effort_is_configurable(self):
-        with patch.dict(os.environ, {"NOVA_CLAUDE_EFFORT": "medium"}):
-            self.assertEqual(ClaudeService().effort, "medium")
+        with patch.dict(os.environ, {"NOVA_CLAUDE_EFFORT": "high"}):
+            self.assertEqual(ClaudeService().effort, "high")
 
-    def test_an_unknown_effort_falls_back_to_low(self):
+    def test_an_unknown_effort_falls_back_to_medium(self):
         with patch.dict(os.environ, {"NOVA_CLAUDE_EFFORT": "turbo"}):
-            self.assertEqual(ClaudeService().effort, "low")
+            self.assertEqual(ClaudeService().effort, "medium")
 
     def test_the_output_ceiling_leaves_room_for_thinking(self):
         with patch.dict(os.environ, {}, clear=False):

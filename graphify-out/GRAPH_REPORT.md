@@ -1,7 +1,7 @@
-# Graph Report - nova-backend  (2026-10-13)
+# Graph Report - nova-backend  (2026-10-14)
 
 ## Corpus Check
-- 159 files · ~120,948 words
+- 159 files · ~120,957 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 5 file(s) not represented in the graph (top: (none) 2, .mdc 1, .example 1)
 
@@ -11,7 +11,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `5e2e415a`
+- Built from commit: `54b46777`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -564,6 +564,6 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `agent_loop.py` be split into smaller, more focused modules?**
   _Cohesion score 0.11184939091915837 - nodes in this community are weakly interconnected._
 - **Why does `ClaudeService` connect `ClaudeService` to `agent_loop.py`, `AgentLoop`, `Message`, `.resolve_model`, `CurrentModelTests`, `MemoryChunkService`, `settings_controller.py`, `SettingsService`, `MeetingService`, `meeting_service.py`?**
-  _High betweenness centrality (0.067) - this node is a cross-community bridge._
+  _High betweenness centrality (0.066) - this node is a cross-community bridge._
 - **Are the 17 inferred relationships involving `Conversation` (e.g. with `_is_stale()` and `ConversationDao`) actually correct?**
   _`Conversation` has 17 INFERRED edges - model-reasoned connections that need verification._

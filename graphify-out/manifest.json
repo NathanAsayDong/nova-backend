@@ -510,10 +510,10 @@
     "semantic_hash": "bce64628938fb1628469918c0d268a9f"
   },
   "src/service/claude_service.py": {
-    "mtime": 1791842988.4562976,
-    "seen": 1791902973.2602081,
-    "ast_hash": "64f6ad9ed9157f79de331bfcd09d7a36",
-    "semantic_hash": "64f6ad9ed9157f79de331bfcd09d7a36"
+    "mtime": 1791997818.7068636,
+    "seen": 1791997822.242871,
+    "ast_hash": "561512699270b98443783a6bd221af0a",
+    "semantic_hash": ""
   },
   "src/service/code_service.py": {
     "mtime": 1786207925.5610137,
@@ -624,10 +624,10 @@
     "semantic_hash": "4753c9e1eb14c3e73a801147d8e676a0"
   },
   "src/service/settings_service.py": {
-    "mtime": 1789056670.6589596,
-    "seen": 1791496295.160527,
-    "ast_hash": "6d9e2b1bf32420da5978b4fe930c053a",
-    "semantic_hash": "6d9e2b1bf32420da5978b4fe930c053a"
+    "mtime": 1791997711.14548,
+    "seen": 1791997822.243113,
+    "ast_hash": "f5a59be5504abcc70f2f723d4435f1c2",
+    "semantic_hash": ""
   },
   "src/service/simple_finances_service.py": {
     "mtime": 1787091587.5160713,
@@ -696,10 +696,10 @@
     "semantic_hash": "aac29a19c0217b4b059e420d60682914"
   },
   "tests/test_claude_service.py": {
-    "mtime": 1789074735.3202555,
-    "seen": 1791496295.160531,
-    "ast_hash": "a002ccecc06572c31cfe2b73df24cbdf",
-    "semantic_hash": "a002ccecc06572c31cfe2b73df24cbdf"
+    "mtime": 1791997818.7074687,
+    "seen": 1791997822.243253,
+    "ast_hash": "2791367db6f09e4929a9fc78f39cfedf",
+    "semantic_hash": ""
   },
   "tests/test_code_service.py": {
     "mtime": 1786206040.0603964,
