@@ -3,24 +3,15 @@ import XCTest
 @testable import NovaGlasses
 
 final class AudioSessionPolicyTests: XCTestCase {
-    func testGlassesRunWithoutCallProcessing() {
-        let policy = AudioSessionPolicy.forInput(onGlasses: true)
-        XCTAssertEqual(policy.mode, .default)
-        XCTAssertFalse(policy.voiceProcessing)
+    func testVoiceKeepsTheStableCallSetup() {
+        XCTAssertEqual(AudioSessionPolicy.voice.mode, .voiceChat)
+        XCTAssertTrue(AudioSessionPolicy.voice.voiceProcessing)
     }
 
-    func testPhoneMicKeepsEchoCancellation() {
-        let policy = AudioSessionPolicy.forInput(onGlasses: false)
-        XCTAssertEqual(policy.mode, .voiceChat)
-        XCTAssertTrue(policy.voiceProcessing)
-    }
-
-    func testSessionMixesAndDucksOnlyWhileSpeaking() {
-        let quiet = AudioSessionPolicy.options(ducking: false)
-        XCTAssertTrue(quiet.contains(.mixWithOthers))
-        XCTAssertTrue(quiet.contains(.allowBluetooth))
-        XCTAssertFalse(quiet.contains(.duckOthers))
-        XCTAssertTrue(AudioSessionPolicy.options(ducking: true).contains(.duckOthers))
+    func testSessionMixesWithOtherAudio() {
+        XCTAssertTrue(AudioSessionPolicy.options.contains(.mixWithOthers))
+        XCTAssertTrue(AudioSessionPolicy.options.contains(.allowBluetooth))
+        XCTAssertFalse(AudioSessionPolicy.options.contains(.duckOthers))
     }
 }
 

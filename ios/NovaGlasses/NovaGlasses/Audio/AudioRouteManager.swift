@@ -35,8 +35,7 @@ final class AudioRouteManager {
     private(set) var route = Route(inputName: "—", outputName: "—", isBluetooth: false, sampleRate: 0)
     /// What the session is set up for right now. The engine reads
     /// `voiceProcessing` from it when it (re)starts.
-    private(set) var policy = AudioSessionPolicy.forInput(onGlasses: false)
-    private var ducking = false
+    private(set) var policy = AudioSessionPolicy.voice
     private var isActive = false
     private let session = AVAudioSession.sharedInstance()
     private let log = AudioLog.shared
@@ -84,9 +83,7 @@ final class AudioRouteManager {
 
     /// Configure and activate the session for two-way voice over the glasses.
     func activate() throws {
-        policy = AudioSessionPolicy.forInput(onGlasses: hasGlassesInput)
-        ducking = false
-        try session.setCategory(.playAndRecord, mode: policy.mode, options: AudioSessionPolicy.options(ducking: false))
+        try session.setCategory(.playAndRecord, mode: policy.mode, options: AudioSessionPolicy.options)
         // HFP wideband is 16 kHz; ask for it and take what the headset gives.
         try? session.setPreferredSampleRate(PCMFormat.sampleRate)
         try? session.setPreferredIOBufferDuration(0.02)
@@ -102,35 +99,6 @@ final class AudioRouteManager {
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
         refreshRoute()
         log.add("Session inactive")
-    }
-
-    /// Duck other apps' audio while Nova speaks, and let it back up after.
-    func setDucking(_ on: Bool) {
-        guard isActive, on != ducking else { return }
-        do {
-            try session.setCategory(.playAndRecord, mode: policy.mode, options: AudioSessionPolicy.options(ducking: on))
-            ducking = on
-        } catch {
-            log.add("Ducking \(on ? "on" : "off") failed: \(error.localizedDescription)")
-        }
-    }
-
-    private var hasGlassesInput: Bool {
-        session.availableInputs?.contains(where: { $0.portType == .bluetoothHFP }) ?? false
-    }
-
-    /// Re-pick the mode when the microphone in use changes between the
-    /// glasses and the phone.
-    private func applyPolicyForRoute() {
-        let wanted = AudioSessionPolicy.forInput(onGlasses: route.isBluetooth)
-        guard isActive, wanted != policy else { return }
-        do {
-            try session.setMode(wanted.mode)
-            policy = wanted
-            log.add("Mode \(wanted.mode.rawValue), voice processing \(wanted.voiceProcessing ? "on" : "off")")
-        } catch {
-            log.add("Mode change failed: \(error.localizedDescription)")
-        }
     }
 
     /// Pick the glasses' microphone over the phone's when both are present.
@@ -149,7 +117,6 @@ final class AudioRouteManager {
         refreshRoute()
         if route != previous {
             log.add("Route \(reasonName(reason)): \(route.summary)")
-            applyPolicyForRoute()
             onRouteChange?(route)
         }
     }

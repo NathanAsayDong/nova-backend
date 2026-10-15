@@ -36,17 +36,12 @@ final class SpeechPlayer: SpeechPlaying {
     private var generation = 0
     private var watchdog = PlaybackWatchdog()
     private var watchdogTask: Task<Void, Never>?
-    private var wasBusy = false
-
-    /// Called with true when Nova starts making sound and false when it stops.
-    var onActivity: ((Bool) -> Void)?
 
     var isBusy: Bool { !streams.isEmpty || !inFlight.isEmpty || !held.isEmpty }
 
     func beginStream(_ streamId: String) {
         guard !streams.contains(where: { $0.id == streamId }) else { return }
         streams.append(Stream(id: streamId))
-        activityChanged()
     }
 
     func appendChunk(_ streamId: String, data: Data) {
@@ -77,7 +72,6 @@ final class SpeechPlayer: SpeechPlaying {
         if node.engine?.isRunning == true {
             node.play()
         }
-        activityChanged()
     }
 
     /// The engine stopped and started again (route change, interruption,
@@ -143,18 +137,10 @@ final class SpeechPlayer: SpeechPlaying {
     }
 
     private func checkDrained() {
-        activityChanged()
         if !isBusy {
             watchdogTask?.cancel()
             watchdogTask = nil
             onDrained?()
-        }
-    }
-
-    private func activityChanged() {
-        if isBusy != wasBusy {
-            wasBusy = isBusy
-            onActivity?(isBusy)
         }
     }
 

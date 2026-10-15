@@ -1,32 +1,22 @@
 @preconcurrency import AVFoundation
 
-/// How the audio session should be set up for the microphone in use.
+/// How the audio session is set up for two-way voice.
 ///
-/// `.voiceChat` plus voice processing is iOS's VoIP-call configuration: it
-/// plays at the separate call volume, applies automatic gain, ducks other apps
-/// hard, and makes Nova feel like a phone call. The glasses already beamform
-/// and handle echo themselves, so on them the session runs in `.default` mode
-/// with voice processing off. Only the phone's own mic and speaker, which sit
-/// next to each other, still need echo cancellation.
+/// Always `.voiceChat` with voice processing. The glasses' microphone is
+/// Bluetooth HFP, which is a phone-call link whatever the app's mode, and
+/// `.default` mode made iOS move the microphone back to the phone and the
+/// output to the earpiece (seen on device as a route that flapped several
+/// times a second). What can be fixed is how Nova sits with other audio.
 struct AudioSessionPolicy: Equatable {
     var mode: AVAudioSession.Mode
     var voiceProcessing: Bool
 
-    static func forInput(onGlasses: Bool) -> AudioSessionPolicy {
-        onGlasses
-            ? AudioSessionPolicy(mode: .default, voiceProcessing: false)
-            : AudioSessionPolicy(mode: .voiceChat, voiceProcessing: true)
-    }
+    static let voice = AudioSessionPolicy(mode: .voiceChat, voiceProcessing: true)
 
     /// Mixable, so other apps neither interrupt Nova nor get stopped by it.
-    /// Other audio is ducked only while Nova is actually speaking.
-    static func options(ducking: Bool) -> AVAudioSession.CategoryOptions {
-        // `.allowBluetooth` is the HFP option (renamed `.allowBluetoothHFP`
-        // in the iOS 26 SDK).
-        var options: AVAudioSession.CategoryOptions = [.allowBluetooth, .defaultToSpeaker, .mixWithOthers]
-        if ducking {
-            options.insert(.duckOthers)
-        }
-        return options
-    }
+    /// Not ducked: changing the category options mid-session re-routes the
+    /// audio, which is what made the glasses route flap.
+    // `.allowBluetooth` is the HFP option (renamed `.allowBluetoothHFP` in
+    // the iOS 26 SDK).
+    static let options: AVAudioSession.CategoryOptions = [.allowBluetooth, .defaultToSpeaker, .mixWithOthers]
 }

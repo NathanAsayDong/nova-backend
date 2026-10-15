@@ -52,7 +52,12 @@ final class DATGlassesCamera: GlassesCamera {
     @ObservationIgnored private var photoWaiter: CheckedContinuation<Data, Error>?
     @ObservationIgnored private var startTask: Task<Void, Error>?
     @ObservationIgnored private var coolTask: Task<Void, Never>?
-    @ObservationIgnored private var cameraPermitted = false
+    /// nil: not known yet, because the glasses were not connected when we
+    /// asked. Checked again when they connect, and before a photo.
+    @ObservationIgnored private var cameraPermitted: Bool?
+    @ObservationIgnored private var registered = false
+    /// Link-state listeners, one per glasses the toolkit knows about.
+    @ObservationIgnored private var linkWatches: [DeviceIdentifier: any AnyListenerToken] = [:]
 
     init() {
         do {
@@ -62,6 +67,11 @@ final class DATGlassesCamera: GlassesCamera {
             Task { @MainActor [weak self] in
                 for await registration in wearables.registrationStateStream() {
                     await self?.registrationChanged(registration)
+                }
+            }
+            Task { @MainActor [weak self] in
+                for await devices in wearables.devicesStream() {
+                    await self?.devicesChanged(devices)
                 }
             }
         } catch {
@@ -104,27 +114,63 @@ final class DATGlassesCamera: GlassesCamera {
     }
 
     private func registrationChanged(_ registration: RegistrationState) async {
-        AudioLog.shared.add("Glasses registration: \(registration)")
+        AudioLog.shared.add("Glasses registration: \(registration == .registered ? "registered" : "\(registration)")")
         switch registration {
         case .registered:
-            do {
-                let status = try await wearables?.checkPermissionStatus(.camera)
-                cameraPermitted = status == .granted
-                if !cameraPermitted {
-                    try await requestCameraPermission()
-                }
-            } catch {
-                AudioLog.shared.add("Camera permission check failed: \(error.localizedDescription)")
-            }
-            if session == nil {
-                state = cameraPermitted ? .ready : .unregistered
-            }
+            registered = true
+            await refreshPermission()
         case .registering:
             state = .registering
         default:
-            cameraPermitted = false
+            registered = false
+            cameraPermitted = nil
             tearDown()
             state = .unregistered
+        }
+    }
+
+    /// The toolkit lists the glasses before its link to them is up, and a
+    /// permission check before then fails. Watch each one's link and check
+    /// once it connects.
+    private func devicesChanged(_ devices: [DeviceIdentifier]) async {
+        guard let wearables else { return }
+        for id in devices where linkWatches[id] == nil {
+            guard let device = wearables.deviceForIdentifier(id) else { continue }
+            AudioLog.shared.add("Glasses \(device.nameOrId()): link \(device.linkState)")
+            linkWatches[id] = device.addLinkStateListener { [weak self] link in
+                Task { @MainActor in await self?.linkChanged(link) }
+            }
+            if device.linkState == .connected {
+                await linkChanged(.connected)
+            }
+        }
+    }
+
+    private func linkChanged(_ link: LinkState) async {
+        AudioLog.shared.add("Glasses link: \(link)")
+        if link == .connected, registered, cameraPermitted != true {
+            await refreshPermission()
+        }
+    }
+
+    /// Ask the toolkit whether the camera is allowed. Only a definite answer
+    /// changes anything: a check that fails because the glasses are not
+    /// connected yet leaves the camera usable, to be checked again later.
+    private func refreshPermission() async {
+        guard let wearables else { return }
+        do {
+            let status = try await wearables.checkPermissionStatus(.camera)
+            AudioLog.shared.add("Glasses camera permission: \(status)")
+            switch status {
+            case .granted: cameraPermitted = true
+            case .denied: cameraPermitted = false
+            default: break
+            }
+        } catch {
+            AudioLog.shared.add("Camera permission check deferred: \(error.localizedDescription)")
+        }
+        if session == nil {
+            state = registered && cameraPermitted != false ? .ready : .unregistered
         }
     }
 
@@ -133,7 +179,7 @@ final class DATGlassesCamera: GlassesCamera {
         state = .registering
         let status = try await wearables.requestPermission(.camera)
         cameraPermitted = status == .granted
-        state = cameraPermitted ? .ready : .unregistered
+        state = status == .granted ? .ready : .unregistered
         AudioLog.shared.add("Glasses camera permission: \(status)")
     }
 
@@ -165,6 +211,10 @@ final class DATGlassesCamera: GlassesCamera {
         if state == .streaming, camera != nil { return }
         guard state.canCapture else { throw CameraError.notReady(state) }
         guard audioReady() else { throw CameraError.glassesAudioNotUp }
+        if cameraPermitted != true {
+            await refreshPermission()
+            guard cameraPermitted != false else { throw CameraError.notReady(state) }
+        }
         if let startTask {
             return try await startTask.value
         }
@@ -276,7 +326,7 @@ final class DATGlassesCamera: GlassesCamera {
         session = nil
         latestFrame = nil
         if state == .streaming {
-            state = cameraPermitted ? .ready : .unregistered
+            state = registered && cameraPermitted != false ? .ready : .unregistered
         }
     }
 }

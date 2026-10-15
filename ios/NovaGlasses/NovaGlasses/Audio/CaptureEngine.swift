@@ -15,8 +15,8 @@ final class CaptureEngine {
     /// (monotonic). Delivered on the main actor, in order.
     var onFrame: (@MainActor (Data, Double) -> Void)?
 
-    /// Echo cancellation and call-style processing on the input. Set from
-    /// `AudioSessionPolicy` before `start()`; it only takes effect on a start.
+    /// Echo cancellation on the input (`AudioSessionPolicy.voice`). Only
+    /// takes effect on a start.
     var voiceProcessing = true
     /// The engine came back up after something stopped it under us. Audio
     /// scheduled on the player nodes before that is gone and must be replayed.
@@ -57,9 +57,7 @@ final class CaptureEngine {
     func start() throws {
         guard !isRunning else { return }
         let input = engine.inputNode
-        // Echo cancellation for the phone's own mic and speaker. Off on the
-        // glasses, which do their own, because it is what turns the session
-        // into a "phone call" (call volume, gain control, heavy ducking).
+        // Echo cancellation, so Nova's voice is not heard as the user.
         if input.isVoiceProcessingEnabled != voiceProcessing {
             try? input.setVoiceProcessingEnabled(voiceProcessing)
         }
