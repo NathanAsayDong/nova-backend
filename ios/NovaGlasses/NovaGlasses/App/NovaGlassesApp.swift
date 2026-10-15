@@ -28,5 +28,6 @@ private struct RootView: View {
             }
         }
         .task { await model.bootstrap() }
+        .onOpenURL { url in model.handleOpenURL(url) }
     }
 }

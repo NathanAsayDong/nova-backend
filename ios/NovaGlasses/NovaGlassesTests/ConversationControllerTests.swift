@@ -131,12 +131,13 @@ final class ConversationControllerTests: XCTestCase {
         let controller: ConversationController
         var ms: Double = 0
 
-        init() {
+        init(camera: GlassesCamera? = nil, vision: VisionUploading? = nil) {
             let defaults = UserDefaults(suiteName: "test.\(UUID().uuidString)")!
             ids = ConversationIdStore(defaults: defaults)
             controller = ConversationController(
                 socket: socket, player: player, earcons: earcons, wake: wake,
-                scheduler: scheduler, conversationIds: ids
+                scheduler: scheduler, conversationIds: ids,
+                camera: camera, vision: vision
             )
         }
 
@@ -172,8 +173,8 @@ final class ConversationControllerTests: XCTestCase {
         }
 
         /// Enabled, calibrated, waiting for the wake phrase.
-        static func idle() -> Rig {
-            let rig = Rig()
+        static func idle(camera: GlassesCamera? = nil, vision: VisionUploading? = nil) -> Rig {
+            let rig = Rig(camera: camera, vision: vision)
             rig.controller.setEnabled(true)
             rig.silence(800)
             return rig

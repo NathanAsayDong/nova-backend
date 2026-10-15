@@ -11,6 +11,7 @@ import Foundation
 ///  - done:     falling fifth. "Finished, back to waiting."
 ///  - cancel:   one low, quiet note. "Never mind."
 ///  - error:    two low notes, a little louder. "That failed."
+///  - shutter:  two quick high ticks. "I took a photo."
 @MainActor
 final class Earcons: EarconPlaying {
     struct Note: Equatable, Sendable {
@@ -21,13 +22,14 @@ final class Earcons: EarconPlaying {
     }
 
     nonisolated static let notes: [Earcon: [Note]] = {
-        let e5 = 659.25, b5 = 987.77, a4 = 440.0, e4 = 329.63, c4 = 261.63
+        let e5 = 659.25, b5 = 987.77, a4 = 440.0, e4 = 329.63, c4 = 261.63, e6 = 1318.51
         return [
             .wake: [Note(freq: e5, at: 0, length: 0.32, gain: 0.16), Note(freq: b5, at: 0.085, length: 0.42, gain: 0.14)],
             .thinking: [Note(freq: b5, at: 0, length: 0.14, gain: 0.07)],
             .done: [Note(freq: b5, at: 0, length: 0.3, gain: 0.11), Note(freq: e5, at: 0.11, length: 0.5, gain: 0.12)],
             .cancel: [Note(freq: a4, at: 0, length: 0.22, gain: 0.08), Note(freq: e4, at: 0.09, length: 0.38, gain: 0.08)],
             .error: [Note(freq: e4, at: 0, length: 0.25, gain: 0.14), Note(freq: c4, at: 0.18, length: 0.45, gain: 0.14)],
+            .shutter: [Note(freq: e6, at: 0, length: 0.06, gain: 0.06), Note(freq: e6, at: 0.07, length: 0.08, gain: 0.05)],
         ]
     }()
 

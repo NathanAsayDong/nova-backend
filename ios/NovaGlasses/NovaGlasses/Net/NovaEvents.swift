@@ -28,7 +28,8 @@ enum ClientEvent: Equatable, Sendable {
     case speechPause
     case speechResume
     case abort
-    case stop(purpose: CapturePurpose, conversationId: String?)
+    /// `imageIds`: glasses photos uploaded for this turn (POST /vision/images).
+    case stop(purpose: CapturePurpose, conversationId: String?, imageIds: [String] = [])
     case ping
 
     var name: String {
@@ -45,7 +46,7 @@ enum ClientEvent: Equatable, Sendable {
 
 extension ClientEvent: Codable {
     private enum Keys: String, CodingKey {
-        case event, mimeType, language, purpose, conversationId, client
+        case event, mimeType, language, purpose, conversationId, client, imageIds
     }
 
     func encode(to encoder: Encoder) throws {
@@ -58,9 +59,12 @@ extension ClientEvent: Codable {
             try c.encode(start.purpose, forKey: .purpose)
             try c.encodeIfPresent(start.conversationId, forKey: .conversationId)
             try c.encode(start.client, forKey: .client)
-        case .stop(let purpose, let conversationId):
+        case .stop(let purpose, let conversationId, let imageIds):
             try c.encode(purpose, forKey: .purpose)
             try c.encodeIfPresent(conversationId, forKey: .conversationId)
+            if !imageIds.isEmpty {
+                try c.encode(imageIds, forKey: .imageIds)
+            }
         case .speechPause, .speechResume, .abort, .ping:
             break
         }
@@ -85,7 +89,8 @@ extension ClientEvent: Codable {
         case "stop":
             self = .stop(
                 purpose: try c.decodeIfPresent(CapturePurpose.self, forKey: .purpose) ?? .turn,
-                conversationId: try c.decodeIfPresent(String.self, forKey: .conversationId)
+                conversationId: try c.decodeIfPresent(String.self, forKey: .conversationId),
+                imageIds: try c.decodeIfPresent([String].self, forKey: .imageIds) ?? []
             )
         default:
             throw DecodingError.dataCorruptedError(forKey: .event, in: c, debugDescription: "Unknown event \(event)")
@@ -119,6 +124,8 @@ enum ServerEvent: Equatable, Sendable {
     case followUpStopped(message: String)
     case meetingMode(message: String)
     case error(message: String, code: String?)
+    /// Nova's `look` tool wants a photo right now; upload it with this id.
+    case captureRequest(requestId: String, conversationId: String?)
     case pong
     case other(type: String)
 }
@@ -126,7 +133,7 @@ enum ServerEvent: Equatable, Sendable {
 extension ServerEvent: Codable {
     private enum Keys: String, CodingKey {
         case type, message, endpointMs, count, bytes, text, seq, conversationId
-        case role, streamId, mimeType, chunkBase64, assistantText, code
+        case role, streamId, mimeType, chunkBase64, assistantText, code, requestId
     }
 
     var type: String {
@@ -147,6 +154,7 @@ extension ServerEvent: Codable {
         case .followUpStopped: "follow_up_stopped"
         case .meetingMode: "meeting_mode"
         case .error: "error"
+        case .captureRequest: "capture_request"
         case .pong: "pong"
         case .other(let type): type
         }
@@ -207,6 +215,11 @@ extension ServerEvent: Codable {
         case "meeting_mode": self = .meetingMode(message: try message())
         case "error":
             self = .error(message: try message(), code: try c.decodeIfPresent(String.self, forKey: .code))
+        case "capture_request":
+            self = .captureRequest(
+                requestId: try c.decode(String.self, forKey: .requestId),
+                conversationId: try c.decodeIfPresent(String.self, forKey: .conversationId)
+            )
         case "pong": self = .pong
         default: self = .other(type: type)
         }
@@ -253,6 +266,9 @@ extension ServerEvent: Codable {
         case .error(let m, let code):
             try c.encode(m, forKey: .message)
             try c.encodeIfPresent(code, forKey: .code)
+        case .captureRequest(let requestId, let conversationId):
+            try c.encode(requestId, forKey: .requestId)
+            try c.encodeIfPresent(conversationId, forKey: .conversationId)
         case .pong, .other:
             break
         }

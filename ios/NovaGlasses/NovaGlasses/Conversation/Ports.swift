@@ -46,6 +46,8 @@ enum Earcon: String, CaseIterable, Sendable {
     case cancel
     /// Two low notes: something failed.
     case error
+    /// Two quick high ticks: a photo was taken through the glasses.
+    case shutter
 }
 
 @MainActor
@@ -123,4 +125,41 @@ final class ConversationIdStore {
     func clear() {
         defaults.removeObject(forKey: key)
     }
+}
+
+// MARK: - Vision
+
+/// Where the glasses camera stands, for the screen and for deciding whether a
+/// "what do you see" can be answered with a photo.
+enum GlassesCameraState: Equatable, Sendable {
+    /// The Meta toolkit could not start (shown with the reason).
+    case unavailable(String)
+    /// The app is not registered with the Meta AI app yet.
+    case unregistered
+    /// Registration or the camera permission is in progress in Meta AI.
+    case registering
+    /// Registered with camera permission; a photo can be taken.
+    case ready
+    /// The camera stream is running (the glasses' capture LED is on).
+    case streaming
+
+    var canCapture: Bool { self == .ready || self == .streaming }
+}
+
+/// The glasses camera. The stream starts on demand and stops on its own
+/// after a short idle, so the capture LED is only on around a photo.
+@MainActor
+protocol GlassesCamera: AnyObject {
+    var state: GlassesCameraState { get }
+    /// One JPEG, already scaled for upload.
+    func capturePhoto() async throws -> Data
+}
+
+/// Sends glasses photos to the server.
+@MainActor
+protocol VisionUploading: AnyObject {
+    /// POST /vision/images → the image id to name in `stop`.
+    func upload(_ jpeg: Data, requestId: String?) async throws -> String
+    /// POST /vision/capture-failed: unblock a `look` that cannot be served.
+    func reportCaptureFailed(requestId: String, reason: String) async
 }

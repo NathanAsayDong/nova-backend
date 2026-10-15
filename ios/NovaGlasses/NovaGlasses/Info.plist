@@ -18,17 +18,51 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>us.nova-api.NovaGlasses</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>novaglasses</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>MWDAT</key>
+	<dict>
+		<key>AppLinkURLScheme</key>
+		<string>novaglasses://</string>
+		<key>ClientToken</key>
+		<string></string>
+		<key>MetaAppID</key>
+		<string></string>
+		<key>TeamID</key>
+		<string>$(DEVELOPMENT_TEAM)</string>
+	</dict>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Nova connects to your Meta glasses to take a photo when you ask it what it sees.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_bonjour._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Nova uses the glasses camera when you ask it to look at something.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Nova connects to a Nova server on your local network when you point it at one for testing.</string>
+	<string>Nova receives photos from your glasses over Wi-Fi, and connects to a Nova server on your local network when you point it at one.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Nova listens through your glasses' microphone for "Hey Nova" and for what you ask it.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Pick photos of a friend's face so Nova can recognize them.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Nova recognizes the "Hey Nova" wake phrase on this iPhone, without sending idle audio anywhere.</string>
 	<key>NovaAPIBaseURL</key>
@@ -38,6 +72,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>bluetooth-central</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>

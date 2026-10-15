@@ -47,6 +47,8 @@ final class ConversationController {
     static let sendBatchMs = 200.0
     /// Held audio is sent in pieces no larger than this.
     static let maxMessageBytes = 32_000
+    /// How long `stop` waits for a photo still on its way up.
+    static let photoWaitSeconds: Double = 3
 
     // MARK: Observable state for the UI
 
@@ -69,6 +71,8 @@ final class ConversationController {
     @ObservationIgnored private let wake: WakeDetecting
     @ObservationIgnored private let scheduler: Scheduling
     @ObservationIgnored private let conversationIds: ConversationIdStore
+    @ObservationIgnored private let camera: GlassesCamera?
+    @ObservationIgnored private let vision: VisionUploading?
     @ObservationIgnored let detector = TurnDetector()
 
     // MARK: Capture state
@@ -85,9 +89,37 @@ final class ConversationController {
         /// A stop was requested while still held; send it on delivery.
         var pendingStop = false
         var batch = Data()
+        /// The glasses photo for this turn, taken when the caption asked to look.
+        var photo: PhotoSlot?
 
         init(purpose: CapturePurpose) {
             self.purpose = purpose
+        }
+    }
+
+    @MainActor
+    private final class Once {
+        private var done = false
+
+        func run(_ body: () -> Void) {
+            guard !done else { return }
+            done = true
+            body()
+        }
+    }
+
+    /// A photo on its way to the server. `stop` waits for it, briefly.
+    private final class PhotoSlot {
+        var finished = false
+        var imageId: String?
+        var onFinish: (() -> Void)?
+
+        func finish(_ imageId: String?) {
+            guard !finished else { return }
+            finished = true
+            self.imageId = imageId
+            onFinish?()
+            onFinish = nil
         }
     }
 
@@ -117,7 +149,9 @@ final class ConversationController {
         earcons: EarconPlaying,
         wake: WakeDetecting,
         scheduler: Scheduling,
-        conversationIds: ConversationIdStore
+        conversationIds: ConversationIdStore,
+        camera: GlassesCamera? = nil,
+        vision: VisionUploading? = nil
     ) {
         self.socket = socket
         self.player = player
@@ -125,6 +159,8 @@ final class ConversationController {
         self.wake = wake
         self.scheduler = scheduler
         self.conversationIds = conversationIds
+        self.camera = camera
+        self.vision = vision
 
         socket.onEvent = { [weak self] event in self?.handle(event) }
         socket.onStateChange = { [weak self] state in self?.handleConnection(state) }
@@ -374,7 +410,7 @@ final class ConversationController {
         capture.heldData = Data()
         capture.held = false
         if capture.pendingStop {
-            socket.send(.stop(purpose: capture.purpose, conversationId: conversationIds.load()))
+            sendStop(capture)
         }
     }
 
@@ -388,7 +424,77 @@ final class ConversationController {
             return
         }
         flushBatch(capture)
-        socket.send(.stop(purpose: capture.purpose, conversationId: conversationIds.load()))
+        sendStop(capture)
+    }
+
+    /// `stop`, carrying the turn's photo. A photo still uploading gets up to
+    /// `photoWaitSeconds`; after that the turn goes without it (Nova can
+    /// still look for itself).
+    private func sendStop(_ capture: Capture) {
+        let purpose = capture.purpose
+        guard let photo = capture.photo, !photo.finished else {
+            emitStop(purpose, imageId: capture.photo?.imageId)
+            return
+        }
+        // Whichever comes first, the photo or the deadline, sends the stop.
+        let once = Once()
+        let timer = scheduler.after(Self.photoWaitSeconds) { [weak self] in
+            once.run {
+                AudioLog.shared.add("Photo not ready in time; sending the turn without it")
+                self?.emitStop(purpose, imageId: nil)
+            }
+        }
+        photo.onFinish = { [weak self, weak photo] in
+            timer.cancel()
+            once.run { self?.emitStop(purpose, imageId: photo?.imageId) }
+        }
+    }
+
+    private func emitStop(_ purpose: CapturePurpose, imageId: String?) {
+        socket.send(.stop(
+            purpose: purpose,
+            conversationId: conversationIds.load(),
+            imageIds: imageId.map { [$0] } ?? []
+        ))
+    }
+
+    // MARK: - Vision
+
+    /// The caption asks to look: take the photo now, while the user is still
+    /// talking, so it is on the server by the time the turn ends.
+    private func maybeTakePhoto(for caption: String) {
+        guard let capture, capture.photo == nil, let camera, let vision,
+              camera.state.canCapture, VisionIntent.wantsToSee(caption) else { return }
+        let slot = PhotoSlot()
+        capture.photo = slot
+        Task { @MainActor [weak self] in
+            do {
+                let jpeg = try await camera.capturePhoto()
+                self?.earcons.play(.shutter)
+                slot.finish(try await vision.upload(jpeg, requestId: nil))
+            } catch {
+                AudioLog.shared.add("Photo for the turn failed: \(error.localizedDescription)")
+                slot.finish(nil)
+            }
+        }
+    }
+
+    /// Nova's `look` tool asked for a photo mid-turn.
+    private func serveCaptureRequest(_ requestId: String) {
+        guard let vision else { return }
+        guard let camera, camera.state.canCapture else {
+            Task { await vision.reportCaptureFailed(requestId: requestId, reason: "The glasses camera isn't connected.") }
+            return
+        }
+        Task { @MainActor [weak self] in
+            do {
+                let jpeg = try await camera.capturePhoto()
+                self?.earcons.play(.shutter)
+                _ = try await vision.upload(jpeg, requestId: requestId)
+            } catch {
+                await vision.reportCaptureFailed(requestId: requestId, reason: error.localizedDescription)
+            }
+        }
     }
 
     /// A click, not speech: tell the server to drop what it buffered.
@@ -555,6 +661,10 @@ final class ConversationController {
             if let endpointMs {
                 detector.setSilenceWindow(endpointMs)
             }
+            maybeTakePhoto(for: text)
+
+        case .captureRequest(let requestId, _):
+            serveCaptureRequest(requestId)
 
         case .userTranscript(let text, let conversationId):
             conversationIds.save(conversationId)

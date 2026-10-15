@@ -14,19 +14,27 @@
 		13D7AD02004B9A3E383D9C1F /* AudioSessionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 691B63EC9DCB554333BD9C46 /* AudioSessionPolicy.swift */; };
 		1F058D3F13DA87399FBB27C4 /* AuthStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B356DB2F2F8BCB5FEA75515 /* AuthStore.swift */; };
 		2AF132BC87A4FD3CC2196534 /* SpeechPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD052A3BA862CDED403AFDA4 /* SpeechPlayer.swift */; };
+		2E0C58BF784EF6D3A267C5F2 /* FacesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A14918C1C1C99CFE47A28FBD /* FacesView.swift */; };
+		2FB33ABD0F6EA78D1556615E /* VisionIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 955BDB2A7AD4940F4D3C15D6 /* VisionIntent.swift */; };
+		3C31AFE2A33058981A63D934 /* VisionClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3287484FF912A1157D323AC3 /* VisionClient.swift */; };
 		47665FDC517D772354C18891 /* MP3StreamDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A72807FC26237D5484235A8 /* MP3StreamDecoder.swift */; };
 		48CFBD7C74F748E1B6652377 /* ConversationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2357ECF7814437DC2992A9B9 /* ConversationControllerTests.swift */; };
 		5D023BEC57C8782796CF3F87 /* tone_1s_22050.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = 1658350B809BE1024FDACB58 /* tone_1s_22050.mp3 */; };
 		683FACAF02C7CB1EFF619546 /* TurnDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7546FF00EE24C3CCD237B903 /* TurnDetector.swift */; };
 		6ADB9682B5F5F878944AF088 /* AudioRouteManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA816F7ED47FC7311184F8B2 /* AudioRouteManager.swift */; };
 		6DE5CFCD0136387FB30BD5FA /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72F703C3EDB149DB2C0E28C0 /* HomeView.swift */; };
+		6E19AEE75D805E0FF08269C3 /* DATGlassesCamera.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDBF9DB6A08569292B55C493 /* DATGlassesCamera.swift */; };
+		6EDB5CCD26E0F20D20AE00F6 /* ImagePrep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3001F2C84C04875BDEAB5494 /* ImagePrep.swift */; };
 		7309B736CB474C7FB27BA80B /* WakePhrase.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDA67F5DD7518CE61D58D2A5 /* WakePhrase.swift */; };
 		732619BA095C7679DAB257DF /* Ports.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495D40B59597C684B6ACC306 /* Ports.swift */; };
 		870CB60DCEAB4000F562D6F1 /* Earcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = C721C56AA579345BD0461AF9 /* Earcons.swift */; };
+		87267BF0561A0B186AF58C14 /* VisionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D35EB73C828C29173923E17A /* VisionTests.swift */; };
 		9D6A68EDBCF8AC5FE42ABD34 /* AudioLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 203BBFDE4E9B78568BB224ED /* AudioLogView.swift */; };
 		9DF553CF65DBF9DFDA788A3C /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 394AAB2557ED94B60AA55E60 /* LoginView.swift */; };
+		A3B56C32BA2EFE6C1A62B047 /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = 1B6B11CBA3E0739878A9494A /* MWDATCamera */; };
 		A63BB152C467E67CB07B3383 /* CaptureEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 337C97C944AB9A0B683E1AC7 /* CaptureEngine.swift */; };
 		A74A132AABE7C462A5F818ED /* AudioLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C99C8C0484CADED81E53281A /* AudioLog.swift */; };
+		A7A77EEDA865C5B012A27E50 /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = D45860C24859D557C35D34AB /* MWDATCore */; };
 		AD25BC3D4B4C430CE09D840F /* AudioPlaybackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95EE404404F26B365610F3AC /* AudioPlaybackTests.swift */; };
 		B4B9553F58FD67398CACE9A1 /* NovaEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E53A3054E19A14398144C60 /* NovaEvents.swift */; };
 		B4C8D7C20F6FAF16FD81CD26 /* AudioFramingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C810C29F4A3EC376824347D4 /* AudioFramingTests.swift */; };
@@ -57,6 +65,8 @@
 		203BBFDE4E9B78568BB224ED /* AudioLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLogView.swift; sourceTree = "<group>"; };
 		2357ECF7814437DC2992A9B9 /* ConversationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationControllerTests.swift; sourceTree = "<group>"; };
 		2B356DB2F2F8BCB5FEA75515 /* AuthStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthStore.swift; sourceTree = "<group>"; };
+		3001F2C84C04875BDEAB5494 /* ImagePrep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePrep.swift; sourceTree = "<group>"; };
+		3287484FF912A1157D323AC3 /* VisionClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionClient.swift; sourceTree = "<group>"; };
 		3306D79455CCFCD9EE0A227D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		337C97C944AB9A0B683E1AC7 /* CaptureEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureEngine.swift; sourceTree = "<group>"; };
 		394AAB2557ED94B60AA55E60 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
@@ -72,8 +82,10 @@
 		7B920D98B34009C22C690FFF /* ConversationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationController.swift; sourceTree = "<group>"; };
 		85D8081920A2CB606DE8CE6E /* NovaGlassesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaGlassesApp.swift; sourceTree = "<group>"; };
 		8A72807FC26237D5484235A8 /* MP3StreamDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP3StreamDecoder.swift; sourceTree = "<group>"; };
+		955BDB2A7AD4940F4D3C15D6 /* VisionIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionIntent.swift; sourceTree = "<group>"; };
 		95EE404404F26B365610F3AC /* AudioPlaybackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlaybackTests.swift; sourceTree = "<group>"; };
 		9E53A3054E19A14398144C60 /* NovaEvents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaEvents.swift; sourceTree = "<group>"; };
+		A14918C1C1C99CFE47A28FBD /* FacesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacesView.swift; sourceTree = "<group>"; };
 		AECFDAB3F0A9250FA349CD73 /* NovaGlassesTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = NovaGlassesTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BAA0F0DB441FE0199B238979 /* NovaSocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaSocket.swift; sourceTree = "<group>"; };
 		BD052A3BA862CDED403AFDA4 /* SpeechPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPlayer.swift; sourceTree = "<group>"; };
@@ -82,10 +94,24 @@
 		C721C56AA579345BD0461AF9 /* Earcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Earcons.swift; sourceTree = "<group>"; };
 		C810C29F4A3EC376824347D4 /* AudioFramingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioFramingTests.swift; sourceTree = "<group>"; };
 		C99C8C0484CADED81E53281A /* AudioLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLog.swift; sourceTree = "<group>"; };
+		D35EB73C828C29173923E17A /* VisionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionTests.swift; sourceTree = "<group>"; };
 		DB6A082448DCD22180E2E699 /* PCM.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PCM.swift; sourceTree = "<group>"; };
 		F69DD141614547D9082379BF /* NovaGlasses.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = NovaGlasses.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FA816F7ED47FC7311184F8B2 /* AudioRouteManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRouteManager.swift; sourceTree = "<group>"; };
+		FDBF9DB6A08569292B55C493 /* DATGlassesCamera.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DATGlassesCamera.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		26DBAEABA2077E19A611820D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A7A77EEDA865C5B012A27E50 /* MWDATCore in Frameworks */,
+				A3B56C32BA2EFE6C1A62B047 /* MWDATCamera in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		018A7760FB3C8041115D7EEC /* Audio */ = {
@@ -108,6 +134,7 @@
 			isa = PBXGroup;
 			children = (
 				203BBFDE4E9B78568BB224ED /* AudioLogView.swift */,
+				A14918C1C1C99CFE47A28FBD /* FacesView.swift */,
 				72F703C3EDB149DB2C0E28C0 /* HomeView.swift */,
 				394AAB2557ED94B60AA55E60 /* LoginView.swift */,
 			);
@@ -119,6 +146,7 @@
 			children = (
 				9E53A3054E19A14398144C60 /* NovaEvents.swift */,
 				BAA0F0DB441FE0199B238979 /* NovaSocket.swift */,
+				3287484FF912A1157D323AC3 /* VisionClient.swift */,
 			);
 			path = Net;
 			sourceTree = "<group>";
@@ -166,6 +194,7 @@
 				2357ECF7814437DC2992A9B9 /* ConversationControllerTests.swift */,
 				51D9497B488BA3DB46D9B8EC /* EventCodingTests.swift */,
 				C0BA6B13175CCC394A4D6714 /* TurnDetectorTests.swift */,
+				D35EB73C828C29173923E17A /* VisionTests.swift */,
 				728955D6DE3B93BFB700F76E /* WakePhraseTests.swift */,
 				37F621678F363B3F86D50252 /* Fixtures */,
 			);
@@ -189,6 +218,7 @@
 				31BA5F7AB01778ED73096509 /* App */,
 				018A7760FB3C8041115D7EEC /* Audio */,
 				6026DDA7CFC6198DE44DFEC7 /* Auth */,
+				FA49B04437CCC49478E51B34 /* Camera */,
 				6D0BAE859D47366EC3E2BB78 /* Conversation */,
 				12040CF97ED1018A99AD03A9 /* Net */,
 				0C8E221DDEAF507664CBC48F /* UI */,
@@ -202,6 +232,7 @@
 			children = (
 				51BAE2E5CF39131FB31B30D8 /* SpeechWakeDetector.swift */,
 				7546FF00EE24C3CCD237B903 /* TurnDetector.swift */,
+				955BDB2A7AD4940F4D3C15D6 /* VisionIntent.swift */,
 				BDA67F5DD7518CE61D58D2A5 /* WakePhrase.swift */,
 			);
 			path = Voice;
@@ -214,6 +245,15 @@
 				AECFDAB3F0A9250FA349CD73 /* NovaGlassesTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		FA49B04437CCC49478E51B34 /* Camera */ = {
+			isa = PBXGroup;
+			children = (
+				FDBF9DB6A08569292B55C493 /* DATGlassesCamera.swift */,
+				3001F2C84C04875BDEAB5494 /* ImagePrep.swift */,
+			);
+			path = Camera;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -244,6 +284,7 @@
 			buildPhases = (
 				F7F781DFE4A732B85B9D963D /* Sources */,
 				49EFC8F8EAE760D958624067 /* Resources */,
+				26DBAEABA2077E19A611820D /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -251,6 +292,8 @@
 			);
 			name = NovaGlasses;
 			packageProductDependencies = (
+				D45860C24859D557C35D34AB /* MWDATCore */,
+				1B6B11CBA3E0739878A9494A /* MWDATCamera */,
 			);
 			productName = NovaGlasses;
 			productReference = F69DD141614547D9082379BF /* NovaGlasses.app */;
@@ -284,6 +327,9 @@
 			);
 			mainGroup = 1D017CA2F80D00A53E83C89C;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				179780A188F4FD938EEB2DC5 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F50906C53100F7EF0B8FB371 /* Products */;
 			projectDirPath = "";
@@ -324,6 +370,7 @@
 				48CFBD7C74F748E1B6652377 /* ConversationControllerTests.swift in Sources */,
 				B7C614BCB07AA78D73C6C138 /* EventCodingTests.swift in Sources */,
 				E968E9031183E7DA0F776AC1 /* TurnDetectorTests.swift in Sources */,
+				87267BF0561A0B186AF58C14 /* VisionTests.swift in Sources */,
 				04BC4F22D7048D0D7B02B273 /* WakePhraseTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -341,8 +388,11 @@
 				1F058D3F13DA87399FBB27C4 /* AuthStore.swift in Sources */,
 				A63BB152C467E67CB07B3383 /* CaptureEngine.swift in Sources */,
 				CDF5C63C07A5AB56C8726FE6 /* ConversationController.swift in Sources */,
+				6E19AEE75D805E0FF08269C3 /* DATGlassesCamera.swift in Sources */,
 				870CB60DCEAB4000F562D6F1 /* Earcons.swift in Sources */,
+				2E0C58BF784EF6D3A267C5F2 /* FacesView.swift in Sources */,
 				6DE5CFCD0136387FB30BD5FA /* HomeView.swift in Sources */,
+				6EDB5CCD26E0F20D20AE00F6 /* ImagePrep.swift in Sources */,
 				9DF553CF65DBF9DFDA788A3C /* LoginView.swift in Sources */,
 				47665FDC517D772354C18891 /* MP3StreamDecoder.swift in Sources */,
 				B4B9553F58FD67398CACE9A1 /* NovaEvents.swift in Sources */,
@@ -354,6 +404,8 @@
 				2AF132BC87A4FD3CC2196534 /* SpeechPlayer.swift in Sources */,
 				FAB2B775ABB5360A9D4689AF /* SpeechWakeDetector.swift in Sources */,
 				683FACAF02C7CB1EFF619546 /* TurnDetector.swift in Sources */,
+				3C31AFE2A33058981A63D934 /* VisionClient.swift in Sources */,
+				2FB33ABD0F6EA78D1556615E /* VisionIntent.swift in Sources */,
 				7309B736CB474C7FB27BA80B /* WakePhrase.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -593,6 +645,30 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		179780A188F4FD938EEB2DC5 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
+			requirement = {
+				kind = exactVersion;
+				version = 1.0.1;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		1B6B11CBA3E0739878A9494A /* MWDATCamera */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 179780A188F4FD938EEB2DC5 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATCamera;
+		};
+		D45860C24859D557C35D34AB /* MWDATCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 179780A188F4FD938EEB2DC5 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 4CE337445964B4BD84AB1D48 /* Project object */;
 }

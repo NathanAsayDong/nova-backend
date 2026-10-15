@@ -26,6 +26,8 @@ final class AppModel {
     }
 
     let controller: ConversationController
+    /// The glasses camera (Meta toolkit). Observable: the screen shows its state.
+    let camera = DATGlassesCamera()
 
     @ObservationIgnored private let auth = AuthStore()
     @ObservationIgnored private let route = AudioRouteManager()
@@ -34,6 +36,7 @@ final class AppModel {
     @ObservationIgnored private let earcons = Earcons()
     @ObservationIgnored private let wake = SpeechWakeDetector()
     @ObservationIgnored private let socket: NovaSocket
+    @ObservationIgnored private let vision: VisionClient
     @ObservationIgnored private var token: String?
     @ObservationIgnored private var autoOffTask: Task<Void, Never>?
     @ObservationIgnored private var wasOnGlasses = false
@@ -46,18 +49,27 @@ final class AppModel {
         isLoggedIn = token != nil
 
         socket = NovaSocket(baseURL: { AppModel.defaultBaseURL }, token: { nil })
+        vision = VisionClient(api: { APIClient(baseURL: AppModel.defaultBaseURL) })
         controller = ConversationController(
             socket: socket,
             player: player,
             earcons: earcons,
             wake: wake,
             scheduler: MainScheduler(),
-            conversationIds: ConversationIdStore()
+            conversationIds: ConversationIdStore(),
+            camera: camera,
+            vision: vision
         )
         // Late-bound so a server or token change applies on the next connect
         // without rebuilding the socket.
         socket.baseURL = { [weak self] in self?.baseURL ?? AppModel.defaultBaseURL }
         socket.token = { [weak self] in self?.token }
+        vision.api = { [weak self] in self?.api ?? APIClient(baseURL: AppModel.defaultBaseURL) }
+        // Meta: the glasses mic (HFP) must be up before the camera stream starts.
+        camera.audioReady = { [weak self] in
+            guard let self else { return false }
+            return self.listeningEnabled && self.route.route.isBluetooth
+        }
 
         capture.attach(player.node)
         capture.attach(earcons.node)
@@ -80,7 +92,12 @@ final class AppModel {
         URL(string: serverURLString.trimmingCharacters(in: .whitespaces)) ?? Self.defaultBaseURL
     }
 
-    private var api: APIClient { APIClient(baseURL: baseURL, token: token) }
+    var api: APIClient { APIClient(baseURL: baseURL, token: token) }
+
+    /// `novaglasses://` — the Meta AI app returning after registration.
+    func handleOpenURL(_ url: URL) {
+        camera.handleUrl(url)
+    }
 
     // MARK: - Session
 

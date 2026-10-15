@@ -39,6 +39,20 @@ final class EventCodingTests: XCTestCase {
         XCTAssertEqual(stop["conversationId"] as? String, "c-2")
     }
 
+    func testStopCarriesImageIdsOnlyWhenThereAreSome() throws {
+        let plain = try json(ClientEvent.stop(purpose: .turn, conversationId: nil))
+        XCTAssertNil(plain["imageIds"])
+        let withPhoto = try json(ClientEvent.stop(purpose: .turn, conversationId: nil, imageIds: ["img-1"]))
+        XCTAssertEqual(withPhoto["imageIds"] as? [String], ["img-1"])
+    }
+
+    func testDecodesCaptureRequest() throws {
+        XCTAssertEqual(
+            try decode(#"{"type":"capture_request","requestId":"r-1","conversationId":"c-1"}"#),
+            .captureRequest(requestId: "r-1", conversationId: "c-1")
+        )
+    }
+
     func testClientEventsRoundTrip() throws {
         let events: [ClientEvent] = [
             .start(StartEvent(purpose: .turn, conversationId: "abc")),
@@ -46,6 +60,7 @@ final class EventCodingTests: XCTestCase {
             .speechPause, .speechResume, .abort, .ping,
             .stop(purpose: .turn, conversationId: nil),
             .stop(purpose: .sentry, conversationId: "abc"),
+            .stop(purpose: .turn, conversationId: "abc", imageIds: ["a", "b"]),
         ]
         for event in events {
             let data = try JSONEncoder().encode(event)

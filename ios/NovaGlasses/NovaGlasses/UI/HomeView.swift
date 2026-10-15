@@ -35,6 +35,10 @@ struct HomeView: View {
                 Section("Connection") {
                     LabeledContent("Server", value: connectionText)
                     LabeledContent("Audio", value: model.routeSummary)
+                    LabeledContent("Glasses camera", value: cameraText)
+                    if model.camera.state == .unregistered {
+                        Button("Connect glasses camera in Meta AI") { model.camera.register() }
+                    }
                     NavigationLink("Audio log") { AudioLogView() }
                     if model.listeningEnabled && !model.wakeAvailable {
                         Text("Wake phrase unavailable on this device.")
@@ -59,6 +63,12 @@ struct HomeView: View {
                 }
 
                 Section {
+                    NavigationLink("People Nova knows") { FacesView(api: { model.api }, camera: model.camera) }
+                } footer: {
+                    Text("Only people who agreed to be recognized. Nova never stores faces of anyone else.")
+                }
+
+                Section {
                     Button("Log out", role: .destructive) {
                         Task { await model.logout() }
                     }
@@ -71,6 +81,16 @@ struct HomeView: View {
     private var youSaid: String {
         if !controller.partialTranscript.isEmpty { return controller.partialTranscript }
         return controller.lastTranscript.isEmpty ? "—" : controller.lastTranscript
+    }
+
+    private var cameraText: String {
+        switch model.camera.state {
+        case .unavailable: "Unavailable"
+        case .unregistered: "Not connected"
+        case .registering: "Connecting in Meta AI…"
+        case .ready: "Ready"
+        case .streaming: "On"
+        }
     }
 
     private var connectionText: String {

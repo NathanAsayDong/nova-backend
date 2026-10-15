@@ -11,10 +11,14 @@ brew install xcodegen          # once; only needed after editing project.yml
 cd ios/NovaGlasses
 xcodegen generate              # regenerates NovaGlasses.xcodeproj from project.yml
 xcodebuild build -project NovaGlasses.xcodeproj -scheme NovaGlasses \
-  -destination 'platform=iOS Simulator,name=iPhone 16'
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0'
 xcodebuild test  -project NovaGlasses.xcodeproj -scheme NovaGlasses \
-  -destination 'platform=iOS Simulator,name=iPhone 16'
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0'
 ```
+
+Run the tests on an iOS 26+ simulator. On the iOS 18.5 simulator, Meta's
+`MWDATCore` aborts with a Swift metadata error as soon as XCTest enumerates
+classes.
 
 Edit `project.yml`, not the generated project. The generated `NovaGlasses.xcodeproj` is checked in so Xcode can open it directly.
 
@@ -40,6 +44,26 @@ The tests (63 of them) cover:
 For TestFlight: Product → Archive → Distribute App → TestFlight (Internal). Personal use needs no review.
 
 **Test against a local backend first.** On the login screen, set the Server field to `http://<your-mac-ip>:8000` (phone and Mac on the same Wi-Fi). Local-network http is allowed by `NSAllowsLocalNetworking`. Switch the field back to `https://api.nova-api.us` afterwards. The backend must include the Phase 1 changes: raw PCM `mimeType` and `client: "glasses"` → `GLASSES_PROMPT`.
+
+## Vision: "Hey Nova, what do you see?"
+
+The glasses camera comes through Meta's Wearables Device Access Toolkit
+(`MWDATCore` + `MWDATCamera` 1.0.1, Swift Package). Audio does not use it.
+
+**One-time setup:**
+1. In the Meta AI app, open **App Info** and tap the version number 5 times. Then turn on **Developer Mode** for the glasses.
+2. In Nova, turn Listening on with the glasses connected, then tap **Connect glasses camera in Meta AI**.
+3. Approve Nova in Meta AI, then allow the camera. Meta AI returns to Nova through `novaglasses://`.
+
+**How a photo is taken:**
+- **Phrase trigger.** When a live caption asks to look ("what do you see", "who's this", "read this", …; see `Voice/VisionIntent.swift`), the phone starts the camera stream and takes a JPEG. It plays the shutter tick, scales the image to a 1280 px long edge, and uploads it to `POST /vision/images`. All of this happens while you are still talking. `stop` waits up to 3 s for the upload and then carries `imageIds`.
+- **Nova's `look` tool.** The server sends `capture_request`. The phone uploads with that `requestId`, or calls `POST /vision/capture-failed`.
+- **Stream lifetime.** The stream needs the glasses to be the HFP microphone (Meta's ordering rule). It stops after 20 s idle, so the capture LED is only on around a photo.
+
+**People Nova knows** (home screen):
+- Enroll only people who agreed. Adding someone requires their name and a confirmation that they consented.
+- Add 3+ face photos, taken with the glasses or picked from Photos.
+- The server matches faces and stores only embeddings. Swipe to delete a person and everything stored for them.
 
 ## How it behaves
 
