@@ -35,6 +35,7 @@ struct HomeView: View {
                 Section("Connection") {
                     LabeledContent("Server", value: connectionText)
                     LabeledContent("Audio", value: model.routeSummary)
+                    NavigationLink("Audio log") { AudioLogView() }
                     if model.listeningEnabled && !model.wakeAvailable {
                         Text("Wake phrase unavailable on this device.")
                             .foregroundStyle(.orange)

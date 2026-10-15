@@ -15,6 +15,13 @@ final class CaptureEngine {
     /// (monotonic). Delivered on the main actor, in order.
     var onFrame: (@MainActor (Data, Double) -> Void)?
 
+    /// Echo cancellation and call-style processing on the input. Set from
+    /// `AudioSessionPolicy` before `start()`; it only takes effect on a start.
+    var voiceProcessing = true
+    /// The engine came back up after something stopped it under us. Audio
+    /// scheduled on the player nodes before that is gone and must be replayed.
+    var onRestart: (() -> Void)?
+
     let engine = AVAudioEngine()
     private(set) var isRunning = false
     private var attachedPlayers: [AVAudioPlayerNode] = []
@@ -29,7 +36,13 @@ final class CaptureEngine {
             MainActor.assumeIsolated {
                 guard let self, self.isRunning else { return }
                 self.isRunning = false
-                try? self.start()
+                do {
+                    try self.start()
+                    AudioLog.shared.add("Engine restarted after a configuration change")
+                    self.onRestart?()
+                } catch {
+                    AudioLog.shared.add("Engine restart failed: \(error.localizedDescription)")
+                }
             }
         }
     }
@@ -44,10 +57,11 @@ final class CaptureEngine {
     func start() throws {
         guard !isRunning else { return }
         let input = engine.inputNode
-        // Echo cancellation, so Nova's voice from the speaker is not heard as
-        // the user. Harmless over HFP, where the headset does its own.
-        if !input.isVoiceProcessingEnabled {
-            try? input.setVoiceProcessingEnabled(true)
+        // Echo cancellation for the phone's own mic and speaker. Off on the
+        // glasses, which do their own, because it is what turns the session
+        // into a "phone call" (call volume, gain control, heavy ducking).
+        if input.isVoiceProcessingEnabled != voiceProcessing {
+            try? input.setVoiceProcessingEnabled(voiceProcessing)
         }
         input.removeTap(onBus: 0)
         let inputFormat = input.outputFormat(forBus: 0)

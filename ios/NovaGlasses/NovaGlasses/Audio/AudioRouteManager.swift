@@ -1,8 +1,9 @@
 @preconcurrency import AVFoundation
 import Foundation
 
-/// Owns the AVAudioSession: Bluetooth HFP to the glasses, `.voiceChat` echo
-/// handling, and the notifications that tell the engine to stop or restart.
+/// Owns the AVAudioSession: Bluetooth HFP to the glasses, the mode for the
+/// microphone in use (see `AudioSessionPolicy`), and the notifications that
+/// tell the engine to stop or restart.
 ///
 /// The glasses are a plain Bluetooth headset. Opening their microphone forces
 /// HFP (8 kHz mono, beamformed to the wearer), and while HFP is up their
@@ -32,15 +33,23 @@ final class AudioRouteManager {
     var onMediaServicesReset: (() -> Void)?
 
     private(set) var route = Route(inputName: "—", outputName: "—", isBluetooth: false, sampleRate: 0)
+    /// What the session is set up for right now. The engine reads
+    /// `voiceProcessing` from it when it (re)starts.
+    private(set) var policy = AudioSessionPolicy.forInput(onGlasses: false)
+    private var ducking = false
+    private var isActive = false
     private let session = AVAudioSession.sharedInstance()
+    private let log = AudioLog.shared
     private var observers: [NSObjectProtocol] = []
 
     init() {
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.routeChanged() }
+        ) { [weak self] note in
+            let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
+                .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            MainActor.assumeIsolated { self?.routeChanged(reason: reason) }
         })
         observers.append(center.addObserver(
             forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
@@ -49,10 +58,16 @@ final class AudioRouteManager {
                 .flatMap(AVAudioSession.InterruptionType.init(rawValue:))
             let options = (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
                 .map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
+            let reason = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
             MainActor.assumeIsolated {
                 switch type {
-                case .began: self?.onInterruptionBegan?()
-                case .ended: self?.onInterruptionEnded?(options.contains(.shouldResume))
+                case .began:
+                    self?.log.add("Interrupted (reason \(reason.map(String.init) ?? "none"))")
+                    self?.onInterruptionBegan?()
+                case .ended:
+                    let resume = options.contains(.shouldResume)
+                    self?.log.add("Interruption ended (shouldResume: \(resume))")
+                    self?.onInterruptionEnded?(resume)
                 default: break
                 }
             }
@@ -60,28 +75,62 @@ final class AudioRouteManager {
         observers.append(center.addObserver(
             forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.onMediaServicesReset?() }
+            MainActor.assumeIsolated {
+                self?.log.add("Media services were reset")
+                self?.onMediaServicesReset?()
+            }
         })
     }
 
     /// Configure and activate the session for two-way voice over the glasses.
     func activate() throws {
-        try session.setCategory(
-            .playAndRecord,
-            mode: .voiceChat,
-            options: [.allowBluetooth, .defaultToSpeaker]
-        )
+        policy = AudioSessionPolicy.forInput(onGlasses: hasGlassesInput)
+        ducking = false
+        try session.setCategory(.playAndRecord, mode: policy.mode, options: AudioSessionPolicy.options(ducking: false))
         // HFP wideband is 16 kHz; ask for it and take what the headset gives.
         try? session.setPreferredSampleRate(PCMFormat.sampleRate)
         try? session.setPreferredIOBufferDuration(0.02)
         try session.setActive(true)
+        isActive = true
         preferBluetoothInput()
         refreshRoute()
+        log.add("Session active: \(policy.mode.rawValue), voice processing \(policy.voiceProcessing ? "on" : "off") · \(route.summary)")
     }
 
     func deactivate() {
+        isActive = false
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
         refreshRoute()
+        log.add("Session inactive")
+    }
+
+    /// Duck other apps' audio while Nova speaks, and let it back up after.
+    func setDucking(_ on: Bool) {
+        guard isActive, on != ducking else { return }
+        do {
+            try session.setCategory(.playAndRecord, mode: policy.mode, options: AudioSessionPolicy.options(ducking: on))
+            ducking = on
+        } catch {
+            log.add("Ducking \(on ? "on" : "off") failed: \(error.localizedDescription)")
+        }
+    }
+
+    private var hasGlassesInput: Bool {
+        session.availableInputs?.contains(where: { $0.portType == .bluetoothHFP }) ?? false
+    }
+
+    /// Re-pick the mode when the microphone in use changes between the
+    /// glasses and the phone.
+    private func applyPolicyForRoute() {
+        let wanted = AudioSessionPolicy.forInput(onGlasses: route.isBluetooth)
+        guard isActive, wanted != policy else { return }
+        do {
+            try session.setMode(wanted.mode)
+            policy = wanted
+            log.add("Mode \(wanted.mode.rawValue), voice processing \(wanted.voiceProcessing ? "on" : "off")")
+        } catch {
+            log.add("Mode change failed: \(error.localizedDescription)")
+        }
     }
 
     /// Pick the glasses' microphone over the phone's when both are present.
@@ -94,12 +143,27 @@ final class AudioRouteManager {
         }
     }
 
-    private func routeChanged() {
+    private func routeChanged(reason: AVAudioSession.RouteChangeReason?) {
         preferBluetoothInput()
         let previous = route
         refreshRoute()
         if route != previous {
+            log.add("Route \(reasonName(reason)): \(route.summary)")
+            applyPolicyForRoute()
             onRouteChange?(route)
+        }
+    }
+
+    private func reasonName(_ reason: AVAudioSession.RouteChangeReason?) -> String {
+        switch reason {
+        case .newDeviceAvailable: "new device"
+        case .oldDeviceUnavailable: "device gone"
+        case .categoryChange: "category change"
+        case .override: "override"
+        case .wakeFromSleep: "wake from sleep"
+        case .noSuitableRouteForCategory: "no suitable route"
+        case .routeConfigurationChange: "configuration change"
+        default: "changed"
         }
     }
 
@@ -116,5 +180,3 @@ final class AudioRouteManager {
     }
 }
 
-// `.allowBluetooth` is the HFP option (renamed `.allowBluetoothHFP` in the
-// iOS 26 SDK); it is spelled the old way so this builds on Xcode 16.

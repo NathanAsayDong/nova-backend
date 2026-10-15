@@ -26,16 +26,27 @@ final class SpeechPlayer: SpeechPlaying {
 
     /// Streams not yet fully scheduled, oldest first. Only the head schedules.
     private var streams: [Stream] = []
-    /// Buffers handed to the node that have not finished playing.
-    private var outstanding = 0
-    /// Bumped by `stopAll` so completions of dropped buffers are ignored.
+    /// Buffers handed to the node that have not finished playing, in order.
+    /// Kept so they can be replayed if the engine restarts under them.
+    private var inFlight: [(id: Int, buffer: AVAudioPCMBuffer)] = []
+    /// Buffers decoded while the engine was down, played once it is back.
+    private var held: [AVAudioPCMBuffer] = []
+    private var nextBufferId = 0
+    /// Bumped by `stopAll`/`engineRestarted` so stale completions are ignored.
     private var generation = 0
+    private var watchdog = PlaybackWatchdog()
+    private var watchdogTask: Task<Void, Never>?
+    private var wasBusy = false
 
-    var isBusy: Bool { !streams.isEmpty || outstanding > 0 }
+    /// Called with true when Nova starts making sound and false when it stops.
+    var onActivity: ((Bool) -> Void)?
+
+    var isBusy: Bool { !streams.isEmpty || !inFlight.isEmpty || !held.isEmpty }
 
     func beginStream(_ streamId: String) {
         guard !streams.contains(where: { $0.id == streamId }) else { return }
         streams.append(Stream(id: streamId))
+        activityChanged()
     }
 
     func appendChunk(_ streamId: String, data: Data) {
@@ -58,11 +69,31 @@ final class SpeechPlayer: SpeechPlaying {
     func stopAll() {
         generation += 1
         streams.removeAll()
-        outstanding = 0
+        inFlight.removeAll()
+        held.removeAll()
+        watchdogTask?.cancel()
+        watchdogTask = nil
         node.stop()
         if node.engine?.isRunning == true {
             node.play()
         }
+        activityChanged()
+    }
+
+    /// The engine stopped and started again (route change, interruption,
+    /// media reset). Whatever was scheduled on the node is gone without its
+    /// completions firing, so play it again from the buffer that was playing.
+    func engineRestarted() {
+        guard node.engine?.isRunning == true else { return }
+        let replay = inFlight.map(\.buffer) + held
+        generation += 1
+        inFlight.removeAll()
+        held.removeAll()
+        node.stop()
+        node.play()
+        guard !replay.isEmpty else { return }
+        AudioLog.shared.add("Replaying \(replay.count) buffer(s) after an engine restart")
+        schedule(replay)
     }
 
     private func pump() {
@@ -76,30 +107,85 @@ final class SpeechPlayer: SpeechPlaying {
     }
 
     private func schedule(_ buffers: [AVAudioPCMBuffer]) {
-        guard !buffers.isEmpty, node.engine?.isRunning == true else { return }
+        guard !buffers.isEmpty else { return }
+        guard node.engine?.isRunning == true else {
+            held.append(contentsOf: buffers)
+            armWatchdog()
+            return
+        }
+        if inFlight.isEmpty {
+            // Starting again after a gap (the next sentence arriving), which
+            // is waiting on the server, not a stall.
+            watchdog.progressed(at: Self.now)
+        }
         let generation = generation
         for buffer in buffers {
-            outstanding += 1
+            let id = nextBufferId
+            nextBufferId += 1
+            inFlight.append((id, buffer))
             node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { @Sendable [weak self] _ in
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.bufferPlayed(generation) }
+                    MainActor.assumeIsolated { self?.bufferPlayed(id, generation) }
                 }
             }
         }
         if !node.isPlaying {
             node.play()
         }
+        armWatchdog()
     }
 
-    private func bufferPlayed(_ generation: Int) {
+    private func bufferPlayed(_ id: Int, _ generation: Int) {
         guard generation == self.generation else { return }
-        outstanding = max(0, outstanding - 1)
+        inFlight.removeAll { $0.id == id }
+        watchdog.progressed(at: Self.now)
         checkDrained()
     }
 
     private func checkDrained() {
+        activityChanged()
         if !isBusy {
+            watchdogTask?.cancel()
+            watchdogTask = nil
             onDrained?()
         }
+    }
+
+    private func activityChanged() {
+        if isBusy != wasBusy {
+            wasBusy = isBusy
+            onActivity?(isBusy)
+        }
+    }
+
+    // MARK: - Watchdog
+
+    private static var now: Double { ProcessInfo.processInfo.systemUptime }
+
+    private func armWatchdog() {
+        guard watchdogTask == nil else { return }
+        watchdog.progressed(at: Self.now)
+        watchdogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.checkStall()
+            }
+        }
+    }
+
+    private func checkStall() {
+        let head = inFlight.first?.buffer
+        let headDuration = head.map { Double($0.frameLength) / $0.format.sampleRate } ?? 0
+        let stalled = watchdog.isStalled(
+            now: Self.now,
+            waiting: !inFlight.isEmpty || !held.isEmpty,
+            engineRunning: node.engine?.isRunning == true,
+            headDuration: headDuration
+        )
+        guard stalled else { return }
+        AudioLog.shared.add("Playback stalled; dropping the audio that was stuck")
+        stopAll()
+        onDrained?()
     }
 }

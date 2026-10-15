@@ -61,6 +61,12 @@ final class AppModel {
 
         capture.attach(player.node)
         capture.attach(earcons.node)
+        capture.onRestart = { [weak self] in
+            self?.player.engineRestarted()
+        }
+        player.onActivity = { [weak self] speaking in
+            self?.route.setDucking(speaking)
+        }
         capture.onFrame = { [weak self] frame, now in
             self?.controller.ingest(frame: frame, at: now)
         }
@@ -172,7 +178,27 @@ final class AppModel {
         try route.activate()
         routeSummary = route.route.summary
         wasOnGlasses = route.route.isBluetooth
+        capture.voiceProcessing = route.policy.voiceProcessing
         try capture.start()
+        // Anything Nova was saying when the engine went down plays on.
+        player.engineRestarted()
+    }
+
+    /// The microphone moved between the glasses and the phone, so the engine
+    /// has to come back up with voice processing switched to match.
+    private func applyVoiceProcessingForRoute() {
+        let wanted = route.policy.voiceProcessing
+        guard capture.voiceProcessing != wanted else { return }
+        capture.voiceProcessing = wanted
+        guard capture.isRunning else { return }
+        capture.stop()
+        do {
+            try capture.start()
+            player.engineRestarted()
+        } catch {
+            AudioLog.shared.add("Engine restart for the new route failed: \(error.localizedDescription)")
+            resumeAfterInterruption()
+        }
     }
 
     private func stopAudio() {
@@ -187,6 +213,7 @@ final class AppModel {
         route.onRouteChange = { [weak self] route in
             guard let self else { return }
             self.routeSummary = route.summary
+            self.applyVoiceProcessingForRoute()
             self.glassesRouteChanged(onGlasses: route.isBluetooth)
         }
         route.onInterruptionBegan = { [weak self] in
