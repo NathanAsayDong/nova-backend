@@ -1,10 +1,13 @@
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from unittest import mock
 from uuid import UUID, uuid4
 
 from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
+from src.model.responsibility import Responsibility
+from src.model.tool import Tool
 from src.service.tool_service import ToolExecutionError, ToolService
 
 
@@ -21,8 +24,20 @@ class FakeMessage:
 
 
 class FakeToolDao:
+    def __init__(self, tools=()):
+        self.tools = list(tools)
+
     def get_all(self):
-        return []
+        return self.tools
+
+
+def _schema_tool(name: str) -> Tool:
+    return Tool(
+        id=hash(name) % 10_000,
+        name=name,
+        description=f"{name} tool",
+        config={"input_schema": {"type": "object", "properties": {}}},
+    )
 
 
 class FakeUpdateService:
@@ -82,7 +97,9 @@ class BackgroundAgentTests(unittest.TestCase):
         self.captured = []
 
         def fake_get_response(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
-            self.captured.append({"context": list(context or []), "system": system})
+            self.captured.append(
+                {"context": list(context or []), "system": system, "tools": tools}
+            )
             return FakeMessage(content=[FakeTextBlock("All done: two files fixed.")])
 
         self.agent_loop.claude_service.get_response = fake_get_response
@@ -226,6 +243,98 @@ class ReportTypeTests(BackgroundAgentTests):
         self._join_background()
 
         self.assertEqual(self.update_service.created[0]["report_type"], "call")
+
+
+_RESTRICTED_TOOL_NAMES = {
+    "create_responsibility",
+    "create_scheduled_task",
+    "update_responsibility",
+    "delete_responsibility",
+}
+
+
+class ResponsibilityRunToolRestrictionTests(unittest.TestCase):
+    """
+    A run launched from a responsibility is unattended — nobody is there to
+    notice it schedule more unattended work on itself. That's how ids ~41 and
+    ~44 ended up as duplicate responsibilities spawned from a responsibility's
+    own run instead of it just doing the job. Such runs must not see
+    create_responsibility, create_scheduled_task, update_responsibility, or
+    delete_responsibility in their tool list, and must be told in the prompt
+    not to create or modify responsibilities/tasks.
+    """
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+
+        tools = [_schema_tool(name) for name in _RESTRICTED_TOOL_NAMES] + [
+            _schema_tool("list_responsibilities"),
+            _schema_tool("send_email"),
+        ]
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao(tools)
+        self.agent_loop.tool_service = tool_service
+        # Fakes so a background=True run never touches the real DB-backed
+        # services — only test_background_run_from_responsibility_is_also_restricted
+        # exercises that path, but setting these up front keeps setUp simple.
+        self.agent_loop.update_service = FakeUpdateService()
+        self.agent_loop.conversation_service = FakeConversationService()
+
+        self.responsibility = Responsibility(
+            id=42,
+            name="Text me at noon",
+            description="Text the user at noon.",
+            schedule=["afternoon"],
+        )
+        dao_patcher = mock.patch("src.harness.agent_loop.ResponsibilityDao")
+        mock_dao_cls = dao_patcher.start()
+        mock_dao_cls.return_value.get.return_value = self.responsibility
+        self.addCleanup(dao_patcher.stop)
+
+        self.captured = []
+
+        def fake_get_response(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            self.captured.append(
+                {"context": list(context or []), "system": system, "tools": tools}
+            )
+            return FakeMessage(content=[FakeTextBlock("Texted the user.")])
+
+        self.agent_loop.claude_service.get_response = fake_get_response
+
+    def test_restricted_tools_absent_from_responsibility_run(self):
+        self.agent_loop.run_agent(responsibility_id=42)
+
+        tool_names = {t["name"] for t in (self.captured[0]["tools"] or [])}
+        self.assertFalse(tool_names & _RESTRICTED_TOOL_NAMES)
+        self.assertIn("list_responsibilities", tool_names)
+        self.assertIn("send_email", tool_names)
+
+    def test_prompt_tells_agent_not_to_manage_responsibilities(self):
+        self.agent_loop.run_agent(responsibility_id=42)
+
+        task = self.captured[0]["context"][0]["content"]
+        self.assertIn("do not create or modify responsibilities", task.lower())
+
+    def test_ordinary_prompt_run_keeps_all_tools(self):
+        """A plain prompt run (no responsibility_id) is unrestricted."""
+        self.agent_loop.run_agent(prompt="do the thing")
+
+        tool_names = {t["name"] for t in (self.captured[0]["tools"] or [])}
+        self.assertTrue(_RESTRICTED_TOOL_NAMES.issubset(tool_names))
+
+    def test_background_run_from_responsibility_is_also_restricted(self):
+        """
+        preform_responsibility never sets background=True today, but if a
+        responsibility run is ever dispatched in the background, the
+        restriction must still follow it onto that thread.
+        """
+        self.agent_loop.run_agent(responsibility_id=42, background=True)
+        for thread in self.agent_loop.background_threads:
+            thread.join(timeout=5)
+
+        tool_names = {t["name"] for t in (self.captured[0]["tools"] or [])}
+        self.assertFalse(tool_names & _RESTRICTED_TOOL_NAMES)
 
 
 if __name__ == "__main__":

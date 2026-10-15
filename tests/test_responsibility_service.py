@@ -335,18 +335,21 @@ class CrudTests(unittest.TestCase):
     def test_unknown_project_is_refused(self):
         with self.assertRaises(ValueError):
             self.service.create_responsibility(
-                name="R", description="d", project_id=999
+                name="R", description="d", schedule=["morning"], project_id=999
             )
 
     def test_unknown_report_type_is_refused(self):
         with self.assertRaises(ValueError):
             self.service.create_responsibility(
-                name="R", description="d", report_type="carrier_pigeon"
+                name="R",
+                description="d",
+                schedule=["morning"],
+                report_type="carrier_pigeon",
             )
 
     def test_undeliverable_report_type_warns_but_creates(self):
         created = self.service.create_responsibility(
-            name="R", description="d", report_type="chat"
+            name="R", description="d", schedule=["morning"], report_type="chat"
         )
         self.assertEqual(created["report_type"], "chat")
         self.assertFalse(created["report_deliverable"])
@@ -356,7 +359,10 @@ class CrudTests(unittest.TestCase):
         for report_type in ("email", "call", "sms"):
             with self.subTest(report_type=report_type):
                 created = self.service.create_responsibility(
-                    name="R", description="d", report_type=report_type
+                    name="R",
+                    description="d",
+                    schedule=["morning"],
+                    report_type=report_type,
                 )
                 self.assertTrue(created["report_deliverable"])
                 self.assertNotIn("warning", created)
@@ -373,7 +379,9 @@ class CrudTests(unittest.TestCase):
         self.assertEqual(updated["schedule"], ["night"])
 
     def test_update_validates_schedule(self):
-        created = self.service.create_responsibility(name="R", description="d")
+        created = self.service.create_responsibility(
+            name="R", description="d", schedule=["morning"]
+        )
         with self.assertRaises(ValueError):
             self.service.update_responsibility(created["id"], schedule=["whenever"])
 
@@ -382,12 +390,18 @@ class CrudTests(unittest.TestCase):
             self.service.update_responsibility(999, name="x")
 
     def test_list_returns_all(self):
-        self.service.create_responsibility(name="A", description="a")
-        self.service.create_responsibility(name="B", description="b")
+        self.service.create_responsibility(
+            name="A", description="a", schedule=["morning"]
+        )
+        self.service.create_responsibility(
+            name="B", description="b", schedule=["evening"]
+        )
         self.assertEqual(len(self.service.get_all_responsibilities()), 2)
 
     def test_delete_removes_it(self):
-        created = self.service.create_responsibility(name="R", description="d")
+        created = self.service.create_responsibility(
+            name="R", description="d", schedule=["morning"]
+        )
         result = self.service.delete_responsibility(created["id"])
 
         self.assertEqual(result["status"], "deleted")
@@ -398,3 +412,54 @@ class CrudTests(unittest.TestCase):
     def test_delete_missing_responsibility_is_refused(self):
         with self.assertRaises(ValueError):
             self.service.delete_responsibility(999)
+
+
+class CreateScheduleRequirementTests(unittest.TestCase):
+    """
+    A responsibility created with no schedule used to text the user at every
+    window (morning/afternoon/evening/night) instead of just the one the user
+    asked for — is_due() treats a null schedule as "every window" for
+    backward compatibility with rows that already exist. Going forward,
+    create_responsibility must force an explicit choice.
+    """
+
+    def setUp(self):
+        self.service = build_service()
+
+    def test_null_schedule_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.service.create_responsibility(
+                name="Text me at noon", description="d", schedule=None
+            )
+        message = str(ctx.exception)
+        self.assertIn("schedule", message.lower())
+        self.assertIn("morning", message)
+
+    def test_omitted_schedule_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.service.create_responsibility(name="R", description="d")
+
+    def test_empty_schedule_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.service.create_responsibility(
+                name="R", description="d", schedule=[]
+            )
+
+    def test_valid_schedule_is_accepted(self):
+        created = self.service.create_responsibility(
+            name="Text me at noon",
+            description="d",
+            schedule=["afternoon"],
+        )
+        self.assertEqual(created["schedule"], ["afternoon"])
+
+    def test_legacy_null_schedule_responsibility_still_due_every_window(self):
+        """
+        A responsibility that already exists in the database with
+        schedule=None (created before this validation existed) must keep
+        running in every window rather than being orphaned by the new rule.
+        """
+        legacy = Responsibility(id=99, name="legacy", schedule=None, last_run=None)
+        for hour in (8, 14, 19, 23):
+            with self.subTest(hour=hour):
+                self.assertTrue(self.service.is_due(legacy, at(hour)))

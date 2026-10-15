@@ -168,9 +168,9 @@
     "semantic_hash": "b6abc26deaf249a1bbb4b3e18b5733ba"
   },
   "scripts/register_project_tools.py": {
-    "mtime": 1791903265.0594678,
-    "seen": 1791903303.062749,
-    "ast_hash": "08a94e3d13b42b2568eea7b0a166ea08",
+    "mtime": 1792023621.8080506,
+    "seen": 1792023748.594558,
+    "ast_hash": "4129c2c6ab7c9a22685e11e534cda4ca",
     "semantic_hash": ""
   },
   "scripts/run_migrations.py": {
@@ -372,10 +372,10 @@
     "semantic_hash": "096e91648c58c391cf2da40318d8d1bc"
   },
   "src/harness/agent_loop.py": {
-    "mtime": 1791731885.726425,
-    "seen": 1791902973.2601972,
-    "ast_hash": "1db24767b58e0b36118b0399cb8bfdad",
-    "semantic_hash": "1db24767b58e0b36118b0399cb8bfdad"
+    "mtime": 1792023602.8844585,
+    "seen": 1792023748.5951731,
+    "ast_hash": "27246c96de623967ec7c55242c419ab6",
+    "semantic_hash": ""
   },
   "src/harness/spoken_reply.py": {
     "mtime": 1791731885.7267253,
@@ -618,10 +618,10 @@
     "semantic_hash": "52c95f5cac19f313507e020afaafd80d"
   },
   "src/service/responsibility_service.py": {
-    "mtime": 1787091587.4892957,
-    "seen": 1791496295.160526,
-    "ast_hash": "4753c9e1eb14c3e73a801147d8e676a0",
-    "semantic_hash": "4753c9e1eb14c3e73a801147d8e676a0"
+    "mtime": 1792023607.419343,
+    "seen": 1792023748.5959392,
+    "ast_hash": "2098473eb157d87658b49a5a922eaf4a",
+    "semantic_hash": ""
   },
   "src/service/settings_service.py": {
     "mtime": 1791997711.14548,
@@ -684,10 +684,10 @@
     "semantic_hash": "7c5e1b277b082817cd1c828e8d4cab7e"
   },
   "tests/test_background_agent.py": {
-    "mtime": 1787697343.4961388,
-    "seen": 1791496295.160531,
-    "ast_hash": "c2d21e80cf2751b8bfc4d26426715add",
-    "semantic_hash": "c2d21e80cf2751b8bfc4d26426715add"
+    "mtime": 1792023733.0848088,
+    "seen": 1792023748.596147,
+    "ast_hash": "4d2cdd21f44171b10df3a20b965fc6a1",
+    "semantic_hash": ""
   },
   "tests/test_call_controller.py": {
     "mtime": 1787091587.5164726,
@@ -792,10 +792,10 @@
     "semantic_hash": "19f39717ae011a64c3b9983528a83fd8"
   },
   "tests/test_responsibility_service.py": {
-    "mtime": 1787091587.49034,
-    "seen": 1791496295.1605382,
-    "ast_hash": "8e579b211efa0fbe1fedeadcfe60f977",
-    "semantic_hash": "8e579b211efa0fbe1fedeadcfe60f977"
+    "mtime": 1792023666.2601607,
+    "seen": 1792023748.596428,
+    "ast_hash": "1cbafc297d5872ba3a1d33152aa50eae",
+    "semantic_hash": ""
   },
   "tests/test_settings_service.py": {
     "mtime": 1789056761.41414,

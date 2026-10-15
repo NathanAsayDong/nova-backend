@@ -133,6 +133,15 @@ class ResponsibilityService:
                 "agent gets when this runs unattended, so state the task fully."
             )
 
+        if not schedule:
+            raise ValueError(
+                "A schedule is required: choose one or more of "
+                f"{sorted(_WINDOW_BOUNDS)}. These are coarse windows "
+                "(morning=6-12, afternoon=12-17, evening=17-21, night=21-6), "
+                "not exact clock times — for an exact time use "
+                "create_scheduled_task instead."
+            )
+
         validated_type = self._validate_report_type(report_type)
         created = self.responsibility_dao.create(
             Responsibility(

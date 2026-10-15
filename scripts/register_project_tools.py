@@ -1011,9 +1011,13 @@ _SCHEDULE_PROPERTY = {
         "enum": ["morning", "afternoon", "evening", "night"],
     },
     "description": (
-        "Time-of-day windows to run in. Runs at most once per window, so "
-        "['morning','evening'] means twice a day. morning=6-12, "
-        "afternoon=12-17, evening=17-21, night=21-6. Omit to run every window."
+        "Required: one or more coarse time-of-day windows to run in. Runs at "
+        "most once per window, so ['morning','evening'] means twice a day. "
+        "These are coarse blocks, NOT exact clock times: morning=6-12, "
+        "afternoon=12-17, evening=17-21, night=21-6. If the user wants "
+        "something at an exact time (e.g. '3pm' or 'in 20 minutes'), use "
+        "create_scheduled_task instead — do not approximate an exact time "
+        "with a window."
     ),
 }
 _REPORT_TYPE_PROPERTY = {
@@ -1068,10 +1072,15 @@ RESPONSIBILITY_TOOLS: list[dict] = [
         "name": "create_responsibility",
         "description": (
             "Create a recurring background task that runs on a schedule without "
-            "the user present. The description is the ONLY instruction the agent "
-            "receives when it runs later, so write it as a complete, standalone "
-            "brief — not a reminder note. Attach a project_id when the work "
-            "belongs to a project, so it can use that project's files and memory."
+            "the user present. A schedule is required — one or more of "
+            "morning/afternoon/evening/night (coarse windows, not exact clock "
+            "times; see the schedule field). For a one-time task at an exact "
+            "moment (e.g. '3pm today', 'in 20 minutes'), use "
+            "create_scheduled_task instead. The description is the ONLY "
+            "instruction the agent receives when it runs later, so write it as "
+            "a complete, standalone brief — not a reminder note. Attach a "
+            "project_id when the work belongs to a project, so it can use that "
+            "project's files and memory."
         ),
         "config": {
             "type": "service_method",
@@ -1097,7 +1106,7 @@ RESPONSIBILITY_TOOLS: list[dict] = [
                     },
                     "report_type": _REPORT_TYPE_PROPERTY,
                 },
-                "required": ["name", "description"],
+                "required": ["name", "description", "schedule"],
                 "additionalProperties": False,
             },
         },

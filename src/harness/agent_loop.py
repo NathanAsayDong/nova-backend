@@ -70,6 +70,25 @@ _MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 1.5
 _MEMORY_OPEN_TAG = "<recalled_memory>"
 _MEMORY_CLOSE_TAG = "</recalled_memory>"
 
+# A run launched from a responsibility has nobody present to catch it
+# scheduling more unattended work on itself — that's how ids ~41 and ~44
+# became duplicate responsibilities spawned from a responsibility's own run.
+# These tool names are withheld from such runs; the responsibility itself is
+# still managed by whoever is in the foreground conversation.
+_RESPONSIBILITY_RESTRICTED_TOOLS = frozenset(
+    {
+        "create_responsibility",
+        "create_scheduled_task",
+        "update_responsibility",
+        "delete_responsibility",
+    }
+)
+
+_RESPONSIBILITY_RUN_RESTRICTION = (
+    "Do the work described above. Do not create or modify responsibilities "
+    "or scheduled tasks — you will not have those tools available."
+)
+
 
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -1051,12 +1070,15 @@ class AgentLoop:
 
         validated_report_type = self._validate_report_type(report_type)
 
+        restrict_management_tools = responsibility_id is not None
+
         parts: list[str] = []
         if responsibility_id is not None:
             responsibility = ResponsibilityDao().get(responsibility_id)
             if responsibility is None:
                 raise ValueError(f"Responsibility with id {responsibility_id} not found")
             parts.append(responsibility.to_prompt().strip())
+            parts.append(_RESPONSIBILITY_RUN_RESTRICTION)
         if prompt and prompt.strip():
             parts.append(prompt.strip())
         if validated_report_type is not None:
@@ -1070,6 +1092,7 @@ class AgentLoop:
             thread = threading.Thread(
                 target=self._run_background_agent,
                 args=(task_prompt, conversation_uuid, validated_report_type),
+                kwargs={"restrict_management_tools": restrict_management_tools},
                 name="nova-background-agent",
                 daemon=True,
             )
@@ -1095,7 +1118,9 @@ class AgentLoop:
                 "the user can ask about their updates later."
             )
 
-        return self._run_agent_loop(task_prompt)
+        return self._run_agent_loop(
+            task_prompt, restrict_management_tools=restrict_management_tools
+        )
 
     @staticmethod
     def _validate_report_type(report_type: str | None) -> "ReportType | None":
@@ -1147,6 +1172,7 @@ class AgentLoop:
         task_prompt: str,
         conversation_uuid: str | None,
         report_type: "ReportType | None" = None,
+        restrict_management_tools: bool = False,
     ) -> None:
         """
         Body of a background=True run: do the work, then record an Update.
@@ -1193,7 +1219,9 @@ class AgentLoop:
 
         try:
             summary = self._run_agent_loop(
-                full_prompt, system=PromptEnums.BACKGROUND_AGENT_PROMPT.load()
+                full_prompt,
+                system=PromptEnums.BACKGROUND_AGENT_PROMPT.load(),
+                restrict_management_tools=restrict_management_tools,
             )
         except Exception as exc:
             summary = f"A background task failed before completing: {exc}"
@@ -1209,7 +1237,12 @@ class AgentLoop:
         except Exception as exc:
             print(f"Background agent failed to record its update: {exc}")
 
-    def _run_agent_loop(self, task_prompt: str, system: str | None = None) -> str:
+    def _run_agent_loop(
+        self,
+        task_prompt: str,
+        system: str | None = None,
+        restrict_management_tools: bool = False,
+    ) -> str:
         """The bounded ReAct loop shared by foreground and background runs."""
         if self.tool_service is None:
             self.tool_service = ToolService()
@@ -1228,6 +1261,8 @@ class AgentLoop:
             config = tool.config if isinstance(tool.config, dict) else {}
             input_schema = config.get("input_schema")
             if not name or not isinstance(input_schema, dict):
+                continue
+            if restrict_management_tools and name in _RESPONSIBILITY_RESTRICTED_TOOLS:
                 continue
             tools_by_name[name] = tool
             claude_tools.append(
