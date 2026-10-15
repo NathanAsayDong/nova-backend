@@ -47,8 +47,11 @@ final class ConversationController {
     static let sendBatchMs = 200.0
     /// Held audio is sent in pieces no larger than this.
     static let maxMessageBytes = 32_000
-    /// How long `stop` waits for a photo still on its way up.
-    static let photoWaitSeconds: Double = 3
+    /// The waiting pulse repeats this often while a photo is on its way.
+    static let waitingPulseSeconds: Double = 0.9
+    /// How long `stop` waits for a photo still on its way up. Measured on
+    /// device: stream ~3 s cold, photo ~2.7 s, upload ~1 s.
+    static let photoWaitSeconds: Double = 8
 
     // MARK: Observable state for the UI
 
@@ -142,6 +145,7 @@ final class ConversationController {
     @ObservationIgnored private var listenTimer: Cancellable?
     @ObservationIgnored private var socketWaitTimer: Cancellable?
     @ObservationIgnored private var thinkingTimer: Cancellable?
+    @ObservationIgnored private var waitingPulse: Cancellable?
 
     init(
         socket: NovaSocketing,
@@ -166,6 +170,7 @@ final class ConversationController {
         socket.onStateChange = { [weak self] state in self?.handleConnection(state) }
         player.onDrained = { [weak self] in self?.playbackDrained() }
         wake.onWake = { [weak self] in self?.handleWake() }
+        wake.onTranscript = { [weak self] text in self?.maybeTakePhoto(for: text) }
 
         detector.onSpeechOnset = { [weak self] in self?.speechOnset() }
         detector.onSpeechStart = { [weak self] in self?.speechOnset() }
@@ -240,6 +245,12 @@ final class ConversationController {
         if capture == nil {
             startCapture(.turn)
         }
+        // On-device captions for a follow-up ("what's this?"), for the
+        // vision trigger. A wake heard here changes nothing.
+        if camera != nil, !wakeUtteranceOpen {
+            wakeUtteranceOpen = true
+            wake.beginUtterance(seed: preRoll.snapshot())
+        }
     }
 
     private func speechAbort() {
@@ -280,6 +291,7 @@ final class ConversationController {
             return
         }
         guard phase == .listening, let capture, capture.promoted, !capture.discarded else { return }
+        closeWakeUtterance()
         earcons.play(.thinking)
         setPhase(.thinking, "Thinking…")
         armThinkingTimeout()
@@ -289,8 +301,8 @@ final class ConversationController {
     // MARK: - Wake
 
     private func handleWake() {
-        wakeUtteranceOpen = false
-        wake.cancel()
+        // The recognizer keeps running to the end of the utterance (see
+        // `onTranscript`); `turnEnd` closes it.
         switch phase {
         case .speaking:
             bargeIn()
@@ -437,16 +449,21 @@ final class ConversationController {
             return
         }
         // Whichever comes first, the photo or the deadline, sends the stop.
+        startWaitingPulse()
         let once = Once()
         let timer = scheduler.after(Self.photoWaitSeconds) { [weak self] in
             once.run {
                 AudioLog.shared.add("Photo not ready in time; sending the turn without it")
+                self?.stopWaitingPulse()
                 self?.emitStop(purpose, imageId: nil)
             }
         }
         photo.onFinish = { [weak self, weak photo] in
             timer.cancel()
-            once.run { self?.emitStop(purpose, imageId: photo?.imageId) }
+            once.run {
+                self?.stopWaitingPulse()
+                self?.emitStop(purpose, imageId: photo?.imageId)
+            }
         }
     }
 
@@ -460,11 +477,30 @@ final class ConversationController {
 
     // MARK: - Vision
 
+    /// A soft pulse until the photo is in, so the wait is not silence.
+    private func startWaitingPulse() {
+        stopWaitingPulse()
+        pulse()
+    }
+
+    private func pulse() {
+        earcons.play(.waiting)
+        waitingPulse = scheduler.after(Self.waitingPulseSeconds) { [weak self] in
+            self?.pulse()
+        }
+    }
+
+    private func stopWaitingPulse() {
+        waitingPulse?.cancel()
+        waitingPulse = nil
+    }
+
     /// The caption asks to look: take the photo now, while the user is still
     /// talking, so it is on the server by the time the turn ends.
     private func maybeTakePhoto(for caption: String) {
-        guard let capture, capture.photo == nil, let camera, let vision,
+        guard phase == .listening, let capture, capture.photo == nil, let camera, let vision,
               camera.state.canCapture, VisionIntent.wantsToSee(caption) else { return }
+        AudioLog.shared.add("Vision phrase heard: \"\(caption)\" — taking a photo")
         let slot = PhotoSlot()
         capture.photo = slot
         Task { @MainActor [weak self] in
@@ -486,6 +522,7 @@ final class ConversationController {
             Task { await vision.reportCaptureFailed(requestId: requestId, reason: "The glasses camera isn't connected.") }
             return
         }
+        startWaitingPulse()
         Task { @MainActor [weak self] in
             do {
                 let jpeg = try await camera.capturePhoto()
@@ -494,6 +531,7 @@ final class ConversationController {
             } catch {
                 await vision.reportCaptureFailed(requestId: requestId, reason: error.localizedDescription)
             }
+            self?.stopWaitingPulse()
         }
     }
 
@@ -516,6 +554,12 @@ final class ConversationController {
     }
 
     /// Forget a sentry utterance that never woke anything. Nothing was sent.
+    private func closeWakeUtterance() {
+        guard wakeUtteranceOpen else { return }
+        wakeUtteranceOpen = false
+        wake.cancel()
+    }
+
     private func discardSentryCapture() {
         wakeGraceTimer?.cancel()
         if let capture, capture.purpose == .sentry, !capture.promoted {
@@ -568,6 +612,7 @@ final class ConversationController {
         listenTimer?.cancel()
         socketWaitTimer?.cancel()
         thinkingTimer?.cancel()
+        stopWaitingPulse()
     }
 
     // MARK: - Phase
@@ -664,9 +709,11 @@ final class ConversationController {
             maybeTakePhoto(for: text)
 
         case .captureRequest(let requestId, _):
+            AudioLog.shared.add("Nova asked to look (\(requestId))")
             serveCaptureRequest(requestId)
 
         case .userTranscript(let text, let conversationId):
+            AudioLog.shared.add("Server heard: \"\(text)\"")
             conversationIds.save(conversationId)
             partialTranscript = ""
             lastTranscript = text
@@ -693,8 +740,9 @@ final class ConversationController {
             guard !suppressAssistantAudio else { return }
             player.endStream(streamId)
 
-        case .done(_, let conversationId, _):
+        case .done(_, let conversationId, let assistantText):
             guard !suppressAssistantAudio else { return }
+            AudioLog.shared.add("Nova said: \"\(assistantText.prefix(160))\"")
             conversationIds.save(conversationId)
             thinkingTimer?.cancel()
             pendingFollowUp = true

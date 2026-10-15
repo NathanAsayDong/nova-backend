@@ -74,6 +74,7 @@ final class FakeEarcons: EarconPlaying {
 @MainActor
 final class FakeWake: WakeDetecting {
     var onWake: (() -> Void)?
+    var onTranscript: ((String) -> Void)?
     var utterances = 0
     var seedBytes = 0
     var fedBytes = 0
@@ -84,6 +85,7 @@ final class FakeWake: WakeDetecting {
     func endUtterance() { ended += 1 }
     func cancel() { cancels += 1 }
     func hear() { onWake?() }
+    func caption(_ text: String) { onTranscript?(text) }
 }
 
 @MainActor

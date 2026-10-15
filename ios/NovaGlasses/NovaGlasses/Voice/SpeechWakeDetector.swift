@@ -15,6 +15,7 @@ import Speech
 @MainActor
 final class SpeechWakeDetector: WakeDetecting {
     var onWake: (() -> Void)?
+    var onTranscript: ((String) -> Void)?
 
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let format = AVAudioFormat(
@@ -24,6 +25,8 @@ final class SpeechWakeDetector: WakeDetecting {
     private var task: SFSpeechRecognitionTask?
     /// Bumped per utterance so a late result from an old task is ignored.
     private var generation = 0
+    /// The wake already fired for this utterance; later results only caption.
+    private var woke = false
 
     var isAvailable: Bool {
         guard let recognizer else { return false }
@@ -52,16 +55,21 @@ final class SpeechWakeDetector: WakeDetecting {
         request.contextualStrings = ["Nova", "Hey Nova", "OK Nova"]
         self.request = request
         generation += 1
+        woke = false
         let generation = generation
         task = recognizer.recognitionTask(with: request) { @Sendable [weak self] result, _ in
             guard let text = result?.bestTranscription.formattedString else { return }
-            let woke = WakePhrase.startsWithWakePhrase(text)
-            guard woke else { return }
+            let wakes = WakePhrase.startsWithWakePhrase(text)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.generation == generation else { return }
-                    self.cancel()
-                    self.onWake?()
+                    // Keep recognizing after the wake: the rest of the
+                    // sentence feeds the vision trigger.
+                    if wakes && !self.woke {
+                        self.woke = true
+                        self.onWake?()
+                    }
+                    self.onTranscript?(text)
                 }
             }
         }

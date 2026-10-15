@@ -41,8 +41,11 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         # The audio engine keeps running while the phone is locked, which is
         # what keeps the app (and "Hey Nova") alive in the background.
-        # bluetooth-central keeps the toolkit's link to the glasses alive.
-        UIBackgroundModes: [audio, bluetooth-central]
+        # The toolkit's links to the glasses: BLE for control, Bluetooth
+        # Classic (ExternalAccessory) for the camera. Without the accessory
+        # protocol the camera stream sits in waitingForDevice and times out.
+        UIBackgroundModes: [audio, bluetooth-central, bluetooth-peripheral, external-accessory, processing]
+        UISupportedExternalAccessoryProtocols: [com.meta.ar.wearable]
         NSMicrophoneUsageDescription: >-
           Nova listens through your glasses' microphone for "Hey Nova" and for
           what you ask it.

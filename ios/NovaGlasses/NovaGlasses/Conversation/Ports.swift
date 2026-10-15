@@ -48,6 +48,8 @@ enum Earcon: String, CaseIterable, Sendable {
     case error
     /// Two quick high ticks: a photo was taken through the glasses.
     case shutter
+    /// One soft pulse, repeated while a photo is on its way: "hold on, looking".
+    case waiting
 }
 
 @MainActor
@@ -61,6 +63,10 @@ protocol EarconPlaying: AnyObject {
 @MainActor
 protocol WakeDetecting: AnyObject {
     var onWake: (() -> Void)? { get set }
+    /// Every on-device transcript of the open utterance, as it grows. It
+    /// keeps coming after the wake, so "Hey Nova, what do you see" is heard
+    /// here well before the server's captions.
+    var onTranscript: ((String) -> Void)? { get set }
     /// Begin recognizing a new utterance. `seed` is 16 kHz mono Int16 PCM.
     func beginUtterance(seed: Data)
     /// More audio for the open utterance (same format).

@@ -37,7 +37,9 @@ final class DATGlassesCamera: GlassesCamera {
     }
 
     static let idleSeconds: Double = 20
-    static let startTimeout: Double = 8
+    /// The stream negotiates a Wi‑Fi link to the glasses on first use, which
+    /// can take a while.
+    static let startTimeout: Double = 15
     static let photoTimeout: Double = 4
 
     private(set) var state: GlassesCameraState = .unregistered
@@ -58,6 +60,10 @@ final class DATGlassesCamera: GlassesCamera {
     @ObservationIgnored private var registered = false
     /// Link-state listeners, one per glasses the toolkit knows about.
     @ObservationIgnored private var linkWatches: [DeviceIdentifier: any AnyListenerToken] = [:]
+    /// The glasses whose toolkit link is up: the session is opened on them
+    /// directly. A fresh AutoDeviceSelector has not picked a device yet and
+    /// fails with "No eligible device available".
+    @ObservationIgnored private var connectedDevice: DeviceIdentifier?
 
     init() {
         do {
@@ -138,18 +144,24 @@ final class DATGlassesCamera: GlassesCamera {
             guard let device = wearables.deviceForIdentifier(id) else { continue }
             AudioLog.shared.add("Glasses \(device.nameOrId()): link \(device.linkState)")
             linkWatches[id] = device.addLinkStateListener { [weak self] link in
-                Task { @MainActor in await self?.linkChanged(link) }
+                Task { @MainActor in await self?.linkChanged(link, device: id) }
             }
             if device.linkState == .connected {
-                await linkChanged(.connected)
+                await linkChanged(.connected, device: id)
             }
         }
     }
 
-    private func linkChanged(_ link: LinkState) async {
-        AudioLog.shared.add("Glasses link: \(link)")
-        if link == .connected, registered, cameraPermitted != true {
-            await refreshPermission()
+    private func linkChanged(_ link: LinkState, device id: DeviceIdentifier) async {
+        let compatibility = wearables?.deviceForIdentifier(id)?.compatibility()
+        AudioLog.shared.add("Glasses link: \(link) (\(compatibility?.displayString ?? "unknown compatibility"))")
+        if link == .connected {
+            connectedDevice = id
+            if registered, cameraPermitted != true {
+                await refreshPermission()
+            }
+        } else if connectedDevice == id {
+            connectedDevice = nil
         }
     }
 
@@ -231,19 +243,31 @@ final class DATGlassesCamera: GlassesCamera {
 
     private func startStream() async throws {
         guard let wearables else { throw CameraError.notReady(state) }
-        let session = try wearables.createSession(deviceSelector: AutoDeviceSelector(wearables: wearables))
+        let selector: any DeviceSelector = connectedDevice.map { SpecificDeviceSelector(device: $0) }
+            ?? AutoDeviceSelector(wearables: wearables)
+        let session = try wearables.createSession(deviceSelector: selector)
         self.session = session
         tokens.append(session.statePublisher.listen { [weak self] sessionState in
             Task { @MainActor in self?.sessionChanged(sessionState) }
         })
         try session.start()
         try await waitUntil("the glasses session") { session.state == .started }
+        AudioLog.shared.add("Glasses session started")
 
-        // hvc1 keeps streaming while the phone is locked, where raw pauses.
-        let config = StreamConfiguration(videoCodec: .hvc1, resolution: .high, frameRate: 2)
+        // Meta's own sample configuration. (hvc1 would keep streaming while
+        // the phone is locked, where raw pauses; revisit once this works.)
+        let config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: 24)
         guard let camera = try session.addCamera(config: config) else { throw CameraError.noCamera }
         self.camera = camera
         let stream = camera.stream
+        if let device = session.device {
+            AudioLog.shared.add("Glasses: worn \(device.donState), hinges \(device.hingeState), battery \(device.batteryLevel.map(String.init) ?? "?")%, thermal \(device.thermalLevel)")
+        }
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        tokens.append(stream.statePublisher.listen { streamState in
+            let ms = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            Task { @MainActor in AudioLog.shared.add("Camera stream: \(streamState) at \(ms) ms") }
+        })
         tokens.append(stream.photoDataPublisher.listen { [weak self] photo in
             let data = photo.data
             Task { @MainActor in self?.photoArrived(.success(data)) }
@@ -259,7 +283,12 @@ final class DATGlassesCamera: GlassesCamera {
             }
         })
         stream.start()
-        try await waitUntil("the camera stream") { stream.state == .streaming }
+        do {
+            try await waitUntil("the camera stream") { stream.state == .streaming }
+        } catch {
+            AudioLog.shared.add("Camera stream stuck in \(stream.state); session \(session.state)")
+            throw error
+        }
         state = .streaming
     }
 

@@ -12,6 +12,7 @@ import Foundation
 ///  - cancel:   one low, quiet note. "Never mind."
 ///  - error:    two low notes, a little louder. "That failed."
 ///  - shutter:  two quick high ticks. "I took a photo."
+///  - waiting:  one soft pulse, repeated. "Still looking, hold on."
 @MainActor
 final class Earcons: EarconPlaying {
     struct Note: Equatable, Sendable {
@@ -30,6 +31,7 @@ final class Earcons: EarconPlaying {
             .cancel: [Note(freq: a4, at: 0, length: 0.22, gain: 0.08), Note(freq: e4, at: 0.09, length: 0.38, gain: 0.08)],
             .error: [Note(freq: e4, at: 0, length: 0.25, gain: 0.14), Note(freq: c4, at: 0.18, length: 0.45, gain: 0.14)],
             .shutter: [Note(freq: e6, at: 0, length: 0.06, gain: 0.06), Note(freq: e6, at: 0.07, length: 0.08, gain: 0.05)],
+            .waiting: [Note(freq: e5, at: 0, length: 0.22, gain: 0.045)],
         ]
     }()
 

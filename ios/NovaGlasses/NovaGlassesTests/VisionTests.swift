@@ -106,11 +106,34 @@ final class VisionControllerTests: XCTestCase {
         XCTAssertEqual(rig.controller.phase, .thinking)
         XCTAssertFalse(rig.socket.log.contains("stop"), "stop waits for the photo")
 
+        rig.scheduler.advance(2)
+        XCTAssertGreaterThanOrEqual(rig.earcons.played.filter { $0 == .waiting }.count, 2, "pulses while waiting")
+
         camera.complete()
         await settle()
         XCTAssertEqual(vision.uploads.map(\.requestId), [nil])
         XCTAssertEqual(rig.socket.events.last, .stop(purpose: .sentry, conversationId: nil, imageIds: ["img-1"]))
         XCTAssertTrue(rig.earcons.played.contains(.shutter))
+        let pulses = rig.earcons.played.filter { $0 == .waiting }.count
+        rig.scheduler.advance(3)
+        XCTAssertEqual(rig.earcons.played.filter { $0 == .waiting }.count, pulses, "the pulse stops with the photo")
+    }
+
+    func testTheOnDeviceRecognizerTriggersThePhoto() async {
+        let camera = FakeCamera(), vision = FakeVision()
+        let rig = wokenRig(camera, vision)
+        rig.wake.caption("Hey Nova what do you see")
+        await settle()
+        XCTAssertEqual(camera.captures, 1)
+    }
+
+    func testCaptionsBeforeTheWakeNeverTakePhotos() async {
+        let camera = FakeCamera(), vision = FakeVision()
+        let rig = Rig.idle(camera: camera, vision: vision)
+        rig.speak(600)
+        rig.wake.caption("what do you see")
+        await settle()
+        XCTAssertEqual(camera.captures, 0)
     }
 
     func testAPhotoAlreadyUploadedGoesOutWithTheStop() async {
