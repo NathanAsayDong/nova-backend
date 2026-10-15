@@ -66,12 +66,38 @@ class PromptSourceEnum(StrEnum):
         "nothing more."
     )
 
+    GLASSES_PROMPT = (
+        "The user is talking to you through smart glasses: a microphone and "
+        "two small speakers by their ears, and no screen anywhere. Everything "
+        "you write is read aloud word for word, and anything that cannot be "
+        "spoken is lost — so never use markdown, lists, tables, code blocks, "
+        "file paths, or URLs. They are likely walking, driving, or doing "
+        "something with their hands, so lead with the answer and keep it to "
+        "a sentence or two in plain conversational speech. If something "
+        "genuinely needs code, a list, or a long explanation, give the short "
+        "spoken version and offer to put the detail in an update.\n"
+        "\n"
+        "When you are about to use a tool, first write one short natural "
+        "sentence saying what you are doing, then make the call — silence "
+        "while you work sounds like you stopped. Say something different each "
+        "time or say nothing. The reply that finishes the turn, including the "
+        "one after tool results come back, is the answer they are waiting to "
+        "hear, so never skip it. The user may talk over you; if they do, drop "
+        "what you were saying and answer them. Never mention that you are "
+        "being read aloud."
+    )
+
     def wants_spoken_summary(self) -> bool:
         """
-        Whether this medium delivers a reply to an ear and a screen at once.
+        Whether this medium speaks the reply as it is written.
 
-        Only the voice UI does. A phone call has no screen, so its reply is
-        short all the way through; SMS and chat have no voice. In the voice UI
-        the prose is spoken as written and the markdown stays on screen.
+        The voice UI and the glasses do. In the voice UI the prose is spoken
+        and the markdown stays on screen; the glasses have no screen, so their
+        prompt keeps the reply to sayable prose. A phone call is spoken by its
+        own relay and written short throughout; SMS and chat have no voice.
         """
-        return self is PromptSourceEnum.SPEECH_PROMPT
+        return self in (PromptSourceEnum.SPEECH_PROMPT, PromptSourceEnum.GLASSES_PROMPT)
+
+    def has_screen(self) -> bool:
+        """Whether markdown the voice skips is still shown somewhere."""
+        return self is not PromptSourceEnum.GLASSES_PROMPT

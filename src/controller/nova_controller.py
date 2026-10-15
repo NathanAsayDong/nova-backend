@@ -16,6 +16,7 @@ from src.harness.agent_loop import AgentLoop
 from src.harness.streaming import iter_in_thread
 from src.controller.audio_ws import (
     asr_service,
+    audio_file_bytes,
     suffix_for_mime,
     transcribe_serialized,
 )
@@ -100,6 +101,13 @@ async def set_nova_power(payload: dict = Body(...)) -> dict[str, bool]:
         raise HTTPException(status_code=400, detail="'enabled' must be a boolean.")
     _nova_power_state["enabled"] = enabled
     return {"enabled": _nova_power_state["enabled"]}
+
+
+def voice_prompt_source(client: str | None) -> PromptSourceEnum:
+    """The prompt a voice turn runs under, given the client that sent it."""
+    if client == "glasses":
+        return PromptSourceEnum.GLASSES_PROMPT
+    return PromptSourceEnum.SPEECH_PROMPT
 
 
 def parse_conversation_id(value: str | None) -> UUID | None:
@@ -538,6 +546,9 @@ async def transcribe_socket(websocket: WebSocket) -> None:
     chunks: list[bytes] = []
     conversation_id: UUID | None = None
     capture_purpose = "turn"
+    # Which device is on the other end. "glasses" has no screen, so its turns
+    # run under GLASSES_PROMPT; anything else is the web voice UI.
+    capture_client = "web"
 
     # Live-caption state. `generation` invalidates in-flight partials when a
     # recording stops or restarts; `chunks_done` is how much audio the last
@@ -591,7 +602,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
             with tempfile.NamedTemporaryFile(
                 delete=False, suffix=suffix_for_mime(mime_type)
             ) as temp:
-                temp.write(audio_bytes)
+                temp.write(audio_file_bytes(mime_type, audio_bytes))
                 file_path = Path(temp.name)
 
             text = await asyncio.to_thread(transcribe_serialized, file_path, language)
@@ -641,7 +652,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
             with tempfile.NamedTemporaryFile(
                 delete=False, suffix=suffix_for_mime(mime_type)
             ) as temp:
-                temp.write(audio_bytes)
+                temp.write(audio_file_bytes(mime_type, audio_bytes))
                 file_path = Path(temp.name)
 
             text = await asyncio.to_thread(
@@ -781,6 +792,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 language = payload.get("language")
                 mime_type = payload.get("mimeType", "audio/webm")
                 capture_purpose = payload.get("purpose", "turn")
+                capture_client = payload.get("client") or "web"
                 partial_state["generation"] += 1
                 partial_state["chunks_done"] = 0
                 partial_state["seq"] = 0
@@ -929,8 +941,9 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         with tempfile.NamedTemporaryFile(
                             delete=False, suffix=suffix
                         ) as temp:
-                            for audio_chunk in chunks:
-                                temp.write(audio_chunk)
+                            temp.write(
+                                audio_file_bytes(mime_type, b"".join(chunks))
+                            )
                             file_path = Path(temp.name)
 
                         # Off the event loop, and serialized behind any
@@ -1061,7 +1074,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     event_stream = agent_loop.conversation_loop_events(
                         transcript,
                         conversation_id,
-                        prompt_source=PromptSourceEnum.SPEECH_PROMPT,
+                        prompt_source=voice_prompt_source(capture_client),
                         conversation=existing,
                     )
                     display_parts: list[str] = []

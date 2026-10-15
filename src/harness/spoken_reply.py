@@ -35,6 +35,8 @@ MAX_SPOKEN_SENTENCES = 2
 # work took; ending it with nothing reads as Nova having failed, when in fact
 # the answer is sitting on the screen. This is only ever a floor.
 SCREEN_ONLY_LINE = "I've put the details on screen."
+# The same fallback for a medium with no screen to point at.
+NO_SCREEN_LINE = "That one's easier to read than hear. Want me to send it as an update?"
 
 # A backstop on top of the sentence count for progress lines, because
 # "sentence" is not a bound. Roughly 20 seconds of speech.

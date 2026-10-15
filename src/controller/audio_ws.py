@@ -58,9 +58,65 @@ class AsrLock:
 asr_lock = AsrLock()
 
 
+PCM_DEFAULT_RATE = 16000
+
+
+def is_raw_pcm(mime_type: str) -> bool:
+    """Headerless 16-bit little-endian PCM, as a native client captures it."""
+    return (mime_type or "").lower().split(";", 1)[0].strip() in (
+        "audio/pcm",
+        "audio/l16",
+    )
+
+
+def _pcm_params(mime_type: str) -> tuple[int, int]:
+    """(sample rate, channels) from e.g. `audio/pcm;rate=16000;channels=1`."""
+    rate, channels = PCM_DEFAULT_RATE, 1
+    for part in (mime_type or "").lower().split(";")[1:]:
+        key, _, value = part.partition("=")
+        try:
+            if key.strip() == "rate":
+                rate = int(value)
+            elif key.strip() == "channels":
+                channels = int(value)
+        except ValueError:
+            continue
+    return max(rate, 1), max(channels, 1)
+
+
+def audio_file_bytes(mime_type: str, audio: bytes) -> bytes:
+    """
+    The bytes to write to disk for the decoder.
+
+    Container formats (webm, mp4, ogg, wav) are already decodable. Raw PCM has
+    no header, so it gets a WAV one sized to the buffer. Chunks can split a
+    sample across frames, so a trailing odd byte is dropped.
+    """
+    if not is_raw_pcm(mime_type):
+        return audio
+    rate, channels = _pcm_params(mime_type)
+    frame = 2 * channels
+    audio = audio[: len(audio) - (len(audio) % frame)]
+    header = (
+        b"RIFF"
+        + (36 + len(audio)).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")  # PCM
+        + channels.to_bytes(2, "little")
+        + rate.to_bytes(4, "little")
+        + (rate * frame).to_bytes(4, "little")
+        + frame.to_bytes(2, "little")
+        + (16).to_bytes(2, "little")
+        + b"data"
+        + len(audio).to_bytes(4, "little")
+    )
+    return header + audio
+
+
 def suffix_for_mime(mime_type: str) -> str:
     mime = (mime_type or "").lower()
-    if "wav" in mime:
+    if is_raw_pcm(mime) or "wav" in mime:
         return ".wav"
     if "ogg" in mime:
         return ".ogg"

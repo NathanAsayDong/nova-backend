@@ -19,6 +19,7 @@ from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.model.report_type import ReportType
 from src.harness.spoken_reply import (
+    NO_SCREEN_LINE,
     SCREEN_ONLY_LINE,
     LiveReply,
     clamp_spoken,
@@ -535,7 +536,7 @@ class AgentLoop:
         if spoken:
             return spoken
         if required and written.strip():
-            return SCREEN_ONLY_LINE
+            return SCREEN_ONLY_LINE if prompt_source.has_screen() else NO_SCREEN_LINE
         return None
 
     def conversation_loop_events(
