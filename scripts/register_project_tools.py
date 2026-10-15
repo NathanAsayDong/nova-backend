@@ -570,6 +570,30 @@ PROJECT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "look",
+        "description": (
+            "See through the user's glasses camera right now: takes a photo of "
+            "whatever they are looking at and returns it, with an <in_view> "
+            "note naming any enrolled people a face matcher recognized. Call "
+            "it when the user asks about something in front of them (\"what's "
+            "this\", \"read that sign\", \"who's here\") and their message did "
+            "not already come with a photo. Only works while they are talking "
+            "through the glasses; otherwise it says no camera is connected. "
+            "Takes a few seconds, so say you're taking a look first."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.vision_service.VisionService.look",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            "context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
         "name": "fetch_memory",
         "description": (
             "Search Nova's long-term memory for information relevant to a query. "

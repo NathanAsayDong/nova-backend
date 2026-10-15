@@ -19,6 +19,8 @@ from src.controller.tool_controller import router as tool_router
 from src.controller.mcp_server_controller import router as mcp_server_router
 from src.controller.update_controller import router as update_router
 from src.controller.face_controller import router as face_router
+from src.controller.faces_controller import router as faces_router
+from src.controller.vision_controller import router as vision_router
 from src.controller.coding_controller import router as coding_router
 from src.controller.settings_controller import router as settings_router
 from src.controller.auth_controller import router as auth_router, auth_service
@@ -45,6 +47,12 @@ async def lifespan(app: FastAPI):
     from src.controller.coding_controller import coding_service
 
     coding_service.bind_loop(asyncio.get_running_loop())
+
+    # Same hop for the `look` tool: it asks the glasses for a photo over the
+    # voice socket, which lives on this loop.
+    from src.service.vision_service import VisionService
+
+    VisionService.bind_loop(asyncio.get_running_loop())
 
     # Expired login sessions are dead weight; sweep them on each start.
     try:
@@ -95,6 +103,8 @@ app.include_router(update_router)
 app.include_router(meeting_router)
 app.include_router(mcp_server_router)
 app.include_router(face_router)
+app.include_router(faces_router)
+app.include_router(vision_router)
 app.include_router(coding_router)
 app.include_router(settings_router)
 # Twilio's call webhooks and Infobip's SMS forward, not the browser client's —

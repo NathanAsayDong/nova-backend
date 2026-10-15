@@ -90,10 +90,10 @@
     "semantic_hash": "6b251239aee14dd95394258928c1a18d"
   },
   "main.py": {
-    "mtime": 1791732876.6317582,
-    "seen": 1791902973.260175,
-    "ast_hash": "3f21cfd1d387cbb89e75fbead6601332",
-    "semantic_hash": "3f21cfd1d387cbb89e75fbead6601332"
+    "mtime": 1792092571.8174686,
+    "seen": 1792092839.223278,
+    "ast_hash": "8457ff2c05c7d7ca3e554e4dfe60de45",
+    "semantic_hash": ""
   },
   "prompting/host_environment_prompt.py": {
     "mtime": 1789055170.9033663,
@@ -108,16 +108,16 @@
     "semantic_hash": "5e4a139145e242f49e24c9139ab0543f"
   },
   "prompting/prompt_source_prompt.py": {
-    "mtime": 1792084810.5573242,
-    "seen": 1792084825.340155,
-    "ast_hash": "3c7d351d4240fe59f0988ec491bf47fd",
+    "mtime": 1792092583.8202248,
+    "seen": 1792092839.2233028,
+    "ast_hash": "1e4fe5f6517d5c018dca57030c307fbe",
     "semantic_hash": ""
   },
   "pyproject.toml": {
-    "mtime": 1791731885.725005,
-    "seen": 1791902973.260177,
-    "ast_hash": "40dcf52f4a981df7feb81de736304cd6",
-    "semantic_hash": "40dcf52f4a981df7feb81de736304cd6"
+    "mtime": 1792092283.540071,
+    "seen": 1792092839.223304,
+    "ast_hash": "aeff7c408c965676fcdfb68d50911dd5",
+    "semantic_hash": ""
   },
   "scripts/check_asr_env.py": {
     "mtime": 1791731885.72536,
@@ -168,9 +168,9 @@
     "semantic_hash": "b6abc26deaf249a1bbb4b3e18b5733ba"
   },
   "scripts/register_project_tools.py": {
-    "mtime": 1792023621.8080506,
-    "seen": 1792023748.594558,
-    "ast_hash": "4129c2c6ab7c9a22685e11e534cda4ca",
+    "mtime": 1792092589.1184332,
+    "seen": 1792092839.223344,
+    "ast_hash": "ecb4de4a3a6f2c251632a67e3d9fe613",
     "semantic_hash": ""
   },
   "scripts/run_migrations.py": {
@@ -246,9 +246,9 @@
     "semantic_hash": "94eea736f9c8111871d253031a4c878d"
   },
   "src/controller/nova_controller.py": {
-    "mtime": 1792084810.5579863,
-    "seen": 1792084825.34033,
-    "ast_hash": "d69d571d5038a12f1957b4ed257aba63",
+    "mtime": 1792092571.8167725,
+    "seen": 1792092839.223509,
+    "ast_hash": "e58bc2bff6c8a6a20e5d14b5f91249bc",
     "semantic_hash": ""
   },
   "src/controller/project_controller.py": {
@@ -372,9 +372,9 @@
     "semantic_hash": "096e91648c58c391cf2da40318d8d1bc"
   },
   "src/harness/agent_loop.py": {
-    "mtime": 1792084810.5584075,
-    "seen": 1792084825.3405619,
-    "ast_hash": "4e50cb3a3e234fb0086db898310d89f2",
+    "mtime": 1792092556.116333,
+    "seen": 1792092839.2238138,
+    "ast_hash": "97218cfc61e0cbc79e5038a434f1291b",
     "semantic_hash": ""
   },
   "src/harness/spoken_reply.py": {
@@ -834,10 +834,10 @@
     "semantic_hash": "1d2e87d370316f9a398785cd710c19a7"
   },
   "tests/test_transcribe_socket_endpointing.py": {
-    "mtime": 1791731990.034855,
-    "seen": 1791902973.260235,
-    "ast_hash": "19016f147ff4ea1f096d060a13888236",
-    "semantic_hash": "19016f147ff4ea1f096d060a13888236"
+    "mtime": 1792092770.3280146,
+    "seen": 1792092839.22485,
+    "ast_hash": "b6dfec531f185758de78ccd5e2ae7e39",
+    "semantic_hash": ""
   },
   "tests/test_update_delivery_service.py": {
     "mtime": 1791732956.623428,
@@ -978,9 +978,9 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/App/AppModel.swift": {
-    "mtime": 1792083966.1389692,
-    "seen": 1792084825.339957,
-    "ast_hash": "a5b7974939040d4ac05266c33ce4899d",
+    "mtime": 1792092336.9575903,
+    "seen": 1792092839.2228632,
+    "ast_hash": "98d14fb92e557e35b86cbc411772f74e",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/App/NovaGlassesApp.swift": {
@@ -990,21 +990,21 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Audio/AudioRouteManager.swift": {
-    "mtime": 1792083966.140847,
-    "seen": 1792084825.3399591,
-    "ast_hash": "7fc7be8f8485bc9f39b7fa5d25a015e2",
+    "mtime": 1792092285.1693084,
+    "seen": 1792092839.222888,
+    "ast_hash": "af2259870b232c202d7f4fc5dc1acf40",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Audio/CaptureEngine.swift": {
-    "mtime": 1792083979.0089793,
-    "seen": 1792084825.3399591,
-    "ast_hash": "234f60e1ca51a5eb71bb0dbefb5ef61c",
+    "mtime": 1792092293.6076522,
+    "seen": 1792092839.222889,
+    "ast_hash": "ecbc6f0a1f9ac434ad47616d80a505df",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Audio/Earcons.swift": {
-    "mtime": 1792084188.7497513,
-    "seen": 1792084825.33996,
-    "ast_hash": "013b3af7246f4ed95ae91a33e15b426a",
+    "mtime": 1792092549.111259,
+    "seen": 1792092839.22289,
+    "ast_hash": "9f4133ab1f990c9ecd3cf9a94b059f25",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Audio/MP3StreamDecoder.swift": {
@@ -1020,15 +1020,15 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Audio/SpeechPlayer.swift": {
-    "mtime": 1792083979.0090883,
-    "seen": 1792084825.339961,
-    "ast_hash": "cadc3e1b53c1ea50b462dc90556e290c",
+    "mtime": 1792092328.584394,
+    "seen": 1792092839.222927,
+    "ast_hash": "72441b9bbca6eed76d075ce69f04b764",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Auth/APIClient.swift": {
-    "mtime": 1792083795.963811,
-    "seen": 1792084825.339963,
-    "ast_hash": "ba8a045536978916f14b251441717cd4",
+    "mtime": 1792092631.4679418,
+    "seen": 1792092839.2229278,
+    "ast_hash": "ac24cf7d5eece888cf758b06ac1b38c6",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Auth/AuthStore.swift": {
@@ -1038,21 +1038,21 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Conversation/ConversationController.swift": {
-    "mtime": 1792084471.4622207,
-    "seen": 1792084825.339964,
-    "ast_hash": "3479e6748a1dd2eadb9ba77f41b6a45e",
+    "mtime": 1792092605.0187044,
+    "seen": 1792092839.2229471,
+    "ast_hash": "abf3a700f8037890112955cb95de69ea",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Conversation/Ports.swift": {
-    "mtime": 1792083631.141727,
-    "seen": 1792084825.339964,
-    "ast_hash": "c93736dce20ebd683f6f7a1af3fc84d4",
+    "mtime": 1792092549.110697,
+    "seen": 1792092839.222948,
+    "ast_hash": "21e51ef714c5dc9fd8a0edbb85df50be",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Net/NovaEvents.swift": {
-    "mtime": 1792083566.6885443,
-    "seen": 1792084825.3399649,
-    "ast_hash": "87a7c84d328b909e6132052621e722ab",
+    "mtime": 1792092549.1102874,
+    "seen": 1792092839.222948,
+    "ast_hash": "bf2e333dc5fb720681fe7571b42e2a15",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Net/NovaSocket.swift": {
@@ -1062,9 +1062,9 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/UI/HomeView.swift": {
-    "mtime": 1792083927.6928399,
-    "seen": 1792084825.3399649,
-    "ast_hash": "164eb3821e0ac709402147d1d8659541",
+    "mtime": 1792092355.5053334,
+    "seen": 1792092839.222968,
+    "ast_hash": "09c205a2d79346cb464902a6f00945b1",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/UI/LoginView.swift": {
@@ -1074,9 +1074,9 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Voice/SpeechWakeDetector.swift": {
-    "mtime": 1792083979.009172,
-    "seen": 1792084825.339966,
-    "ast_hash": "257172fced0967751f33bd2ccf4351c3",
+    "mtime": 1792091242.4113157,
+    "seen": 1792092839.222987,
+    "ast_hash": "9c326c5c0ddb29aad2f58d6ab8c4d926",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Voice/TurnDetector.swift": {
@@ -1122,9 +1122,9 @@
     "semantic_hash": ""
   },
   "tests/test_glasses_voice.py": {
-    "mtime": 1792080486.249611,
-    "seen": 1792084825.341246,
-    "ast_hash": "2cde474b3f67719d8ce89d328ef158e8",
+    "mtime": 1792092770.3275735,
+    "seen": 1792092839.224664,
+    "ast_hash": "681284abd1a3266e2289ea564895fff6",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/README.md": {
@@ -1134,15 +1134,141 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/project.yml": {
-    "mtime": 1792084537.222197,
-    "seen": 1792084825.3414998,
-    "ast_hash": "a492cd03e1ef3eaf4209f7914faf8903",
+    "mtime": 1792092641.3242981,
+    "seen": 1792092839.2249448,
+    "ast_hash": "179214dd18376c41c8a6b35f20056bbc",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlassesTests/Fixtures/tone_1s_22050.mp3": {
     "mtime": 1792083985.22983,
     "seen": 1792084825.3415701,
     "ast_hash": "4ce18fdb55cb775949c257bfc94664be",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Assets.xcassets/AppIcon.appiconset/Contents.json": {
+    "mtime": 1792091353.1419535,
+    "seen": 1792092839.2228858,
+    "ast_hash": "c5d5aeafe79232c2195e36ca041e38c5",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Assets.xcassets/Contents.json": {
+    "mtime": 1792091353.1396434,
+    "seen": 1792092839.2228868,
+    "ast_hash": "9deb2ada1cc834bbebf8bbad9c8978a1",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Audio/AudioLog.swift": {
+    "mtime": 1792092263.4580536,
+    "seen": 1792092839.2228868,
+    "ast_hash": "0595aa17f91eb2897449772c68549bae",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Audio/AudioSessionPolicy.swift": {
+    "mtime": 1792092263.4748116,
+    "seen": 1792092839.222889,
+    "ast_hash": "37f2980798aa52b684573cb0a640fa53",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Audio/PlaybackWatchdog.swift": {
+    "mtime": 1792092285.1688442,
+    "seen": 1792092839.222927,
+    "ast_hash": "77bde9ffab3ed496c1fc0065a752d90b",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Camera/DATGlassesCamera.swift": {
+    "mtime": 1792092696.8382087,
+    "seen": 1792092839.2229462,
+    "ast_hash": "7729138d744015ce3a2b5dc9d0a388d3",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Camera/ImagePrep.swift": {
+    "mtime": 1792092696.8234365,
+    "seen": 1792092839.2229471,
+    "ast_hash": "da442ce2cc4def8a5c0df68cd52ee603",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Net/VisionClient.swift": {
+    "mtime": 1792092631.4722102,
+    "seen": 1792092839.2229671,
+    "ast_hash": "0652e00063f5b4636e995d0a7e4d4fe9",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/UI/AudioLogView.swift": {
+    "mtime": 1792092355.4892366,
+    "seen": 1792092839.2229671,
+    "ast_hash": "a14c6eb4363abfe5974b96d822646c19",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Voice/VisionIntent.swift": {
+    "mtime": 1792092558.2707663,
+    "seen": 1792092839.223006,
+    "ast_hash": "a6bcede297d74cf03c562a48a6e510e1",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlassesTests/AudioPlaybackTests.swift": {
+    "mtime": 1792092355.5273993,
+    "seen": 1792092839.22304,
+    "ast_hash": "2bc2a610075e7fd2b311e487747bbab6",
+    "semantic_hash": ""
+  },
+  "scripts/fetch_face_models.py": {
+    "mtime": 1792092342.7484467,
+    "seen": 1792092839.223331,
+    "ast_hash": "c600df8698165e1a7b24e6d4b3708475",
+    "semantic_hash": ""
+  },
+  "src/controller/faces_controller.py": {
+    "mtime": 1792092523.6315248,
+    "seen": 1792092839.223479,
+    "ast_hash": "fcfe831d9a4f1068cb5ec805cc9549ae",
+    "semantic_hash": ""
+  },
+  "src/controller/vision_controller.py": {
+    "mtime": 1792092518.0320652,
+    "seen": 1792092839.223576,
+    "ast_hash": "75b28399de0dc1d24ad7661ef4c99300",
+    "semantic_hash": ""
+  },
+  "src/dao/person_dao.py": {
+    "mtime": 1792092417.6857266,
+    "seen": 1792092839.2237298,
+    "ast_hash": "41ebcdc2aabaed6cefab7560967a42d8",
+    "semantic_hash": ""
+  },
+  "src/model/person.py": {
+    "mtime": 1792092413.9352474,
+    "seen": 1792092839.2239769,
+    "ast_hash": "fa3b4012800d61085377986016774c60",
+    "semantic_hash": ""
+  },
+  "src/service/face_service.py": {
+    "mtime": 1792092666.4822624,
+    "seen": 1792092839.224281,
+    "ast_hash": "1c91c1292a9bac903364fa508b1be233",
+    "semantic_hash": ""
+  },
+  "src/service/vision_service.py": {
+    "mtime": 1792092501.4478602,
+    "seen": 1792092839.224511,
+    "ast_hash": "ed4f55ab67cf58239118d3971c1d0276",
+    "semantic_hash": ""
+  },
+  "tests/test_vision.py": {
+    "mtime": 1792092784.564812,
+    "seen": 1792092839.224885,
+    "ast_hash": "85c9a042ad95e25d875db61005193411",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/Design/nova-logo.svg": {
+    "mtime": 1792091336.916702,
+    "seen": 1792092839.22503,
+    "ast_hash": "e3597b5c38df7d5e7445f182b4ed271c",
+    "semantic_hash": ""
+  },
+  "ios/NovaGlasses/NovaGlasses/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png": {
+    "mtime": 1792091353.3390281,
+    "seen": 1792092839.22503,
+    "ast_hash": "6dea138f4434f017f95015e0c29631e1",
     "semantic_hash": ""
   }
 }

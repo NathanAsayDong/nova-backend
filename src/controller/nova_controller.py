@@ -4,6 +4,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from uuid import UUID
@@ -24,6 +25,7 @@ from src.service.conversation_service import ConversationClosedError, Conversati
 from src.service.endpointing_service import DEFAULT_SILENCE_MS, endpoint_decision
 from src.service.meeting_service import MeetingService
 from src.service.tts_service import TTSService
+from src.service.vision_service import VisionService
 
 router = APIRouter(tags=["transcribe"])
 tts_service = TTSService()
@@ -31,6 +33,7 @@ conversation_service = ConversationService()
 meeting_service = MeetingService()
 agent_loop = AgentLoop()
 agent_loop.conversation_service = conversation_service
+vision_service = VisionService()
 
 
 # In-memory power state for the assistant. Single-user personal deployment,
@@ -108,6 +111,18 @@ def voice_prompt_source(client: str | None) -> PromptSourceEnum:
     if client == "glasses":
         return PromptSourceEnum.GLASSES_PROMPT
     return PromptSourceEnum.SPEECH_PROMPT
+
+
+def parse_image_ids(value: object) -> list[str]:
+    """
+    The photo ids a `stop` carries, from POST /vision/images.
+
+    Anything that is not a list of strings is ignored rather than refused: a
+    malformed id must not cost the user their spoken turn.
+    """
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item][:8]
 
 
 def parse_conversation_id(value: str | None) -> UUID | None:
@@ -890,6 +905,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 continue
 
             if event == "stop":
+                stop_received_at = time.monotonic()
                 # Whatever partial is in flight is now stale; the final
                 # transcription below supersedes it.
                 partial_state["generation"] += 1
@@ -1071,11 +1087,21 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     # tables, lists) already taken out, delivered a sentence or
                     # two at a time as it is written, and are the only thing
                     # handed to TTS.
+                    # Photos the phone uploaded for this turn (POST
+                    # /vision/images), already normalised and face-matched.
+                    # Unknown or expired ids become a "didn't arrive" note.
+                    image_ids = parse_image_ids(payload.get("imageIds"))
+                    images = (
+                        await asyncio.to_thread(vision_service.content_blocks, image_ids)
+                        if image_ids
+                        else None
+                    )
                     event_stream = agent_loop.conversation_loop_events(
                         transcript,
                         conversation_id,
                         prompt_source=voice_prompt_source(capture_client),
                         conversation=existing,
+                        images=images,
                     )
                     display_parts: list[str] = []
                     final_text: str | None = None
@@ -1108,6 +1134,11 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             if not tts_available:
                                 continue
                             line, line_role = item
+                            if images and previous_line is None:
+                                print(
+                                    "[vision] stop->first audio ms="
+                                    f"{(time.monotonic() - stop_received_at) * 1000:.0f}"
+                                )
                             tts_available = await stream_tts_audio(
                                 websocket,
                                 line,
@@ -1121,6 +1152,12 @@ async def transcribe_socket(websocket: WebSocket) -> None:
 
                     async def send(payload: dict) -> None:
                         await _send_locked(websocket, payload, send_lock)
+
+                    # The glasses are this turn's camera: the `look` tool,
+                    # running on the agent's worker thread, reaches the phone
+                    # through `send` while the turn is in progress.
+                    if capture_client == "glasses":
+                        VisionService.register_camera(str(conversation_id), send)
 
                     try:
                         async for event in iter_in_thread(event_stream):
@@ -1179,6 +1216,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                                     {**event, "conversationId": str(conversation_id)}
                                 )
                     finally:
+                        VisionService.unregister_camera(str(conversation_id), send)
                         # Every queued line is spoken before the turn is
                         # reported done, so the client sees the order it
                         # always has: the audio, then "done".

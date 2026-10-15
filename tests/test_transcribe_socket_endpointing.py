@@ -32,7 +32,9 @@ class FakeAgentLoop:
 
         return uuid.uuid4()
 
-    def conversation_loop_events(self, prompt, conversation_uuid, prompt_source=None):
+    def conversation_loop_events(
+        self, prompt, conversation_uuid, prompt_source=None, conversation=None, images=None
+    ):
         self.prompts.append(prompt)
         yield {"type": "text", "text": "Understood."}
 

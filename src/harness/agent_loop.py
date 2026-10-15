@@ -71,6 +71,12 @@ _MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 1.5
 _MEMORY_OPEN_TAG = "<recalled_memory>"
 _MEMORY_CLOSE_TAG = "</recalled_memory>"
 
+# What a photo becomes once it is no longer sent: in the transcript, and in
+# history once a newer photo has replaced it.
+_PHOTO_MARKER = "[photo]"
+_IN_VIEW_OPEN = "<in_view>"
+_IN_VIEW_CLOSE = "</in_view>"
+
 # A run launched from a responsibility has nobody present to catch it
 # scheduling more unattended work on itself — that's how ids ~41 and ~44
 # became duplicate responsibilities spawned from a responsibility's own run.
@@ -223,6 +229,133 @@ class AgentLoop:
         return (
             f"{_MEMORY_OPEN_TAG}\n{memory_block}\n{_MEMORY_CLOSE_TAG}\n\n{prompt}"
         )
+
+    @staticmethod
+    def _tool_result_content(result: Any) -> str | list[dict[str, Any]]:
+        """
+        A tool's return value as tool_result content.
+
+        Text by default. A list of content blocks (the `look` tool's photo and
+        `<in_view>` note) goes through as-is, because a photo flattened to
+        JSON is just a very long string to the model.
+        """
+        if isinstance(result, str):
+            return result
+        if (
+            isinstance(result, list)
+            and result
+            and all(
+                isinstance(block, dict) and block.get("type") in ("text", "image")
+                for block in result
+            )
+        ):
+            return result
+        try:
+            return json.dumps(result)
+        except TypeError:
+            return str(result)
+
+    @staticmethod
+    def _without_images(content: Any) -> Any:
+        """Content with every image block replaced by a `[photo]` marker."""
+        if not isinstance(content, list):
+            return content
+        replaced = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "image":
+                replaced.append({"type": "text", "text": _PHOTO_MARKER})
+            elif isinstance(block, dict) and block.get("type") == "tool_result":
+                replaced.append(
+                    {**block, "content": AgentLoop._without_images(block.get("content"))}
+                )
+            else:
+                replaced.append(block)
+        return replaced
+
+    @staticmethod
+    def _photo_note(prompt: str, images: list[dict[str, Any]] | None) -> str:
+        """
+        What the transcript keeps of an image turn: the words, `[photo]`, and
+        the face matcher's note — never the photo itself.
+        """
+        if not images:
+            return prompt
+        count = sum(1 for block in images if block.get("type") == "image")
+        marker = _PHOTO_MARKER if count <= 1 else f"[{count} photos]"
+        notes = [
+            block.get("text", "")
+            .replace(_IN_VIEW_OPEN, "")
+            .replace(_IN_VIEW_CLOSE, "")
+            .strip()
+            for block in images
+            if block.get("type") == "text"
+        ]
+        note = " ".join(part for part in notes if part)
+        return f"{prompt}\n\n{marker} {note}".rstrip()
+
+    @staticmethod
+    def _has_image(message: dict[str, Any]) -> bool:
+        content = message.get("content")
+        if not isinstance(content, list):
+            return False
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "image":
+                return True
+            if block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+                if any(
+                    isinstance(inner, dict) and inner.get("type") == "image"
+                    for inner in block["content"]
+                ):
+                    return True
+        return False
+
+    @classmethod
+    def _strip_old_images(cls, history: list[dict[str, Any]]) -> None:
+        """
+        Drop photos from every user turn but the most recent one with a photo.
+
+        History is resent on every request, so a photo left in it is paid for
+        on every turn after it. The latest one stays so a follow-up ("what
+        colour is it?") still has it to look at. A photo can arrive as the
+        user's message or as a `look` tool result; the most recent image turn
+        runs from the user message that opened it to the end of history, so
+        a turn that looked twice keeps both. Dropped photos become `[photo]`
+        markers: the request stays valid and the model knows something was
+        there.
+        """
+        last_turn_start: int | None = None
+        for index in range(len(history) - 1, -1, -1):
+            message = history[index]
+            if message.get("role") != "user" or not cls._has_image(message):
+                continue
+            # Walk back to the user message that opened this turn: the one
+            # whose content is the user's words rather than tool results.
+            start = index
+            while start > 0 and cls._continues_turn(history[start]):
+                start -= 1
+            last_turn_start = start
+            break
+        if last_turn_start is None:
+            return
+        for index in range(last_turn_start):
+            message = history[index]
+            if message.get("role") == "user" and cls._has_image(message):
+                history[index] = {**message, "content": cls._without_images(message["content"])}
+
+    @staticmethod
+    def _continues_turn(message: dict[str, Any]) -> bool:
+        content = message.get("content")
+        return (
+            message.get("role") == "user"
+            and isinstance(content, list)
+            and bool(content)
+            and all(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in content
+            )
+        ) or message.get("role") == "assistant"
 
     def _persist_message(
         self,
@@ -545,6 +678,7 @@ class AgentLoop:
         conversation_uuid: UUID,
         prompt_source: PromptSourceEnum = PromptSourceEnum.CHAT_PROMPT,
         conversation: Conversation | None = None,
+        images: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Run a single conversation turn as a bounded ReAct loop, as an event stream.
@@ -587,6 +721,13 @@ class AgentLoop:
         already fetched it (transports check for a closed conversation before
         opening their stream); it saves the loop fetching it again.
 
+        `images` is Claude content to put in front of the user's words: photo
+        blocks from the glasses and the `<in_view>` text naming who the face
+        matcher saw (see VisionService.content_blocks). Only the words and a
+        `[photo]` note are persisted, and once a later turn brings a new photo
+        the old one is dropped from history (`_strip_old_images`), so a photo
+        is not paid for on every turn after it.
+
         Turns are persisted to the conversation/message tables. Raises
         ConversationClosedError before yielding anything if the conversation
         has been closed — closed conversations can never be continued.
@@ -594,9 +735,17 @@ class AgentLoop:
         pending_writes: list[Future] = []
         try:
             yield from self._conversation_turn(
-                prompt, conversation_uuid, prompt_source, conversation, pending_writes
+                prompt,
+                conversation_uuid,
+                prompt_source,
+                conversation,
+                pending_writes,
+                images,
             )
         finally:
+            history = self.conversations.get(conversation_uuid)
+            if history:
+                self._strip_old_images(history)
             # Write-behind persistence is collected here rather than left to
             # finish on its own, so the transcript is complete by the time
             # the caller sees the turn end.
@@ -609,6 +758,7 @@ class AgentLoop:
         prompt_source: PromptSourceEnum,
         conversation: Conversation | None,
         pending_writes: list[Future],
+        images: list[dict[str, Any]] | None = None,
     ) -> Iterator[dict[str, Any]]:
         if self.tool_service is None:
             self.tool_service = ToolService()
@@ -712,11 +862,23 @@ class AgentLoop:
         # to what this turn sent. Only the user's own words are persisted; the
         # memory is derived, and re-derives on rehydration.
         memory_block = self._collect_memory(memory_future)
-        history.append({"role": "user", "content": self._augment(prompt, memory_block)})
+        user_text = self._augment(prompt, memory_block)
+        if images:
+            # Images before the text, as Claude reads them best.
+            history.append(
+                {
+                    "role": "user",
+                    "content": [*images, {"type": "text", "text": user_text}],
+                }
+            )
+        else:
+            history.append({"role": "user", "content": user_text})
         # Write-behind. The message is already in history; the model request
         # should not wait on the insert. Collected before the turn returns.
         pending_writes.append(
-            self._persist_message_later(conversation, MessageRole.USER, prompt)
+            self._persist_message_later(
+                conversation, MessageRole.USER, self._photo_note(prompt, images)
+            )
         )
 
         # Progress reporting across a multi-round turn.
@@ -982,13 +1144,7 @@ class AgentLoop:
                 try:
                     print(f"Calling tool: {tool.name} with arguments: {arguments}")
                     result = self.tool_service.call_tool(tool, arguments, context=tool_context)
-                    if isinstance(result, str):
-                        content = result
-                    else:
-                        try:
-                            content = json.dumps(result)
-                        except TypeError:
-                            content = str(result)
+                    content = self._tool_result_content(result)
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -1002,7 +1158,11 @@ class AgentLoop:
                     persist(
                         MessageRole.TOOL,
                         json.dumps(
-                            {"tool": block.name, "input": arguments, "result": content}
+                            {
+                                "tool": block.name,
+                                "input": arguments,
+                                "result": self._without_images(content),
+                            }
                         ),
                     )
                 except ToolExecutionError as exc:
@@ -1333,13 +1493,7 @@ class AgentLoop:
                 arguments = block.input if isinstance(block.input, dict) else {}
                 try:
                     result = self.tool_service.call_tool(tool, arguments)
-                    if isinstance(result, str):
-                        content = result
-                    else:
-                        try:
-                            content = json.dumps(result)
-                        except TypeError:
-                            content = str(result)
+                    content = self._tool_result_content(result)
                     tool_results.append(
                         {
                             "type": "tool_result",

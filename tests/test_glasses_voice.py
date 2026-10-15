@@ -20,6 +20,7 @@ from src.controller import nova_controller
 from src.controller.audio_ws import audio_file_bytes, is_raw_pcm, suffix_for_mime
 from src.harness.agent_loop import AgentLoop
 from src.harness.spoken_reply import NO_SCREEN_LINE, SCREEN_ONLY_LINE
+from src.service.vision_service import ImageStore, VisionImage, VisionService
 
 PCM_MIME = "audio/pcm;rate=16000;channels=1"
 
@@ -96,14 +97,19 @@ class GlassesPromptSourceTests(unittest.TestCase):
 class FakeAgentLoop:
     def __init__(self):
         self.prompt_sources: list[PromptSourceEnum] = []
+        self.images: list = []
+        # Cameras registered while the turn ran, seen from inside it.
+        self.cameras_during_turn: list[list[str]] = []
 
     def new_conversation_id(self):
         return uuid.uuid4()
 
     def conversation_loop_events(
-        self, prompt, conversation_uuid, prompt_source=None, conversation=None
+        self, prompt, conversation_uuid, prompt_source=None, conversation=None, images=None
     ):
         self.prompt_sources.append(prompt_source)
+        self.images.append(images)
+        self.cameras_during_turn.append(list(VisionService.cameras))
         yield {"type": "text", "text": "Understood."}
 
 
@@ -158,7 +164,7 @@ class GlassesSocketTests(unittest.TestCase):
                 return seen
         self.fail(f"never saw {until_type!r}; saw {[m['type'] for m in seen]}")
 
-    def run_turn(self, start: dict, chunks: list[bytes]) -> list[dict]:
+    def run_turn(self, start: dict, chunks: list[bytes], stop: dict | None = None) -> list[dict]:
         with TestClient(self.app).websocket_connect("/ws/transcribe") as ws:
             ws.receive_json()  # ready
             ws.send_json({"event": "start", "purpose": "turn", **start})
@@ -166,7 +172,7 @@ class GlassesSocketTests(unittest.TestCase):
             for chunk in chunks:
                 ws.send_bytes(chunk)
                 ws.receive_json()  # chunk_received
-            ws.send_json({"event": "stop", "purpose": "turn"})
+            ws.send_json({"event": "stop", "purpose": "turn", **(stop or {})})
             return self.drain(ws, "done")
 
     def test_pcm_turn_from_glasses_is_decoded_and_runs_the_glasses_prompt(self):
@@ -187,6 +193,34 @@ class GlassesSocketTests(unittest.TestCase):
     def test_a_turn_without_a_client_hint_keeps_the_voice_ui_prompt(self):
         self.run_turn({"mimeType": PCM_MIME}, [b"\x00\x00" * 800])
         self.assertEqual(self.agent.prompt_sources, [PromptSourceEnum.SPEECH_PROMPT])
+
+    def test_stop_with_image_ids_hands_the_photos_to_the_turn(self):
+        saved = VisionService.store
+        VisionService.store = ImageStore()
+        self.addCleanup(setattr, VisionService, "store", saved)
+        VisionService.store.put(
+            VisionImage("img-1", b"jpeg", 4, 4, people=[{"name": "Tom", "confidence": 0.7}])
+        )
+        self.run_turn(
+            {"mimeType": PCM_MIME, "client": "glasses"},
+            [b"\x00\x00" * 800],
+            stop={"imageIds": ["img-1", "expired", 7]},
+        )
+        images = self.agent.images[0]
+        self.assertEqual([b["type"] for b in images], ["image", "text"])
+        self.assertIn("Tom", images[-1]["text"])
+        self.assertIn("didn't arrive", images[-1]["text"])
+
+    def test_a_turn_without_image_ids_has_no_images(self):
+        self.run_turn({"mimeType": PCM_MIME, "client": "glasses"}, [b"\x00\x00" * 800])
+        self.assertEqual(self.agent.images, [None])
+
+    def test_glasses_turns_register_their_camera_only_while_running(self):
+        self.run_turn({"mimeType": PCM_MIME, "client": "glasses"}, [b"\x00\x00" * 800])
+        self.assertEqual(len(self.agent.cameras_during_turn[0]), 1)
+        self.assertEqual(VisionService.cameras, {})
+        self.run_turn({"mimeType": PCM_MIME}, [b"\x00\x00" * 800])
+        self.assertEqual(self.agent.cameras_during_turn[1], [])
 
 
 if __name__ == "__main__":
