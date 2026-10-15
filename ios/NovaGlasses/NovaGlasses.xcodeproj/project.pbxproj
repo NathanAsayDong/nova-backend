@@ -30,6 +30,7 @@
 		CDF5C63C07A5AB56C8726FE6 /* ConversationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B920D98B34009C22C690FFF /* ConversationController.swift */; };
 		E81F1D0352C8D18D8D845424 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799416FC1F197A76E8242701 /* AppModel.swift */; };
 		E968E9031183E7DA0F776AC1 /* TurnDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0BA6B13175CCC394A4D6714 /* TurnDetectorTests.swift */; };
+		F8C0321AE89E8C6271481816 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3306D79455CCFCD9EE0A227D /* Assets.xcassets */; };
 		FAB2B775ABB5360A9D4689AF /* SpeechWakeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BAE2E5CF39131FB31B30D8 /* SpeechWakeDetector.swift */; };
 		FEB499170370A1FA5F91A252 /* NovaGlassesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85D8081920A2CB606DE8CE6E /* NovaGlassesApp.swift */; };
 /* End PBXBuildFile section */
@@ -49,6 +50,7 @@
 		1658350B809BE1024FDACB58 /* tone_1s_22050.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = tone_1s_22050.mp3; sourceTree = "<group>"; };
 		2357ECF7814437DC2992A9B9 /* ConversationControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationControllerTests.swift; sourceTree = "<group>"; };
 		2B356DB2F2F8BCB5FEA75515 /* AuthStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthStore.swift; sourceTree = "<group>"; };
+		3306D79455CCFCD9EE0A227D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		337C97C944AB9A0B683E1AC7 /* CaptureEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureEngine.swift; sourceTree = "<group>"; };
 		394AAB2557ED94B60AA55E60 /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
 		495D40B59597C684B6ACC306 /* Ports.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ports.swift; sourceTree = "<group>"; };
@@ -167,6 +169,7 @@
 		869AAB4EA3F90213FB87C0BF /* NovaGlasses */ = {
 			isa = PBXGroup;
 			children = (
+				3306D79455CCFCD9EE0A227D /* Assets.xcassets */,
 				76EC46BC277A319AD967AC1B /* Info.plist */,
 				31BA5F7AB01778ED73096509 /* App */,
 				018A7760FB3C8041115D7EEC /* Audio */,
@@ -225,6 +228,7 @@
 			buildConfigurationList = 9E5D0A99E587B94E65041A45 /* Build configuration list for PBXNativeTarget "NovaGlasses" */;
 			buildPhases = (
 				F7F781DFE4A732B85B9D963D /* Sources */,
+				49EFC8F8EAE760D958624067 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -247,11 +251,11 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					616F1DB79A16532EDC0AB6E8 = {
-						DevelopmentTeam = "";
+						DevelopmentTeam = B85B73KX6L;
 						ProvisioningStyle = Automatic;
 					};
 					BFFFF4202A5D37A7BB62EA33 = {
-						DevelopmentTeam = "";
+						DevelopmentTeam = B85B73KX6L;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -282,6 +286,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				5D023BEC57C8782796CF3F87 /* tone_1s_22050.mp3 in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		49EFC8F8EAE760D958624067 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F8C0321AE89E8C6271481816 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -373,7 +385,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = B85B73KX6L;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -455,7 +467,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = B85B73KX6L;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;

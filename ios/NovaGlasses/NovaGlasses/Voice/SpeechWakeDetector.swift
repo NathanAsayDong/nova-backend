@@ -31,9 +31,12 @@ final class SpeechWakeDetector: WakeDetecting {
             && SFSpeechRecognizer.authorizationStatus() == .authorized
     }
 
-    static func requestAuthorization() async -> Bool {
+    // nonisolated + @Sendable: TCC answers on a background queue, and a
+    // closure formed in a main-actor method would assert it is on the main
+    // thread and trap.
+    nonisolated static func requestAuthorization() async -> Bool {
         await withCheckedContinuation { continuation in
-            SFSpeechRecognizer.requestAuthorization { status in
+            SFSpeechRecognizer.requestAuthorization { @Sendable status in
                 continuation.resume(returning: status == .authorized)
             }
         }
