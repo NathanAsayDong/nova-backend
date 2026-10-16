@@ -225,3 +225,54 @@ class GlassesSocketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GlassesCannotRecordMeetingsTests(unittest.TestCase):
+    """A meeting started from the glasses records nothing and locks every
+    later voice turn out, so the glasses are never offered start_meeting."""
+
+    def _tools_offered(self, prompt_source):
+        from src.model.tool import Tool
+        from src.service.tool_service import ToolService
+        from src.service.claude_service import TurnStream
+        from tests.test_conversation_loop import (
+            FakeConversationService,
+            FakeMessage,
+            FakeTextBlock,
+        )
+
+        schema = {"type": "object", "properties": {}}
+
+        class Dao:
+            def get_all(self):
+                return [
+                    Tool(id=1, name="start_meeting", description="", config={"input_schema": schema}),
+                    Tool(id=2, name="stop_meeting", description="", config={"input_schema": schema}),
+                ]
+
+        agent_loop = AgentLoop()
+        agent_loop.memory_retrieval_enabled = False
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = Dao()
+        agent_loop.tool_service = tool_service
+        agent_loop.conversation_service = FakeConversationService()
+        offered = []
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            offered.extend(tool["name"] for tool in tools or [])
+            return TurnStream.completed(FakeMessage(content=[FakeTextBlock(text="Okay.")]))
+
+        agent_loop.claude_service.stream_response = fake_stream
+        list(agent_loop.conversation_loop_events("take notes on this meeting", uuid.uuid4(), prompt_source=prompt_source))
+        return offered
+
+    def test_glasses_are_not_offered_start_meeting(self):
+        offered = self._tools_offered(PromptSourceEnum.GLASSES_PROMPT)
+        self.assertNotIn("start_meeting", offered)
+        self.assertIn("stop_meeting", offered)
+
+    def test_the_web_voice_ui_still_is(self):
+        self.assertIn("start_meeting", self._tools_offered(PromptSourceEnum.SPEECH_PROMPT))
+
+    def test_the_glasses_prompt_says_why(self):
+        self.assertIn("cannot record", str(PromptSourceEnum.GLASSES_PROMPT))

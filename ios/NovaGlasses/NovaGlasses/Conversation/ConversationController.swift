@@ -767,8 +767,13 @@ final class ConversationController {
         case .followUpStopped:
             goIdle(cue: .done)
 
-        case .meetingMode(let message):
-            goIdle(cue: .cancel, message: message)
+        case .meetingMode:
+            // The glasses never record meetings (the server does not offer
+            // them start_meeting); one recording elsewhere blocks every turn
+            // until it is stopped there, so say where.
+            AudioLog.shared.add("Server is in meeting mode; turn refused")
+            dropCapture(sendAbort: false)
+            goIdle(cue: .error, message: "A meeting is recording. Stop it in Nova on the computer to talk again.")
 
         case .error(let message, let code):
             if code == "conversation_closed" || message.contains("Invalid conversationId") {

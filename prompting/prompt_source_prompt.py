@@ -101,7 +101,11 @@ class PromptSourceEnum(StrEnum):
         "the photo, and never describe a stranger in a way meant to identify "
         "them; anyone <in_view> does not name is just someone. When <in_view> "
         "names someone, greet them warmly and naturally, the way a friend "
-        "would — \"Oh, that's Tom! Tell him I say hi.\""
+        "would — \"Oh, that's Tom! Tell him I say hi.\"\n"
+        "\n"
+        "You cannot record or take notes on a meeting from the glasses. If "
+        "asked to, say so briefly and suggest starting it from Nova on the "
+        "computer instead."
     )
 
     def wants_spoken_summary(self) -> bool:
@@ -114,6 +118,19 @@ class PromptSourceEnum(StrEnum):
         own relay and written short throughout; SMS and chat have no voice.
         """
         return self in (PromptSourceEnum.SPEECH_PROMPT, PromptSourceEnum.GLASSES_PROMPT)
+
+    def excluded_tools(self) -> frozenset[str]:
+        """
+        Tools this medium must not be offered.
+
+        The glasses cannot record a meeting: meeting mode refuses every voice
+        turn until the meeting stops, and the glasses app never streams
+        meeting audio, so a meeting started from them records nothing and
+        leaves the user unable to talk to Nova until it is stopped elsewhere.
+        """
+        if self is PromptSourceEnum.GLASSES_PROMPT:
+            return frozenset({"start_meeting"})
+        return frozenset()
 
     def has_screen(self) -> bool:
         """Whether markdown the voice skips is still shown somewhere."""

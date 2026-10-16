@@ -823,11 +823,12 @@ class AgentLoop:
 
         tools_by_name: dict[str, Any] = {}
         claude_tools: list[dict[str, Any]] = []
+        excluded = prompt_source.excluded_tools()
         for tool in tools:
             name = (tool.name or "").strip()
             config = tool.config if isinstance(tool.config, dict) else {}
             input_schema = config.get("input_schema")
-            if not name or not isinstance(input_schema, dict):
+            if not name or not isinstance(input_schema, dict) or name in excluded:
                 continue
             tools_by_name[name] = tool
             claude_tools.append(
