@@ -46,6 +46,17 @@ final class Earcons: EarconPlaying {
         }
     }
 
+    /// The engine stopped and started again (route change, interruption,
+    /// media reset). The node's play/pause state does not survive that, so a
+    /// stale "playing" node can leave every earcon scheduled after silently
+    /// never rendering. Put it back in a known-good state.
+    func engineRestarted() {
+        node.stop()
+        guard node.engine?.isRunning == true else { return }
+        node.play()
+        AudioLog.shared.add("Earcons node restarted after an engine restart")
+    }
+
     private func buffer(for earcon: Earcon) -> AVAudioPCMBuffer? {
         if let cached = cache[earcon] { return cached }
         let rendered = Self.render(Self.notes[earcon] ?? [], format: CaptureEngine.playbackFormat)
