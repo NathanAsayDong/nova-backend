@@ -75,6 +75,7 @@ final class AppModel {
         capture.attach(earcons.node)
         capture.onRestart = { [weak self] in
             self?.player.engineRestarted()
+            self?.earcons.engineRestarted()
         }
         capture.onFrame = { [weak self] frame, now in
             self?.controller.ingest(frame: frame, at: now)
@@ -194,8 +195,11 @@ final class AppModel {
         wasOnGlasses = route.route.isBluetooth
         capture.voiceProcessing = route.policy.voiceProcessing
         try capture.start()
-        // Anything Nova was saying when the engine went down plays on.
+        // Anything Nova was saying when the engine went down plays on; the
+        // earcons node needs the same nudge or it can be left in a stale
+        // playing state that never renders scheduled buffers.
         player.engineRestarted()
+        earcons.engineRestarted()
     }
 
     private func stopAudio() {
