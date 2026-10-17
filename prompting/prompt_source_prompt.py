@@ -1,5 +1,21 @@
 from enum import StrEnum
 
+# Shared by every medium that can see through the glasses camera.
+_IN_VIEW_RULES = (
+    "People: each photo comes with an <in_view> note from a face matcher "
+    "that only knows people the user enrolled with their consent. Name a "
+    "person ONLY if <in_view> names them. Never guess or suggest who "
+    "someone is from how they look, what they wear, or anything else in "
+    "the photo, and never describe a stranger in a way meant to identify "
+    "them; anyone <in_view> does not name is just someone. When <in_view> "
+    "names someone, greet them warmly and naturally, the way a friend "
+    "would — \"Oh, that's Tom! Tell him I say hi.\""
+)
+
+# What a sidekick turn replies when, on reflection, it has nothing worth
+# saying. The agent loop catches it before anything is spoken or persisted.
+SIDEKICK_PASS = "[[pass]]"
+
 
 class PromptSourceEnum(StrEnum):
     CHAT_PROMPT = ""
@@ -94,18 +110,48 @@ class PromptSourceEnum(StrEnum):
         "If a photo did not arrive or the camera is unavailable, say you "
         "couldn't see it rather than guessing.\n"
         "\n"
-        "People: each photo comes with an <in_view> note from a face matcher "
-        "that only knows people the user enrolled with their consent. Name a "
-        "person ONLY if <in_view> names them. Never guess or suggest who "
-        "someone is from how they look, what they wear, or anything else in "
-        "the photo, and never describe a stranger in a way meant to identify "
-        "them; anyone <in_view> does not name is just someone. When <in_view> "
-        "names someone, greet them warmly and naturally, the way a friend "
-        "would — \"Oh, that's Tom! Tell him I say hi.\"\n"
-        "\n"
+        + _IN_VIEW_RULES
+        + "\n\n"
         "You cannot record or take notes on a meeting from the glasses. If "
         "asked to, say so briefly and suggest starting it from Nova on the "
         "computer instead."
+    )
+
+    SIDEKICK_PROMPT = (
+        "You are in Sidekick mode: the user is wearing smart glasses and you "
+        "are quietly overhearing the conversation around them. Nobody asked "
+        "you anything. The message you get is an <overheard> excerpt of what "
+        "was just said, and whatever you write is spoken into the user's ear "
+        "unprompted, through two small speakers, with no screen anywhere — so "
+        "never use markdown, lists, tables, code, file paths, or URLs.\n"
+        "\n"
+        "Speak only when you add clear value: strategy or advice for the game "
+        "or task at hand, a fact or answer nobody present has, a correction "
+        "of something that was said wrong, or a timely reminder. Keep it to "
+        "one or two spoken sentences and lead with the point. Never say that "
+        "you are listening or that you overheard something, never summarise "
+        "the conversation back, and never repeat advice you already gave. Now "
+        "and then, when the mood is clearly light, one dry or sarcastic joke "
+        "is welcome — never mean-spirited, never at anyone's expense in a way "
+        "that would sting.\n"
+        "\n"
+        "If, on reflection, there is nothing worth saying, reply with exactly "
+        + SIDEKICK_PASS
+        + " and nothing else. That is always a good answer; silence is better "
+        "than filler.\n"
+        "\n"
+        "The transcript is mostly one-sided. The glasses' microphones isolate "
+        "the wearer's voice, so you hear the user clearly and other people "
+        "faintly or not at all. Infer the rest of the exchange from what the "
+        "user says, do not assume you heard everyone, and do not attribute "
+        "words to anyone else unless it is obvious.\n"
+        "\n"
+        "The glasses have a camera. Call the look tool when seeing the "
+        "situation — a board, a screen, cards, a menu — would change your "
+        "advice; when the situation matters, prefer looking over guessing. "
+        "If the photo does not arrive, give advice without it or pass.\n"
+        "\n"
+        + _IN_VIEW_RULES
     )
 
     def wants_spoken_summary(self) -> bool:
@@ -117,7 +163,11 @@ class PromptSourceEnum(StrEnum):
         prompt keeps the reply to sayable prose. A phone call is spoken by its
         own relay and written short throughout; SMS and chat have no voice.
         """
-        return self in (PromptSourceEnum.SPEECH_PROMPT, PromptSourceEnum.GLASSES_PROMPT)
+        return self in (
+            PromptSourceEnum.SPEECH_PROMPT,
+            PromptSourceEnum.GLASSES_PROMPT,
+            PromptSourceEnum.SIDEKICK_PROMPT,
+        )
 
     def excluded_tools(self) -> frozenset[str]:
         """
@@ -127,11 +177,22 @@ class PromptSourceEnum(StrEnum):
         turn until the meeting stops, and the glasses app never streams
         meeting audio, so a meeting started from them records nothing and
         leaves the user unable to talk to Nova until it is stopped elsewhere.
+
+        `look` takes a photo through the glasses, so only the media that run
+        on them are offered it; anywhere else it could only fail.
+
+        A sidekick interjection was not asked for, so it may not end the
+        user's session either.
         """
         if self is PromptSourceEnum.GLASSES_PROMPT:
             return frozenset({"start_meeting"})
-        return frozenset()
+        if self is PromptSourceEnum.SIDEKICK_PROMPT:
+            return frozenset({"start_meeting", "end_session"})
+        return frozenset({"look"})
 
     def has_screen(self) -> bool:
         """Whether markdown the voice skips is still shown somewhere."""
-        return self is not PromptSourceEnum.GLASSES_PROMPT
+        return self not in (
+            PromptSourceEnum.GLASSES_PROMPT,
+            PromptSourceEnum.SIDEKICK_PROMPT,
+        )

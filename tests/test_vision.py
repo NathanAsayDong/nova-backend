@@ -24,6 +24,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from prompting.prompt_source_prompt import PromptSourceEnum
 from src.controller import faces_controller, vision_controller
 from src.harness.agent_loop import AgentLoop
 from src.model.message import MessageRole
@@ -390,9 +391,16 @@ class AgentLoopImageTests(unittest.TestCase):
         self.loop.claude_service.stream_response = fake_stream
 
     def turn(self, prompt, images=None, reply="Looks like a mug."):
+        # Photos only ever come from the glasses, and only the glasses are
+        # offered `look`.
         self.replies.append(FakeMessage(content=[FakeTextBlock(text=reply)]))
         return list(
-            self.loop.conversation_loop_events(prompt, self.conversation_id, images=images)
+            self.loop.conversation_loop_events(
+                prompt,
+                self.conversation_id,
+                prompt_source=PromptSourceEnum.GLASSES_PROMPT,
+                images=images,
+            )
         )
 
     def test_the_user_message_puts_images_before_the_words(self):

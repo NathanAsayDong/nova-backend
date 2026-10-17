@@ -6,7 +6,7 @@ GPU, so they must serialize against the *same* lock object — two controllers
 each holding their own would be no lock at all.
 
 The lock is priority-aware because the two callers do not deserve equal
-treatment. A meeting window is background work that can wait a cycle; a person
+treatment. A meeting window (or a sidekick utterance) is background work that can wait a cycle; a person
 who just finished speaking is waiting for an answer. Background callers check
 `priority_pending` and stand aside rather than making a spoken turn queue
 behind thirty seconds of meeting audio.
@@ -126,14 +126,21 @@ def suffix_for_mime(mime_type: str) -> str:
 
 
 def transcribe_serialized(
-    file_path: Path, language: str | None, fast: bool = False
+    file_path: Path,
+    language: str | None,
+    fast: bool = False,
+    background: bool = False,
 ) -> str:
     """Flat transcription for an assistant turn. Takes priority on the GPU.
 
     `fast` is for live captions: greedy decoding, since the caption is redrawn
     a second later and the final pass decodes properly.
+
+    `background` is for audio nobody is waiting on — sidekick's overheard
+    utterances — which queues behind spoken turns instead of ahead of them.
     """
-    with asr_lock.priority():
+    guard = asr_lock.background() if background else asr_lock.priority()
+    with guard:
         return asr_service.transcribe_file_path(file_path, language, fast=fast)
 
 

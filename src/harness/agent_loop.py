@@ -14,7 +14,7 @@ from anthropic.types.message import Message
 from src.dao.responsibility_dao import ResponsibilityDao
 from prompting.host_environment_prompt import host_environment_prompt
 from prompting.prompt_enums import PromptEnums
-from prompting.prompt_source_prompt import PromptSourceEnum
+from prompting.prompt_source_prompt import SIDEKICK_PASS, PromptSourceEnum
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.model.report_type import ReportType
@@ -102,6 +102,52 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"false", "0", "no", "off"}
+
+
+def is_sidekick_pass(text: str) -> bool:
+    """Whether a sidekick reply is the pass sentinel and nothing else."""
+    return re.sub(r"[\s.!]", "", text or "").lower() == SIDEKICK_PASS
+
+
+class _PassHold:
+    """
+    Holds a sidekick round's live events until they cannot be a pass.
+
+    A sidekick turn that decides it has nothing to say replies with the
+    sentinel. Prose streams live, so without this the sentinel itself would
+    be spoken a word into the reply. Events are held only while everything
+    written so far could still be the sentinel — in practice the first
+    character or two of a real reply — and then released in order. For any
+    other medium it is a pass-through.
+    """
+
+    def __init__(self, active: bool) -> None:
+        self._held: list[dict[str, Any]] | None = [] if active else None
+        self._text = ""
+
+    @staticmethod
+    def _could_be_pass(text: str) -> bool:
+        return SIDEKICK_PASS.startswith(text.strip().lower())
+
+    def feed(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if self._held is None:
+            return events
+        for event in events:
+            self._held.append(event)
+            if event["type"] == "text":
+                self._text += event["text"]
+                undecided = self._could_be_pass(self._text)
+            else:
+                undecided = self._could_be_pass(event.get("text", ""))
+            if not undecided:
+                return self.flush([])
+        return []
+
+    def flush(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Release whatever is held, then `events`, and stop holding."""
+        held = self._held or []
+        self._held = None
+        return [*held, *events]
 
 
 class AgentLoop:
@@ -679,6 +725,7 @@ class AgentLoop:
         prompt_source: PromptSourceEnum = PromptSourceEnum.CHAT_PROMPT,
         conversation: Conversation | None = None,
         images: list[dict[str, Any]] | None = None,
+        persist_prompt_as: str | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Run a single conversation turn as a bounded ReAct loop, as an event stream.
@@ -697,6 +744,9 @@ class AgentLoop:
           {"type": "tool_call", "tool": ...}   a tool is about to run
           {"type": "artifact", "kind": ...}    renderable output of a tool
                                                (diff, file, terminal)
+          {"type": "silent"}                   a sidekick turn passed (replied
+                                               with the pass sentinel): nothing
+                                               was said and nothing persisted
 
         What is spoken is what is written, minus the markdown. `speech_text`
         carries the prose of the reply a sentence or two at a time, as it is
@@ -728,11 +778,17 @@ class AgentLoop:
         the old one is dropped from history (`_strip_old_images`), so a photo
         is not paid for on every turn after it.
 
+        `persist_prompt_as` is what to keep of `prompt` once the model has read
+        it: the row written to the message table and, after the turn, the
+        user message left in history. Sidekick uses it so the overheard
+        excerpt it prompts with is not kept, only the line that set it off.
+
         Turns are persisted to the conversation/message tables. Raises
         ConversationClosedError before yielding anything if the conversation
         has been closed — closed conversations can never be continued.
         """
         pending_writes: list[Future] = []
+        turn_state: dict[str, Any] = {}
         try:
             yield from self._conversation_turn(
                 prompt,
@@ -741,8 +797,13 @@ class AgentLoop:
                 conversation,
                 pending_writes,
                 images,
+                persist_prompt_as,
+                turn_state,
             )
         finally:
+            user_message = turn_state.get("user_message")
+            if persist_prompt_as is not None and user_message is not None:
+                user_message["content"] = persist_prompt_as
             history = self.conversations.get(conversation_uuid)
             if history:
                 self._strip_old_images(history)
@@ -759,6 +820,8 @@ class AgentLoop:
         conversation: Conversation | None,
         pending_writes: list[Future],
         images: list[dict[str, Any]] | None = None,
+        persist_prompt_as: str | None = None,
+        turn_state: dict[str, Any] | None = None,
     ) -> Iterator[dict[str, Any]]:
         if self.tool_service is None:
             self.tool_service = ToolService()
@@ -797,6 +860,15 @@ class AgentLoop:
                 conversation
             )
         history = self.conversations[conversation_uuid]
+        # Where this turn starts in history, so a sidekick pass can take the
+        # whole turn back out.
+        history_start = len(history)
+
+        # A sidekick turn may end in a pass, and a pass leaves no trace: the
+        # overheard excerpt is not kept unless Nova actually said something
+        # about it. So its rows wait here until the reply is known.
+        sidekick = prompt_source is PromptSourceEnum.SIDEKICK_PROMPT
+        deferred_rows: list[tuple[MessageRole, str]] = []
 
         def persist(role: MessageRole, content: str) -> None:
             """
@@ -806,10 +878,19 @@ class AgentLoop:
             waits for that write to land first, so the table never shows a
             reply ahead of the question it answers. By the time anything else
             is persisted the model has replied, so the wait is free.
+
+            A sidekick turn holds every row until Nova's own reply is
+            persisted, then writes them all in order.
             """
+            if sidekick and role is not MessageRole.NOVA:
+                deferred_rows.append((role, content))
+                return
             if pending_writes:
                 self._await_writes(pending_writes)
                 pending_writes.clear()
+            for deferred_role, deferred_content in deferred_rows:
+                self._persist_message(conversation, deferred_role, deferred_content)
+            deferred_rows.clear()
             self._persist_message(conversation, role, content)
 
         tool_context = {"conversation_uuid": str(conversation_uuid)}
@@ -874,13 +955,19 @@ class AgentLoop:
             )
         else:
             history.append({"role": "user", "content": user_text})
+        if turn_state is not None:
+            turn_state["user_message"] = history[-1]
+        user_row = self._photo_note(
+            prompt if persist_prompt_as is None else persist_prompt_as, images
+        )
         # Write-behind. The message is already in history; the model request
         # should not wait on the insert. Collected before the turn returns.
-        pending_writes.append(
-            self._persist_message_later(
-                conversation, MessageRole.USER, self._photo_note(prompt, images)
+        if sidekick:
+            persist(MessageRole.USER, user_row)
+        else:
+            pending_writes.append(
+                self._persist_message_later(conversation, MessageRole.USER, user_row)
             )
-        )
 
         # Progress reporting across a multi-round turn.
         #
@@ -952,6 +1039,7 @@ class AgentLoop:
             # this so a turn never says the same thing twice.
             early_line = None
             live = LiveReply()
+            hold = _PassHold(sidekick)
 
             try:
                 turn = self.claude_service.stream_response(
@@ -973,14 +1061,14 @@ class AgentLoop:
                 # and every chat turn saw nothing until the last token.
                 for item in turn:
                     if item is TOOL_USE_STARTED:
-                        yield from deliver(live.tool_use_started())
+                        yield from deliver(hold.flush(live.tool_use_started()))
                     else:
-                        yield from deliver(live.push(item))
+                        yield from deliver(hold.feed(live.push(item)))
                 response = turn.message
             except TimeoutError:
                 # A line that had closed but was still waiting on its role is
                 # said now: the stream got far enough to say it.
-                yield from deliver(live.finish())
+                yield from deliver(hold.flush(live.finish()))
                 fallback = "I hit a backend timeout while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
                 persist(MessageRole.NOVA, fallback)
@@ -989,7 +1077,7 @@ class AgentLoop:
                 )
                 return
             except Exception as exc:
-                yield from deliver(live.finish())
+                yield from deliver(hold.flush(live.finish()))
                 fallback = f"Agent loop failed: {str(exc)}"
                 history.append({"role": "assistant", "content": fallback})
                 persist(MessageRole.NOVA, fallback)
@@ -1029,6 +1117,14 @@ class AgentLoop:
             if not tool_uses:
                 raw_text = self._extract_text(response)
                 display_text = strip_speak_tags(raw_text)
+                if sidekick and is_sidekick_pass(display_text):
+                    # Nothing worth saying. The held live events are dropped
+                    # unsaid, the turn is taken back out of history, and none
+                    # of its rows are written.
+                    del history[history_start:]
+                    deferred_rows.clear()
+                    yield {"type": "silent"}
+                    return
                 # required: this is the answer the user asked for out loud.
                 # A reply that is all table or all code reduces to no sayable
                 # prose, and ending a turn in silence reads as failure.
@@ -1044,7 +1140,7 @@ class AgentLoop:
                     # going live — goes out first. Inside the try, so a
                     # consumer that stops reading after the first piece still
                     # leaves the reply in history.
-                    yield from deliver(live.finish())
+                    yield from deliver(hold.flush(live.finish()))
                     # Speech first, so the transport can start synthesizing
                     # before the prose is sent.
                     if spoken_text and early_line is None:
@@ -1076,7 +1172,7 @@ class AgentLoop:
             # A turn handed in complete never saw the tool_use marker, so
             # LiveReply is told what the round was; a line it was still
             # holding is spoken here as the progress line it is.
-            yield from deliver(live.finish(tool_round=True))
+            yield from deliver(hold.flush(live.finish(tool_round=True)))
 
             # What this round said before reaching for its tools.
             status_display = strip_speak_tags(self._extract_text(response))

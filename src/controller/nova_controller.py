@@ -24,6 +24,7 @@ from src.controller.audio_ws import (
 from src.service.conversation_service import ConversationClosedError, ConversationService
 from src.service.endpointing_service import DEFAULT_SILENCE_MS, endpoint_decision
 from src.service.meeting_service import MeetingService
+from src.service.sidekick_service import SidekickService
 from src.service.tts_service import TTSService
 from src.service.vision_service import VisionService
 
@@ -946,6 +947,9 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     continue
 
                 file_path: Path | None = None
+                # From here until the turn is answered, Sidekick holds its
+                # tongue: the user is talking to Nova on purpose.
+                SidekickService.begin_direct_turn()
                 try:
                     if speculative_transcript:
                         # Already transcribed during the endpointing wait, and
@@ -1276,6 +1280,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         # receive() will surface the disconnect and end the loop.
                         pass
                 finally:
+                    SidekickService.end_direct_turn()
                     if file_path and file_path.exists():
                         os.remove(file_path)
 

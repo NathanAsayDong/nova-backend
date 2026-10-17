@@ -23,6 +23,7 @@ from src.controller.faces_controller import router as faces_router
 from src.controller.vision_controller import router as vision_router
 from src.controller.coding_controller import router as coding_router
 from src.controller.settings_controller import router as settings_router
+from src.controller.sidekick_controller import router as sidekick_router
 from src.controller.auth_controller import router as auth_router, auth_service
 from src.middleware.auth_gate import AuthGate
 
@@ -107,6 +108,7 @@ app.include_router(faces_router)
 app.include_router(vision_router)
 app.include_router(coding_router)
 app.include_router(settings_router)
+app.include_router(sidekick_router)
 # Twilio's call webhooks and Infobip's SMS forward, not the browser client's —
 # CORS above does not apply to them, and they are gated on Twilio's request
 # signature and BIP_INBOUND_SECRET respectively instead.
