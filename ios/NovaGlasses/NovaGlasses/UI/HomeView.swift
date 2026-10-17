@@ -30,6 +30,24 @@ struct HomeView: View {
                         get: { model.listeningEnabled },
                         set: { on in Task { await model.setListening(on) } }
                     ))
+                    Toggle(isOn: Binding(
+                        get: { model.sidekick.isOn },
+                        set: { on in model.setSidekick(on) }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Sidekick")
+                            Text(model.sidekick.isOn ? "Listening to everything · off after an hour" : "Nova listens in and chimes in on its own")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .disabled(!model.listeningEnabled)
+                    if model.sidekick.isOn {
+                        LabeledContent("Overheard", value: model.sidekick.lastHeard.isEmpty ? "—" : model.sidekick.lastHeard)
+                        if !model.sidekick.lastRemark.isEmpty {
+                            LabeledContent("Sidekick said", value: model.sidekick.lastRemark)
+                        }
+                    }
                 }
 
                 Section("Connection") {

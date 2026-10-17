@@ -19,6 +19,7 @@
 		3C31AFE2A33058981A63D934 /* VisionClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3287484FF912A1157D323AC3 /* VisionClient.swift */; };
 		47665FDC517D772354C18891 /* MP3StreamDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A72807FC26237D5484235A8 /* MP3StreamDecoder.swift */; };
 		48CFBD7C74F748E1B6652377 /* ConversationControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2357ECF7814437DC2992A9B9 /* ConversationControllerTests.swift */; };
+		497D0717B9A398A4D44C956A /* SidekickTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C8C81CFF725393E9BB02763 /* SidekickTests.swift */; };
 		5D023BEC57C8782796CF3F87 /* tone_1s_22050.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = 1658350B809BE1024FDACB58 /* tone_1s_22050.mp3 */; };
 		683FACAF02C7CB1EFF619546 /* TurnDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7546FF00EE24C3CCD237B903 /* TurnDetector.swift */; };
 		6ADB9682B5F5F878944AF088 /* AudioRouteManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA816F7ED47FC7311184F8B2 /* AudioRouteManager.swift */; };
@@ -41,10 +42,12 @@
 		B7C614BCB07AA78D73C6C138 /* EventCodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51D9497B488BA3DB46D9B8EC /* EventCodingTests.swift */; };
 		BE2B8764E5D547D12CD4D822 /* PlaybackWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12373D2A2878C5ACDD85BFD2 /* PlaybackWatchdog.swift */; };
 		CDF5C63C07A5AB56C8726FE6 /* ConversationController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B920D98B34009C22C690FFF /* ConversationController.swift */; };
+		D58C9C32A7BEF9EA9BDF3A74 /* ThinkingPulseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DCE5383C918074E79852802 /* ThinkingPulseTests.swift */; };
 		E81F1D0352C8D18D8D845424 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799416FC1F197A76E8242701 /* AppModel.swift */; };
 		E968E9031183E7DA0F776AC1 /* TurnDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0BA6B13175CCC394A4D6714 /* TurnDetectorTests.swift */; };
 		F8C0321AE89E8C6271481816 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3306D79455CCFCD9EE0A227D /* Assets.xcassets */; };
 		FAB2B775ABB5360A9D4689AF /* SpeechWakeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BAE2E5CF39131FB31B30D8 /* SpeechWakeDetector.swift */; };
+		FE516ED1EBDC007BD3E5B2AD /* SidekickController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E29DF668F5FA5577AD34901 /* SidekickController.swift */; };
 		FEB499170370A1FA5F91A252 /* NovaGlassesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85D8081920A2CB606DE8CE6E /* NovaGlassesApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -60,6 +63,7 @@
 
 /* Begin PBXFileReference section */
 		04D49F26C210EB6765BD033E /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		0DCE5383C918074E79852802 /* ThinkingPulseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThinkingPulseTests.swift; sourceTree = "<group>"; };
 		12373D2A2878C5ACDD85BFD2 /* PlaybackWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackWatchdog.swift; sourceTree = "<group>"; };
 		1658350B809BE1024FDACB58 /* tone_1s_22050.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = tone_1s_22050.mp3; sourceTree = "<group>"; };
 		203BBFDE4E9B78568BB224ED /* AudioLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLogView.swift; sourceTree = "<group>"; };
@@ -74,12 +78,14 @@
 		51BAE2E5CF39131FB31B30D8 /* SpeechWakeDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechWakeDetector.swift; sourceTree = "<group>"; };
 		51D9497B488BA3DB46D9B8EC /* EventCodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EventCodingTests.swift; sourceTree = "<group>"; };
 		691B63EC9DCB554333BD9C46 /* AudioSessionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionPolicy.swift; sourceTree = "<group>"; };
+		6C8C81CFF725393E9BB02763 /* SidekickTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidekickTests.swift; sourceTree = "<group>"; };
 		728955D6DE3B93BFB700F76E /* WakePhraseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakePhraseTests.swift; sourceTree = "<group>"; };
 		72F703C3EDB149DB2C0E28C0 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		7546FF00EE24C3CCD237B903 /* TurnDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnDetector.swift; sourceTree = "<group>"; };
 		76EC46BC277A319AD967AC1B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		799416FC1F197A76E8242701 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		7B920D98B34009C22C690FFF /* ConversationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationController.swift; sourceTree = "<group>"; };
+		7E29DF668F5FA5577AD34901 /* SidekickController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidekickController.swift; sourceTree = "<group>"; };
 		85D8081920A2CB606DE8CE6E /* NovaGlassesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaGlassesApp.swift; sourceTree = "<group>"; };
 		8A72807FC26237D5484235A8 /* MP3StreamDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP3StreamDecoder.swift; sourceTree = "<group>"; };
 		955BDB2A7AD4940F4D3C15D6 /* VisionIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionIntent.swift; sourceTree = "<group>"; };
@@ -193,6 +199,8 @@
 				95EE404404F26B365610F3AC /* AudioPlaybackTests.swift */,
 				2357ECF7814437DC2992A9B9 /* ConversationControllerTests.swift */,
 				51D9497B488BA3DB46D9B8EC /* EventCodingTests.swift */,
+				6C8C81CFF725393E9BB02763 /* SidekickTests.swift */,
+				0DCE5383C918074E79852802 /* ThinkingPulseTests.swift */,
 				C0BA6B13175CCC394A4D6714 /* TurnDetectorTests.swift */,
 				D35EB73C828C29173923E17A /* VisionTests.swift */,
 				728955D6DE3B93BFB700F76E /* WakePhraseTests.swift */,
@@ -206,8 +214,16 @@
 			children = (
 				7B920D98B34009C22C690FFF /* ConversationController.swift */,
 				495D40B59597C684B6ACC306 /* Ports.swift */,
+				7E29DF668F5FA5577AD34901 /* SidekickController.swift */,
 			);
 			path = Conversation;
+			sourceTree = "<group>";
+		};
+		823BA2B9D9031B97D7735B95 /* .claude */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = .claude;
 			sourceTree = "<group>";
 		};
 		869AAB4EA3F90213FB87C0BF /* NovaGlasses */ = {
@@ -215,6 +231,7 @@
 			children = (
 				3306D79455CCFCD9EE0A227D /* Assets.xcassets */,
 				76EC46BC277A319AD967AC1B /* Info.plist */,
+				823BA2B9D9031B97D7735B95 /* .claude */,
 				31BA5F7AB01778ED73096509 /* App */,
 				018A7760FB3C8041115D7EEC /* Audio */,
 				6026DDA7CFC6198DE44DFEC7 /* Auth */,
@@ -369,6 +386,8 @@
 				AD25BC3D4B4C430CE09D840F /* AudioPlaybackTests.swift in Sources */,
 				48CFBD7C74F748E1B6652377 /* ConversationControllerTests.swift in Sources */,
 				B7C614BCB07AA78D73C6C138 /* EventCodingTests.swift in Sources */,
+				497D0717B9A398A4D44C956A /* SidekickTests.swift in Sources */,
+				D58C9C32A7BEF9EA9BDF3A74 /* ThinkingPulseTests.swift in Sources */,
 				E968E9031183E7DA0F776AC1 /* TurnDetectorTests.swift in Sources */,
 				87267BF0561A0B186AF58C14 /* VisionTests.swift in Sources */,
 				04BC4F22D7048D0D7B02B273 /* WakePhraseTests.swift in Sources */,
@@ -401,6 +420,7 @@
 				08A752E65067929C0C3A9548 /* PCM.swift in Sources */,
 				BE2B8764E5D547D12CD4D822 /* PlaybackWatchdog.swift in Sources */,
 				732619BA095C7679DAB257DF /* Ports.swift in Sources */,
+				FE516ED1EBDC007BD3E5B2AD /* SidekickController.swift in Sources */,
 				2AF132BC87A4FD3CC2196534 /* SpeechPlayer.swift in Sources */,
 				FAB2B775ABB5360A9D4689AF /* SpeechWakeDetector.swift in Sources */,
 				683FACAF02C7CB1EFF619546 /* TurnDetector.swift in Sources */,

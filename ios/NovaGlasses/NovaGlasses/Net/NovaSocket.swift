@@ -1,6 +1,7 @@
 import Foundation
 
-/// The voice WebSocket, /ws/transcribe.
+/// A Nova voice WebSocket: /ws/transcribe for turns, /ws/sidekick for
+/// Sidekick mode. Both speak the same JSON event vocabulary.
 ///
 ///  - Sends the bearer token on the upgrade request. A refused token closes
 ///    the socket with 4401 before the handshake completes (or fails the
@@ -23,6 +24,7 @@ final class NovaSocket: NovaSocketing {
     /// Read on every connect, so a server or token change applies next time.
     var baseURL: () -> URL
     var token: () -> String?
+    let path: String
     private let session: URLSession
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
@@ -36,17 +38,19 @@ final class NovaSocket: NovaSocketing {
     init(
         baseURL: @escaping () -> URL,
         token: @escaping () -> String?,
+        path: String = "/ws/transcribe",
         session: URLSession = .shared
     ) {
         self.baseURL = baseURL
         self.token = token
+        self.path = path
         self.session = session
     }
 
-    static func socketURL(for base: URL) -> URL {
+    static func socketURL(for base: URL, path: String = "/ws/transcribe") -> URL {
         var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "http" ? "ws" : "wss"
-        components.path = "/ws/transcribe"
+        components.path = path
         return components.url!
     }
 
@@ -91,7 +95,7 @@ final class NovaSocket: NovaSocketing {
             wantConnected = false
             return
         }
-        var request = URLRequest(url: Self.socketURL(for: baseURL()))
+        var request = URLRequest(url: Self.socketURL(for: baseURL(), path: path))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 10
         let task = session.webSocketTask(with: request)

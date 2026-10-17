@@ -13,6 +13,9 @@ import Foundation
 ///  - error:    two low notes, a little louder. "That failed."
 ///  - shutter:  two quick high ticks. "I took a photo."
 ///  - waiting:  one soft pulse, repeated. "Still looking, hold on."
+///  - thinkingPulse: a low soft swell, repeated. "Still working on it."
+///  - sidekickOn / sidekickOff: three rising / falling notes.
+///  - sidekickCue: a light high note before an unprompted remark.
 @MainActor
 final class Earcons: EarconPlaying {
     struct Note: Equatable, Sendable {
@@ -32,6 +35,10 @@ final class Earcons: EarconPlaying {
             .error: [Note(freq: e4, at: 0, length: 0.25, gain: 0.14), Note(freq: c4, at: 0.18, length: 0.45, gain: 0.14)],
             .shutter: [Note(freq: e6, at: 0, length: 0.06, gain: 0.06), Note(freq: e6, at: 0.07, length: 0.08, gain: 0.05)],
             .waiting: [Note(freq: e5, at: 0, length: 0.22, gain: 0.045)],
+            .sidekickOn: [Note(freq: e5, at: 0, length: 0.2, gain: 0.1), Note(freq: 830.61, at: 0.09, length: 0.2, gain: 0.1), Note(freq: b5, at: 0.18, length: 0.35, gain: 0.1)],
+            .sidekickOff: [Note(freq: b5, at: 0, length: 0.2, gain: 0.09), Note(freq: 830.61, at: 0.09, length: 0.2, gain: 0.09), Note(freq: e5, at: 0.18, length: 0.4, gain: 0.09)],
+            .sidekickCue: [Note(freq: e6, at: 0, length: 0.18, gain: 0.05)],
+            .thinkingPulse: [Note(freq: a4, at: 0, length: 0.5, gain: 0.03), Note(freq: 554.37, at: 0.16, length: 0.55, gain: 0.025)],
         ]
     }()
 

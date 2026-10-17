@@ -107,7 +107,7 @@ final class EventCodingTests: XCTestCase {
             .other(type: "assistant_text")
         )
         XCTAssertEqual(try decode(#"{"type":"tool_call","tool":"x","input":{},"conversationId":"c"}"#),
-                       .other(type: "tool_call"))
+                       .toolCall(tool: "x"), "tool_call drives the thinking pulse")
     }
 
     func testServerEventsRoundTrip() throws {

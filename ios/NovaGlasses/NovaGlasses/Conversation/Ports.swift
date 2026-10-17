@@ -50,6 +50,14 @@ enum Earcon: String, CaseIterable, Sendable {
     case shutter
     /// One soft pulse, repeated while a photo is on its way: "hold on, looking".
     case waiting
+    /// A low, soft two-note swell, repeated while Nova works: "still thinking".
+    case thinkingPulse
+    /// Three rising notes: Sidekick is listening to everything now.
+    case sidekickOn
+    /// Three falling notes: Sidekick stopped listening.
+    case sidekickOff
+    /// A light high note just before Nova chimes in unprompted.
+    case sidekickCue
 }
 
 @MainActor

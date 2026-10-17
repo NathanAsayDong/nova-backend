@@ -49,6 +49,10 @@ final class ConversationController {
     static let maxMessageBytes = 32_000
     /// The waiting pulse repeats this often while a photo is on its way.
     static let waitingPulseSeconds: Double = 0.9
+    /// While Nova works on a turn and nothing is playing: a breathing pulse,
+    /// after a grace so a quick answer never hears it.
+    static let thinkingGraceSeconds: Double = 0.7
+    static let thinkingPulseSeconds: Double = 1.5
     /// How long `stop` waits for a photo still on its way up. Measured on
     /// device: stream ~3 s cold, photo ~2.7 s, upload ~1 s.
     static let photoWaitSeconds: Double = 8
@@ -65,6 +69,11 @@ final class ConversationController {
 
     /// The server rejected our token; the app should show the login screen.
     var onUnauthorized: (() -> Void)?
+    /// Sidekick: a whole utterance that was not for Nova (no wake phrase),
+    /// as 16 kHz mono Int16 PCM. Nil unless Sidekick is on.
+    var onAmbientUtterance: ((Data) -> Void)?
+    /// "Hey Nova" was heard, before the controller acts on it.
+    var onWakeHeard: (() -> Void)?
 
     // MARK: Collaborators
 
@@ -94,6 +103,9 @@ final class ConversationController {
         var batch = Data()
         /// The glasses photo for this turn, taken when the caption asked to look.
         var photo: PhotoSlot?
+        /// Began while Nova was quiet, so it is the room talking, not Nova's
+        /// own voice in the glasses' speakers.
+        var ambient = false
 
         init(purpose: CapturePurpose) {
             self.purpose = purpose
@@ -146,6 +158,9 @@ final class ConversationController {
     @ObservationIgnored private var socketWaitTimer: Cancellable?
     @ObservationIgnored private var thinkingTimer: Cancellable?
     @ObservationIgnored private var waitingPulse: Cancellable?
+    @ObservationIgnored private var thinkingPulse: Cancellable?
+    /// The server has said `done` for the turn in flight.
+    @ObservationIgnored private var turnFinished = true
 
     init(
         socket: NovaSocketing,
@@ -233,6 +248,7 @@ final class ConversationController {
         if wakeWatching {
             if capture == nil {
                 startCapture(.sentry)
+                capture?.ambient = phase == .idle
             }
             if !wakeUtteranceOpen {
                 wakeUtteranceOpen = true
@@ -286,6 +302,7 @@ final class ConversationController {
             }
             wakeGraceTimer?.cancel()
             wakeGraceTimer = scheduler.after(Self.wakeGraceSeconds) { [weak self] in
+                self?.forwardAmbient()
                 self?.discardSentryCapture()
             }
             return
@@ -301,6 +318,7 @@ final class ConversationController {
     // MARK: - Wake
 
     private func handleWake() {
+        onWakeHeard?()
         // The recognizer keeps running to the end of the utterance (see
         // `onTranscript`); `turnEnd` closes it.
         switch phase {
@@ -468,6 +486,8 @@ final class ConversationController {
     }
 
     private func emitStop(_ purpose: CapturePurpose, imageId: String?) {
+        turnFinished = false
+        defer { refreshThinkingPulse() }
         socket.send(.stop(
             purpose: purpose,
             conversationId: conversationIds.load(),
@@ -493,6 +513,7 @@ final class ConversationController {
     private func stopWaitingPulse() {
         waitingPulse?.cancel()
         waitingPulse = nil
+        refreshThinkingPulse()
     }
 
     /// The caption asks to look: take the photo now, while the user is still
@@ -560,6 +581,14 @@ final class ConversationController {
         wake.cancel()
     }
 
+    /// The utterance ended without "Hey Nova": in Sidekick it goes to the
+    /// sidekick socket instead of being forgotten.
+    private func forwardAmbient() {
+        guard let onAmbientUtterance, let capture, capture.purpose == .sentry,
+              !capture.promoted, !capture.discarded, capture.ambient, !capture.heldData.isEmpty else { return }
+        onAmbientUtterance(capture.heldData)
+    }
+
     private func discardSentryCapture() {
         wakeGraceTimer?.cancel()
         if let capture, capture.purpose == .sentry, !capture.promoted {
@@ -613,6 +642,8 @@ final class ConversationController {
         socketWaitTimer?.cancel()
         thinkingTimer?.cancel()
         stopWaitingPulse()
+        thinkingPulse?.cancel()
+        thinkingPulse = nil
     }
 
     // MARK: - Phase
@@ -620,10 +651,46 @@ final class ConversationController {
     private func setPhase(_ phase: Phase, _ message: String) {
         self.phase = phase
         statusMessage = message
+        refreshThinkingPulse()
+    }
+
+    // MARK: - Thinking pulse
+
+    /// Nova is working: a turn is open, nothing is playing, and no photo is
+    /// being waited on (that has its own pulse).
+    private var isWorking: Bool {
+        (phase == .thinking || phase == .speaking) && !turnFinished
+            && !player.isBusy && waitingPulse == nil
+    }
+
+    private func refreshThinkingPulse() {
+        if !isWorking {
+            if thinkingPulse != nil {
+                thinkingPulse?.cancel()
+                thinkingPulse = nil
+            }
+            return
+        }
+        guard thinkingPulse == nil else { return }
+        thinkingPulse = scheduler.after(Self.thinkingGraceSeconds) { [weak self] in
+            self?.breathe()
+        }
+    }
+
+    private func breathe() {
+        guard isWorking else {
+            thinkingPulse = nil
+            return
+        }
+        earcons.play(.thinkingPulse)
+        thinkingPulse = scheduler.after(Self.thinkingPulseSeconds) { [weak self] in
+            self?.breathe()
+        }
     }
 
     private func goIdle(cue: Earcon?, message: String = "Say \"Hey Nova\".") {
         guard phase != .off else { return }
+        turnFinished = true
         if let capture, capture.promoted {
             // A request in progress is abandoned; a sentry utterance is kept.
             dropCapture(sendAbort: true)
@@ -640,6 +707,8 @@ final class ConversationController {
     }
 
     private func playbackDrained() {
+        // A spoken step ended but the turn goes on (a tool is running).
+        refreshThinkingPulse()
         if turnLost {
             goIdle(cue: .error, message: "Connection lost.")
             return
@@ -691,6 +760,9 @@ final class ConversationController {
         case .ready, .pong, .chunkReceived, .other:
             break
 
+        case .sidekickStarted, .heard, .silent, .sidekickEnded:
+            break // /ws/sidekick only
+
         case .listening(_, let endpointMs):
             if awaitingListeningAck {
                 awaitingListeningAck = false
@@ -707,6 +779,10 @@ final class ConversationController {
                 detector.setSilenceWindow(endpointMs)
             }
             maybeTakePhoto(for: text)
+
+        case .toolCall(let tool):
+            AudioLog.shared.add("Nova is using \(tool)")
+            refreshThinkingPulse()
 
         case .captureRequest(let requestId, _):
             AudioLog.shared.add("Nova asked to look (\(requestId))")
@@ -727,6 +803,7 @@ final class ConversationController {
         case .audioStreamStart(let streamId, _, _):
             guard !suppressAssistantAudio, phase == .thinking || phase == .speaking else { return }
             player.beginStream(streamId)
+            refreshThinkingPulse()
             if phase == .thinking {
                 thinkingTimer?.cancel()
                 setPhase(.speaking, "Speaking…")
@@ -742,6 +819,8 @@ final class ConversationController {
 
         case .done(_, let conversationId, let assistantText):
             guard !suppressAssistantAudio else { return }
+            turnFinished = true
+            refreshThinkingPulse()
             AudioLog.shared.add("Nova said: \"\(assistantText.prefix(160))\"")
             conversationIds.save(conversationId)
             thinkingTimer?.cancel()

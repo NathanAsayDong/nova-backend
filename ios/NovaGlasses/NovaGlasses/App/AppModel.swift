@@ -28,6 +28,8 @@ final class AppModel {
     let controller: ConversationController
     /// The glasses camera (Meta toolkit). Observable: the screen shows its state.
     let camera = DATGlassesCamera()
+    /// Sidekick mode: always listening, chiming in unprompted.
+    let sidekick: SidekickController
 
     @ObservationIgnored private let auth = AuthStore()
     @ObservationIgnored private let route = AudioRouteManager()
@@ -37,6 +39,7 @@ final class AppModel {
     @ObservationIgnored private let wake = SpeechWakeDetector()
     @ObservationIgnored private let socket: NovaSocket
     @ObservationIgnored private let vision: VisionClient
+    @ObservationIgnored private let sidekickSocket: NovaSocket
     @ObservationIgnored private var token: String?
     @ObservationIgnored private var autoOffTask: Task<Void, Never>?
     @ObservationIgnored private var wasOnGlasses = false
@@ -50,6 +53,7 @@ final class AppModel {
 
         socket = NovaSocket(baseURL: { AppModel.defaultBaseURL }, token: { nil })
         vision = VisionClient(api: { APIClient(baseURL: AppModel.defaultBaseURL) })
+        sidekickSocket = NovaSocket(baseURL: { AppModel.defaultBaseURL }, token: { nil }, path: "/ws/sidekick")
         controller = ConversationController(
             socket: socket,
             player: player,
@@ -60,10 +64,32 @@ final class AppModel {
             camera: camera,
             vision: vision
         )
+        let controller = self.controller
+        sidekick = SidekickController(
+            socket: sidekickSocket,
+            player: player,
+            earcons: earcons,
+            camera: camera,
+            vision: vision,
+            scheduler: MainScheduler(),
+            mainIsIdle: { controller.phase == .idle }
+        )
         // Late-bound so a server or token change applies on the next connect
         // without rebuilding the socket.
         socket.baseURL = { [weak self] in self?.baseURL ?? AppModel.defaultBaseURL }
         socket.token = { [weak self] in self?.token }
+        sidekickSocket.baseURL = { [weak self] in self?.baseURL ?? AppModel.defaultBaseURL }
+        sidekickSocket.token = { [weak self] in self?.token }
+        sidekick.onEnded = { [weak self] reason in
+            guard let self else { return }
+            self.controller.onAmbientUtterance = nil
+            self.controller.onWakeHeard = nil
+            switch reason {
+            case "timeout": self.postLocalNotification("Sidekick turned off after an hour.")
+            case "error": self.errorMessage = "Sidekick stopped: the server refused it."
+            default: break
+            }
+        }
         vision.api = { [weak self] in self?.api ?? APIClient(baseURL: AppModel.defaultBaseURL) }
         // Meta: the glasses mic (HFP) must be up before the camera stream starts.
         camera.audioReady = { [weak self] in
@@ -91,6 +117,18 @@ final class AppModel {
     }
 
     var api: APIClient { APIClient(baseURL: baseURL, token: token) }
+
+    /// Sidekick needs Listening on: it rides on the same microphone.
+    func setSidekick(_ on: Bool) {
+        guard on else {
+            sidekick.stop()
+            return
+        }
+        guard listeningEnabled else { return }
+        controller.onAmbientUtterance = { [weak self] pcm in self?.sidekick.ambient(pcm) }
+        controller.onWakeHeard = { [weak self] in self?.sidekick.userWoke() }
+        sidekick.start()
+    }
 
     /// `novaglasses://` — the Meta AI app returning after registration.
     func handleOpenURL(_ url: URL) {
@@ -180,6 +218,7 @@ final class AppModel {
     }
 
     private func stopListening(mirrorToServer: Bool) async {
+        sidekick.stop()
         controller.setEnabled(false)
         stopAudio()
         listeningEnabled = false

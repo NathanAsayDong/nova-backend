@@ -32,6 +32,14 @@ enum ClientEvent: Equatable, Sendable {
     case stop(purpose: CapturePurpose, conversationId: String?, imageIds: [String] = [])
     case ping
 
+    // Sidekick (/ws/sidekick)
+    case sidekickStart(conversationId: String?)
+    case utteranceStart
+    case utteranceEnd
+    /// "Hey Nova" cut into an interjection.
+    case interrupted
+    case sidekickStop
+
     var name: String {
         switch self {
         case .start: "start"
@@ -40,6 +48,11 @@ enum ClientEvent: Equatable, Sendable {
         case .abort: "abort"
         case .stop: "stop"
         case .ping: "ping"
+        case .sidekickStart: "start"
+        case .utteranceStart: "utterance_start"
+        case .utteranceEnd: "utterance_end"
+        case .interrupted: "interrupted"
+        case .sidekickStop: "stop"
         }
     }
 }
@@ -65,7 +78,10 @@ extension ClientEvent: Codable {
             if !imageIds.isEmpty {
                 try c.encode(imageIds, forKey: .imageIds)
             }
-        case .speechPause, .speechResume, .abort, .ping:
+        case .sidekickStart(let conversationId):
+            try c.encodeIfPresent(conversationId, forKey: .conversationId)
+        case .speechPause, .speechResume, .abort, .ping,
+             .utteranceStart, .utteranceEnd, .interrupted, .sidekickStop:
             break
         }
     }
@@ -74,6 +90,11 @@ extension ClientEvent: Codable {
         let c = try decoder.container(keyedBy: Keys.self)
         let event = try c.decode(String.self, forKey: .event)
         switch event {
+        case "start" where !c.contains(.mimeType):
+            self = .sidekickStart(conversationId: try c.decodeIfPresent(String.self, forKey: .conversationId))
+        case "utterance_start": self = .utteranceStart
+        case "utterance_end": self = .utteranceEnd
+        case "interrupted": self = .interrupted
         case "start":
             self = .start(StartEvent(
                 mimeType: try c.decode(String.self, forKey: .mimeType),
@@ -124,6 +145,17 @@ enum ServerEvent: Equatable, Sendable {
     case followUpStopped(message: String)
     case meetingMode(message: String)
     case error(message: String, code: String?)
+    /// Nova started a tool (a step of the work), so it is still thinking.
+    case toolCall(tool: String)
+
+    // Sidekick (/ws/sidekick)
+    case sidekickStarted(conversationId: String)
+    /// One overheard utterance, transcribed.
+    case heard(text: String)
+    /// Nova considered chiming in and chose not to.
+    case silent
+    /// be_quiet, timeout, stopped or error.
+    case sidekickEnded(reason: String)
     /// Nova's `look` tool wants a photo right now; upload it with this id.
     case captureRequest(requestId: String, conversationId: String?)
     case pong
@@ -133,7 +165,7 @@ enum ServerEvent: Equatable, Sendable {
 extension ServerEvent: Codable {
     private enum Keys: String, CodingKey {
         case type, message, endpointMs, count, bytes, text, seq, conversationId
-        case role, streamId, mimeType, chunkBase64, assistantText, code, requestId
+        case role, streamId, mimeType, chunkBase64, assistantText, code, requestId, tool, reason
     }
 
     var type: String {
@@ -154,6 +186,11 @@ extension ServerEvent: Codable {
         case .followUpStopped: "follow_up_stopped"
         case .meetingMode: "meeting_mode"
         case .error: "error"
+        case .toolCall: "tool_call"
+        case .sidekickStarted: "sidekick_started"
+        case .heard: "heard"
+        case .silent: "silent"
+        case .sidekickEnded: "sidekick_ended"
         case .captureRequest: "capture_request"
         case .pong: "pong"
         case .other(let type): type
@@ -215,6 +252,15 @@ extension ServerEvent: Codable {
         case "meeting_mode": self = .meetingMode(message: try message())
         case "error":
             self = .error(message: try message(), code: try c.decodeIfPresent(String.self, forKey: .code))
+        case "sidekick_started":
+            self = .sidekickStarted(conversationId: try c.decodeIfPresent(String.self, forKey: .conversationId) ?? "")
+        case "heard":
+            self = .heard(text: try c.decodeIfPresent(String.self, forKey: .text) ?? "")
+        case "silent": self = .silent
+        case "sidekick_ended":
+            self = .sidekickEnded(reason: try c.decodeIfPresent(String.self, forKey: .reason) ?? "stopped")
+        case "tool_call":
+            self = .toolCall(tool: try c.decodeIfPresent(String.self, forKey: .tool) ?? "")
         case "capture_request":
             self = .captureRequest(
                 requestId: try c.decode(String.self, forKey: .requestId),
@@ -266,6 +312,16 @@ extension ServerEvent: Codable {
         case .error(let m, let code):
             try c.encode(m, forKey: .message)
             try c.encodeIfPresent(code, forKey: .code)
+        case .toolCall(let tool):
+            try c.encode(tool, forKey: .tool)
+        case .sidekickStarted(let conversationId):
+            try c.encode(conversationId, forKey: .conversationId)
+        case .heard(let text):
+            try c.encode(text, forKey: .text)
+        case .sidekickEnded(let reason):
+            try c.encode(reason, forKey: .reason)
+        case .silent:
+            break
         case .captureRequest(let requestId, let conversationId):
             try c.encode(requestId, forKey: .requestId)
             try c.encodeIfPresent(conversationId, forKey: .conversationId)
