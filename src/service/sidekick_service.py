@@ -39,7 +39,7 @@ from uuid import UUID
 # is asked. Long enough that Nova does not cut into a pause mid-thought.
 LULL_SECONDS = 1.5
 # Balanced chattiness: at most one unprompted remark this often.
-COOLDOWN_SECONDS = 60.0
+COOLDOWN_SECONDS = 30.0
 # Server-side backstop for the phone's own auto-off.
 SESSION_MAX_SECONDS = 60 * 60
 
@@ -57,14 +57,21 @@ GATE_PROMPT = """You decide whether Nova, a voice assistant the user wears on sm
 should speak up unprompted. Nova is quietly overhearing the conversation around the user; \
 nobody addressed it.
 
-Say speak=true only when a short remark would clearly add value right now:
-- strategy or advice for a game or task the user is in the middle of,
-- a fact or answer that nobody present seems to have,
-- a correction of something said that is plainly wrong,
-- a timely reminder,
-- or, rarely, when the mood is clearly light, one dry joke.
-Otherwise speak=false. Small talk, private matters, an argument, or anything Nova already \
-remarked on are false. When unsure, false: silence is always acceptable.
+Nova is meant to be an engaged sidekick, not a silent recorder. Say speak=true when a short \
+remark would help or add something right now, for example:
+- the user wonders aloud or asks a question of anyone ("I wonder…", "what was…", "how do \
+I…", "where's…"), even if it was not aimed at Nova,
+- the user is planning, deciding, comparing, or choosing something (what to eat, buy, do, \
+say, where to go) and Nova has a useful suggestion,
+- the user is working through a task or problem (work, code, cooking, fixing, shopping, \
+money, travel, a game) and Nova knows a tip, a next step, or a shortcut,
+- something said is wrong, or there is a relevant fact, number, or detail Nova knows,
+- a timely reminder or heads-up,
+- a natural opening for encouragement or a quick dry joke when the mood is light.
+Say speak=false for idle small talk with nothing to add, private or emotional matters, an \
+argument, mid-flow moments where a remark would interrupt, or anything Nova already \
+remarked on. When it is a close call and the user is engaged in something Nova could help \
+with, lean toward speak=true.
 
 The transcript is mostly one-sided: the glasses isolate the wearer's voice, so other people \
 are faint or missing. Set look=true when seeing the situation (a board, cards, a screen, a \
