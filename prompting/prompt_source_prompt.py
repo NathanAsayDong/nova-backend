@@ -16,6 +16,12 @@ _IN_VIEW_RULES = (
 # saying. The agent loop catches it before anything is spoken or persisted.
 SIDEKICK_PASS = "[[pass]]"
 
+# Appended to a sidekick remark that ends in a question or a request for
+# confirmation, so the client can keep the mic open for a quick answer
+# without the wake phrase. The agent loop strips it before anything is
+# spoken, shown, or persisted.
+SIDEKICK_EXPECTS_REPLY = "[[expects_reply]]"
+
 
 class PromptSourceEnum(StrEnum):
     CHAT_PROMPT = ""
@@ -141,6 +147,15 @@ class PromptSourceEnum(StrEnum):
         "nothing helpful to add, reply with exactly "
         + SIDEKICK_PASS
         + " and nothing else — never pad with filler.\n"
+        "\n"
+        "When your remark ends with a question or asks the user to confirm "
+        "something — \"Should I create it?\", \"Want me to add that to your "
+        "list?\" — and you are genuinely expecting them to answer right back, "
+        "end the whole reply with "
+        + SIDEKICK_EXPECTS_REPLY
+        + " and nothing after it, so the glasses keep listening for the "
+        "answer without the wake phrase. Only add it when an answer is "
+        "actually expected; leave it off a remark that stands on its own.\n"
         "\n"
         "The transcript is mostly one-sided. The glasses' microphones isolate "
         "the wearer's voice, so you hear the user clearly and other people "

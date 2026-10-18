@@ -138,7 +138,7 @@ enum ServerEvent: Equatable, Sendable {
     case audioStreamStart(streamId: String, mimeType: String, role: AudioRole)
     case audioStreamChunk(streamId: String, chunkBase64: String, seq: Int)
     case audioStreamEnd(streamId: String)
-    case done(message: String, conversationId: String, assistantText: String)
+    case done(message: String, conversationId: String, assistantText: String, expectsReply: Bool = false)
     case noSpeech(message: String)
     case wakeOnly(message: String)
     case wakeNotDetected(message: String)
@@ -166,6 +166,7 @@ extension ServerEvent: Codable {
     private enum Keys: String, CodingKey {
         case type, message, endpointMs, count, bytes, text, seq, conversationId
         case role, streamId, mimeType, chunkBase64, assistantText, code, requestId, tool, reason
+        case expectsReply
     }
 
     var type: String {
@@ -243,7 +244,8 @@ extension ServerEvent: Codable {
             self = .done(
                 message: try message(),
                 conversationId: try c.decodeIfPresent(String.self, forKey: .conversationId) ?? "",
-                assistantText: try c.decodeIfPresent(String.self, forKey: .assistantText) ?? ""
+                assistantText: try c.decodeIfPresent(String.self, forKey: .assistantText) ?? "",
+                expectsReply: try c.decodeIfPresent(Bool.self, forKey: .expectsReply) ?? false
             )
         case "no_speech": self = .noSpeech(message: try message())
         case "wake_only": self = .wakeOnly(message: try message())
@@ -305,10 +307,11 @@ extension ServerEvent: Codable {
             try c.encode(seq, forKey: .seq)
         case .audioStreamEnd(let streamId):
             try c.encode(streamId, forKey: .streamId)
-        case .done(let m, let id, let text):
+        case .done(let m, let id, let text, let expectsReply):
             try c.encode(m, forKey: .message)
             try c.encode(id, forKey: .conversationId)
             try c.encode(text, forKey: .assistantText)
+            try c.encode(expectsReply, forKey: .expectsReply)
         case .error(let m, let code):
             try c.encode(m, forKey: .message)
             try c.encodeIfPresent(code, forKey: .code)

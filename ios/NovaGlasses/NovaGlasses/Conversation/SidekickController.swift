@@ -30,6 +30,9 @@ final class SidekickController {
     @ObservationIgnored private let vision: VisionUploading?
     @ObservationIgnored private let scheduler: Scheduling
     @ObservationIgnored private let mainIsIdle: () -> Bool
+    /// Tells the main controller a remark expects an answer, no wake phrase
+    /// needed. See `ConversationController.expectSidekickFollowUp()`.
+    @ObservationIgnored private let expectFollowUp: () -> Void
 
     @ObservationIgnored private var conversationId: String?
     @ObservationIgnored private var started = false
@@ -48,7 +51,8 @@ final class SidekickController {
         camera: GlassesCamera?,
         vision: VisionUploading?,
         scheduler: Scheduling,
-        mainIsIdle: @escaping () -> Bool
+        mainIsIdle: @escaping () -> Bool,
+        expectFollowUp: @escaping () -> Void = {}
     ) {
         self.socket = socket
         self.player = player
@@ -57,6 +61,7 @@ final class SidekickController {
         self.vision = vision
         self.scheduler = scheduler
         self.mainIsIdle = mainIsIdle
+        self.expectFollowUp = expectFollowUp
         socket.onEvent = { [weak self] event in self?.handle(event) }
         socket.onStateChange = { [weak self] state in self?.connectionChanged(state) }
     }
@@ -197,10 +202,15 @@ final class SidekickController {
             guard playing.remove(streamId) != nil else { return }
             player.endStream(streamId)
 
-        case .done(_, _, let assistantText):
+        case .done(_, _, let assistantText, let expectsReply):
             speaking = false
             dropped.removeAll()
             AudioLog.shared.add("Sidekick said: \"\(assistantText.prefix(160))\"")
+            if expectsReply {
+                // Once what's still playing finishes, open a brief
+                // wake-phrase-free window for the answer.
+                expectFollowUp()
+            }
 
         case .silent:
             AudioLog.shared.add("Sidekick chose to stay quiet")

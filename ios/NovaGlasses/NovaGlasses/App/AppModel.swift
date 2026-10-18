@@ -72,7 +72,8 @@ final class AppModel {
             camera: camera,
             vision: vision,
             scheduler: MainScheduler(),
-            mainIsIdle: { controller.phase == .idle }
+            mainIsIdle: { controller.phase == .idle },
+            expectFollowUp: { controller.expectSidekickFollowUp() }
         )
         // Late-bound so a server or token change applies on the next connect
         // without rebuilding the socket.

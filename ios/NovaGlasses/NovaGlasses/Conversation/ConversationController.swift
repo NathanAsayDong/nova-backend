@@ -56,6 +56,9 @@ final class ConversationController {
     /// How long `stop` waits for a photo still on its way up. Measured on
     /// device: stream ~3 s cold, photo ~2.7 s, upload ~1 s.
     static let photoWaitSeconds: Double = 8
+    /// Sidekick remark that expects an answer: how long the mic stays open,
+    /// no wake phrase needed, before standing down quietly.
+    static let sidekickFollowUpSeconds: Double = 2.0
 
     // MARK: Observable state for the UI
 
@@ -150,6 +153,13 @@ final class ConversationController {
     @ObservationIgnored private var suppressAssistantAudio = false
     @ObservationIgnored private var awaitingListeningAck = false
     @ObservationIgnored private var pendingFollowUp = false
+    /// Armed by Sidekick (`expectSidekickFollowUp`) for its own remark,
+    /// consumed the same way as `pendingFollowUp` once playback drains.
+    @ObservationIgnored private var pendingSidekickFollowUp = false
+    /// The current `.listening` phase is Sidekick's follow-up window, not a
+    /// direct-conversation one: a captured utterance is ambient (goes to
+    /// Sidekick), never a `.turn` promoted on the main socket.
+    @ObservationIgnored private var listeningIsSidekickFollowUp = false
     /// The socket dropped mid-reply: once what already arrived has played, stand down.
     @ObservationIgnored private var turnLost = false
 
@@ -213,6 +223,8 @@ final class ConversationController {
             wakeUtteranceOpen = false
             player.stopAll()
             pendingFollowUp = false
+            pendingSidekickFollowUp = false
+            listeningIsSidekickFollowUp = false
             cancelTimers()
             detector.reset()
             setPhase(.off, "Off.")
@@ -259,7 +271,15 @@ final class ConversationController {
         guard phase == .listening else { return }
         listenTimer?.cancel()
         if capture == nil {
-            startCapture(.turn)
+            if listeningIsSidekickFollowUp {
+                // Not a request to Nova directly: captured the same way any
+                // ambient utterance is, so it reaches Sidekick, not the main
+                // conversation, once the turn ends.
+                startCapture(.sentry)
+                capture?.ambient = true
+            } else {
+                startCapture(.turn)
+            }
         }
         // On-device captions for a follow-up ("what's this?"), for the
         // vision trigger. A wake heard here changes nothing.
@@ -599,6 +619,15 @@ final class ConversationController {
             wakeUtteranceOpen = false
             wake.cancel()
         }
+        // Sidekick's follow-up utterance (heard or not) is settled: the
+        // window was only ever this one sentry capture, so standing down
+        // here is "otherwise drop back to idle."
+        if listeningIsSidekickFollowUp {
+            listeningIsSidekickFollowUp = false
+            if phase == .listening {
+                setPhase(.idle, "Say \"Hey Nova\".")
+            }
+        }
     }
 
     private func discardAwaitingSocket() {
@@ -620,9 +649,9 @@ final class ConversationController {
 
     // MARK: - Timers
 
-    private func armListenTimeout(cue: Earcon) {
+    private func armListenTimeout(cue: Earcon?, timeoutSeconds: Double = ConversationController.listenTimeoutSeconds) {
         listenTimer?.cancel()
-        listenTimer = scheduler.after(Self.listenTimeoutSeconds) { [weak self] in
+        listenTimer = scheduler.after(timeoutSeconds) { [weak self] in
             guard let self, self.phase == .listening, self.capture == nil else { return }
             self.goIdle(cue: cue)
         }
@@ -698,6 +727,8 @@ final class ConversationController {
         listenTimer?.cancel()
         thinkingTimer?.cancel()
         pendingFollowUp = false
+        pendingSidekickFollowUp = false
+        listeningIsSidekickFollowUp = false
         turnLost = false
         partialTranscript = ""
         if let cue {
@@ -706,11 +737,33 @@ final class ConversationController {
         setPhase(.idle, message)
     }
 
+    /// Sidekick's last remark asked a question: once its playback drains,
+    /// open a brief wake-phrase-free listening window for the answer (see
+    /// `playbackDrained`). A no-op outside `.idle` — Sidekick never speaks
+    /// over a direct conversation, so there is nothing to layer this onto.
+    func expectSidekickFollowUp() {
+        guard phase == .idle else { return }
+        pendingSidekickFollowUp = true
+        if !player.isBusy {
+            playbackDrained()
+        }
+    }
+
     private func playbackDrained() {
         // A spoken step ended but the turn goes on (a tool is running).
         refreshThinkingPulse()
         if turnLost {
             goIdle(cue: .error, message: "Connection lost.")
+            return
+        }
+        if pendingSidekickFollowUp {
+            pendingSidekickFollowUp = false
+            guard phase == .idle else { return }
+            listeningIsSidekickFollowUp = true
+            setPhase(.listening, "Listening for a follow-up…")
+            // Quiet timeout: Sidekick asking is already the cue: a second
+            // earcon on top for silence would be noise, not feedback.
+            armListenTimeout(cue: nil, timeoutSeconds: Self.sidekickFollowUpSeconds)
             return
         }
         guard pendingFollowUp else { return }
@@ -817,7 +870,7 @@ final class ConversationController {
             guard !suppressAssistantAudio else { return }
             player.endStream(streamId)
 
-        case .done(_, let conversationId, let assistantText):
+        case .done(_, let conversationId, let assistantText, _):
             guard !suppressAssistantAudio else { return }
             turnFinished = true
             refreshThinkingPulse()

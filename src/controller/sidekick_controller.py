@@ -309,6 +309,7 @@ class SidekickConnection:
         speaker = self.speaker = asyncio.create_task(speak_queued_lines())
         silent = False
         final_text: str | None = None
+        expects_reply = False
         spoken: list[str] = []
         try:
             async for event in iter_in_thread(event_stream):
@@ -317,6 +318,7 @@ class SidekickConnection:
                     silent = True
                 elif event_type == "text_final":
                     final_text = event["text"]
+                    expects_reply = bool(event.get("expects_reply"))
                 if self.interrupted:
                     continue
                 if event_type == "speech_text":
@@ -361,13 +363,17 @@ class SidekickConnection:
             await self.try_send({"type": "silent", "conversationId": conversation_id})
             return
         said = final_text if final_text is not None else " ".join(spoken)
-        session.note_remark(said)
+        # An interrupted remark never got to ask anything; don't hold the
+        # gate open for an answer to a question that was never finished.
+        expects_reply = expects_reply and not self.interrupted
+        session.note_remark(said, expects_reply=expects_reply)
         await self.try_send(
             {
                 "type": "done",
                 "message": "Interrupted." if self.interrupted else "Remark complete.",
                 "conversationId": conversation_id,
                 "assistantText": said,
+                "expectsReply": expects_reply,
             }
         )
 

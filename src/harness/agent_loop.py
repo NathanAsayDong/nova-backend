@@ -14,7 +14,11 @@ from anthropic.types.message import Message
 from src.dao.responsibility_dao import ResponsibilityDao
 from prompting.host_environment_prompt import host_environment_prompt
 from prompting.prompt_enums import PromptEnums
-from prompting.prompt_source_prompt import SIDEKICK_PASS, PromptSourceEnum
+from prompting.prompt_source_prompt import (
+    SIDEKICK_EXPECTS_REPLY,
+    SIDEKICK_PASS,
+    PromptSourceEnum,
+)
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.model.report_type import ReportType
@@ -107,6 +111,40 @@ def _env_flag(name: str, default: bool) -> bool:
 def is_sidekick_pass(text: str) -> bool:
     """Whether a sidekick reply is the pass sentinel and nothing else."""
     return re.sub(r"[\s.!]", "", text or "").lower() == SIDEKICK_PASS
+
+
+def strip_expects_reply(text: str) -> tuple[str, bool]:
+    """
+    Pull the `expects_reply` control token off the end of a sidekick reply.
+
+    The model appends it, with nothing after it, to a remark that ends in a
+    question or a request for confirmation. `SpokenProse` holds back any text
+    with no closing sentence punctuation until the round ends, and the token
+    has none, so it only ever surfaces as a trailing fragment — here, or as
+    its own event out of `LiveReply.finish()` (see `_strip_expects_reply_events`).
+    """
+    stripped = (text or "").rstrip()
+    if stripped.lower().endswith(SIDEKICK_EXPECTS_REPLY):
+        return stripped[: -len(SIDEKICK_EXPECTS_REPLY)].rstrip(), True
+    return text, False
+
+
+def _strip_expects_reply_events(
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Apply `strip_expects_reply` to a round's held-back final events."""
+    found = False
+    cleaned: list[dict[str, Any]] = []
+    for event in events:
+        text = event.get("text")
+        if text is None:
+            cleaned.append(event)
+            continue
+        new_text, hit = strip_expects_reply(text)
+        found = found or hit
+        if new_text:
+            cleaned.append({**event, "text": new_text})
+    return cleaned, found
 
 
 class _PassHold:
@@ -1125,6 +1163,9 @@ class AgentLoop:
                     deferred_rows.clear()
                     yield {"type": "silent"}
                     return
+                expects_reply = False
+                if sidekick:
+                    display_text, expects_reply = strip_expects_reply(display_text)
                 # required: this is the answer the user asked for out loud.
                 # A reply that is all table or all code reduces to no sayable
                 # prose, and ending a turn in silence reads as failure.
@@ -1139,8 +1180,16 @@ class AgentLoop:
                     # — a spoken line waiting on its role, prose short of
                     # going live — goes out first. Inside the try, so a
                     # consumer that stops reading after the first piece still
-                    # leaves the reply in history.
-                    yield from deliver(hold.flush(live.finish()))
+                    # leaves the reply in history. The token has no closing
+                    # punctuation, so it is always part of what was still
+                    # held — never spoken earlier in the stream.
+                    finish_events = hold.flush(live.finish())
+                    if sidekick:
+                        finish_events, held_token = _strip_expects_reply_events(
+                            finish_events
+                        )
+                        expects_reply = expects_reply or held_token
+                    yield from deliver(finish_events)
                     # Speech first, so the transport can start synthesizing
                     # before the prose is sent.
                     if spoken_text and early_line is None:
@@ -1157,7 +1206,10 @@ class AgentLoop:
                         # it streamed with exactly what was written.
                         if not live.streamed:
                             yield {"type": "text", "text": display_text}
-                        yield {"type": "text_final", "text": display_text}
+                        text_final_event = {"type": "text_final", "text": display_text}
+                        if expects_reply:
+                            text_final_event["expects_reply"] = True
+                        yield text_final_event
                 finally:
                     # Keep the full blocks (citations, search results) in
                     # history so follow-up turns stay valid; fall back to raw
