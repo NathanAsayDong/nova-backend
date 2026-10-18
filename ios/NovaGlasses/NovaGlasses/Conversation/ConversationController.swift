@@ -35,7 +35,11 @@ final class ConversationController {
 
     // MARK: Tunables (mirrors useNovaRuntime.ts where one exists)
 
-    /// After an utterance ends, how long a late wake result may still promote it.
+    /// After an utterance ends, how long a late wake result may still promote
+    /// it — and, read the other way, how long a wake confirmed right as the
+    /// utterance seemed to end waits before trusting that nothing more is
+    /// coming. The same number serves both directions of the same race
+    /// between the on-device recognizer and the acoustic turn detector.
     static let wakeGraceSeconds = 0.9
     /// Woken (or done replying) with nothing said: stand down after this long.
     static let listenTimeoutSeconds = 8.0
@@ -154,6 +158,9 @@ final class ConversationController {
     @ObservationIgnored private var turnLost = false
 
     @ObservationIgnored private var wakeGraceTimer: Cancellable?
+    /// Armed when a wake confirms on an utterance that already looked over:
+    /// gives a beat for a continuation before committing to `.thinking`.
+    @ObservationIgnored private var settleTimer: Cancellable?
     @ObservationIgnored private var listenTimer: Cancellable?
     @ObservationIgnored private var socketWaitTimer: Cancellable?
     @ObservationIgnored private var thinkingTimer: Cancellable?
@@ -258,6 +265,9 @@ final class ConversationController {
         }
         guard phase == .listening else { return }
         listenTimer?.cancel()
+        // Speech resumed before the settle window closed: it was mid-thought,
+        // not the end of the request — keep the same capture open.
+        settleTimer?.cancel()
         if capture == nil {
             startCapture(.turn)
         }
@@ -341,10 +351,10 @@ final class ConversationController {
             promote(capture)
             if capture.utteranceEnded {
                 // "Hey Nova." and a pause, before the recognizer caught up.
-                earcons.play(.thinking)
-                setPhase(.thinking, "Thinking…")
-                armThinkingTimeout()
-                stopCapture()
+                // The pause might just be mid-thought: stay in `.listening` —
+                // the capture is still open and keeps taking live audio — and
+                // only settle into `.thinking` once nothing more follows.
+                armSettleTimeout(for: capture)
             }
             return
         }
@@ -352,6 +362,21 @@ final class ConversationController {
         armListenTimeout(cue: .cancel)
         if !socket.isOpen {
             socket.connect()
+        }
+    }
+
+    /// A wake confirmed on an utterance the detector already closed: give it
+    /// `wakeGraceSeconds` to prove it was a mid-thought pause (resumed speech
+    /// cancels this via `speechOnset()`) before treating it as a finished,
+    /// request-only turn.
+    private func armSettleTimeout(for capture: Capture) {
+        settleTimer?.cancel()
+        settleTimer = scheduler.after(Self.wakeGraceSeconds) { [weak self] in
+            guard let self, self.capture === capture, self.phase == .listening else { return }
+            self.earcons.play(.thinking)
+            self.setPhase(.thinking, "Thinking…")
+            self.armThinkingTimeout()
+            self.stopCapture()
         }
     }
 
@@ -638,6 +663,7 @@ final class ConversationController {
 
     private func cancelTimers() {
         wakeGraceTimer?.cancel()
+        settleTimer?.cancel()
         listenTimer?.cancel()
         socketWaitTimer?.cancel()
         thinkingTimer?.cancel()
@@ -697,6 +723,7 @@ final class ConversationController {
         }
         listenTimer?.cancel()
         thinkingTimer?.cancel()
+        settleTimer?.cancel()
         pendingFollowUp = false
         turnLost = false
         partialTranscript = ""

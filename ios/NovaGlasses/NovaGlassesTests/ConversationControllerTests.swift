@@ -256,14 +256,46 @@ final class ConversationControllerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(PCMFormat.durationMs(ofBytes: rig.socket.audio.count), 2000)
     }
 
-    func testALateWakeSendsTheFinishedUtteranceAtOnce() {
+    func testALateWakeGoesStraightToListeningThenSettlesToThinking() {
         let rig = Rig.idle()
         rig.speak(600)
         rig.silence(1500) // turn over, inside the grace period
         rig.wake.hear()
+        // Straight to listening — no "thinking" flash — with the sentry
+        // capture already sent and the mic still open for a continuation.
+        XCTAssertEqual(rig.socket.log.filter { $0 != "audio" }, ["start"])
+        XCTAssertEqual(rig.controller.phase, .listening)
+        XCTAssertEqual(rig.earcons.played, [.wake])
+
+        // Nothing more comes: once the settle window closes, the turn is
+        // treated as request-only and sent off for a reply.
+        rig.silence(ConversationController.wakeGraceSeconds * 1000 + 100)
         XCTAssertEqual(rig.socket.log.filter { $0 != "audio" }, ["start", "stop"])
         XCTAssertEqual(rig.controller.phase, .thinking)
         XCTAssertEqual(rig.earcons.played, [.wake, .thinking])
+    }
+
+    func testContinuingToTalkInTheSettleWindowKeepsTheSameTurnOpen() {
+        let rig = Rig.idle()
+        rig.speak(600)
+        rig.silence(1500) // detector thought the utterance ended here
+        rig.wake.hear() // the on-device recognizer only now confirms "Hey Nova"
+        XCTAssertEqual(rig.controller.phase, .listening)
+
+        // Nate keeps talking — a continuous thought — well inside the settle
+        // window. The resumed speech must not be clipped or start a new turn.
+        rig.silence(200)
+        rig.speak(600)
+        XCTAssertEqual(rig.controller.phase, .listening, "resumed speech cancels the settle timeout")
+
+        rig.silence(1500)
+        XCTAssertEqual(rig.controller.phase, .thinking)
+        XCTAssertEqual(rig.socket.starts.count, 1, "one turn, not a second one after the pause")
+        // The 200 ms silence inside the settle window is itself reported as a
+        // live pause on the one ongoing turn; there is still only one "start".
+        XCTAssertEqual(rig.socket.log.filter { $0 != "audio" }, ["start", "speech_pause", "stop"])
+        // The whole utterance — "Hey Nova" and the continuation — went out.
+        XCTAssertGreaterThanOrEqual(PCMFormat.durationMs(ofBytes: rig.socket.audio.count), 600 + 600)
     }
 
     func testWakeWithNoUtteranceListensThenStandsDown() {
