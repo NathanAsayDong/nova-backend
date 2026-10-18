@@ -30,6 +30,9 @@ final class SidekickController {
     @ObservationIgnored private let vision: VisionUploading?
     @ObservationIgnored private let scheduler: Scheduling
     @ObservationIgnored private let mainIsIdle: () -> Bool
+    /// The same store the direct conversation reads and writes, so an
+    /// interjection and "Hey Nova, what did you mean?" land in one thread.
+    @ObservationIgnored private let conversationIds: ConversationIdStore
 
     @ObservationIgnored private var conversationId: String?
     @ObservationIgnored private var started = false
@@ -48,6 +51,7 @@ final class SidekickController {
         camera: GlassesCamera?,
         vision: VisionUploading?,
         scheduler: Scheduling,
+        conversationIds: ConversationIdStore,
         mainIsIdle: @escaping () -> Bool
     ) {
         self.socket = socket
@@ -56,6 +60,7 @@ final class SidekickController {
         self.camera = camera
         self.vision = vision
         self.scheduler = scheduler
+        self.conversationIds = conversationIds
         self.mainIsIdle = mainIsIdle
         socket.onEvent = { [weak self] event in self?.handle(event) }
         socket.onStateChange = { [weak self] state in self?.connectionChanged(state) }
@@ -69,6 +74,10 @@ final class SidekickController {
         started = false
         lastHeard = ""
         lastRemark = ""
+        // Join whatever conversation the direct side is in right now (or
+        // none, if it was reset): a fresh start always re-reads the shared
+        // id, rather than keeping whatever this instance last cached.
+        conversationId = conversationIds.load()
         earcons.play(.sidekickOn)
         AudioLog.shared.add("Sidekick on")
         autoOff = scheduler.after(Self.autoOffSeconds) { [weak self] in
@@ -160,6 +169,10 @@ final class SidekickController {
         switch event {
         case .sidekickStarted(let id):
             conversationId = id
+            // The server may have swapped in a fresh id (none was sent, or
+            // the one sent was already closed): share it back, so the next
+            // direct turn continues this same conversation.
+            conversationIds.save(id)
             started = true
             let backlog = queued
             queued.removeAll()

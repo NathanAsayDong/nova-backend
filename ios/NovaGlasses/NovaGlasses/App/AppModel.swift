@@ -54,13 +54,16 @@ final class AppModel {
         socket = NovaSocket(baseURL: { AppModel.defaultBaseURL }, token: { nil })
         vision = VisionClient(api: { APIClient(baseURL: AppModel.defaultBaseURL) })
         sidekickSocket = NovaSocket(baseURL: { AppModel.defaultBaseURL }, token: { nil }, path: "/ws/sidekick")
+        // One store for both: Sidekick's interjections and the direct
+        // conversation need to land in the same thread.
+        let conversationIds = ConversationIdStore()
         controller = ConversationController(
             socket: socket,
             player: player,
             earcons: earcons,
             wake: wake,
             scheduler: MainScheduler(),
-            conversationIds: ConversationIdStore(),
+            conversationIds: conversationIds,
             camera: camera,
             vision: vision
         )
@@ -72,6 +75,7 @@ final class AppModel {
             camera: camera,
             vision: vision,
             scheduler: MainScheduler(),
+            conversationIds: conversationIds,
             mainIsIdle: { controller.phase == .idle }
         )
         // Late-bound so a server or token change applies on the next connect

@@ -87,12 +87,16 @@ final class SidekickControllerTests: XCTestCase {
         let player = FakePlayer()
         let earcons = FakeEarcons()
         let scheduler = ManualScheduler()
+        /// The same store a direct ConversationController.Rig would use — a
+        /// shared id written or read here should be visible there too.
+        let conversationIds = ConversationIdStore(defaults: UserDefaults(suiteName: "test.\(UUID().uuidString)")!)
         var mainIdle = true
         var ended: [String] = []
         lazy var sidekick: SidekickController = {
             let sidekick = SidekickController(
                 socket: socket, player: player, earcons: earcons, camera: nil, vision: nil,
-                scheduler: scheduler, mainIsIdle: { [unowned self] in self.mainIdle }
+                scheduler: scheduler, conversationIds: conversationIds,
+                mainIsIdle: { [unowned self] in self.mainIdle }
             )
             sidekick.onEnded = { [unowned self] in self.ended.append($0) }
             return sidekick
@@ -120,6 +124,41 @@ final class SidekickControllerTests: XCTestCase {
         XCTAssertEqual(rig.earcons.played, [.sidekickOn])
         rig.socket.open()
         XCTAssertEqual(rig.socket.events, [.sidekickStart(conversationId: nil)])
+    }
+
+    func testStartingJoinsWhateverConversationTheDirectSideIsAlreadyIn() {
+        let rig = Rig()
+        rig.conversationIds.save("direct-1")
+        rig.sidekick.start()
+        rig.socket.open()
+        XCTAssertEqual(rig.socket.events, [.sidekickStart(conversationId: "direct-1")])
+    }
+
+    func testSidekickStartedSharesTheIdBackForTheDirectSideToPickUp() {
+        let rig = Rig.started()
+        XCTAssertEqual(rig.conversationIds.load(), "side-1", "the direct side's next turn should continue this thread")
+    }
+
+    func testANewStartPicksUpAClearedDirectConversationRatherThanAStaleCachedId() {
+        let rig = Rig()
+        rig.conversationIds.save("direct-1")
+        rig.sidekick.start()
+        rig.socket.open()
+        rig.socket.emit(.sidekickStarted(conversationId: "direct-1"))
+        rig.sidekick.stop()
+
+        // The direct side resets (e.g. "New Conversation", or the server
+        // closed it): the shared store is cleared independently of Sidekick.
+        rig.conversationIds.clear()
+        rig.socket.events.removeAll()
+        rig.socket.connectCalls = 0
+
+        rig.sidekick.start()
+        rig.socket.open()
+        XCTAssertEqual(
+            rig.socket.events, [.sidekickStart(conversationId: nil)],
+            "a fresh start re-reads the shared store instead of reusing the id this instance cached earlier"
+        )
     }
 
     func testUtterancesWaitForTheServerThenGoOutFramed() {
