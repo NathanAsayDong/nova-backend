@@ -11,6 +11,11 @@ OPENAI_TTS_INSTRUCTIONS = (
     "Prioritize clarity and natural prosody."
 )
 
+# Longest wait for the next bytes of an OpenAI TTS response (including the
+# first ones) before the request is abandoned and retried. See OpenAITTS.
+OPENAI_TTS_READ_TIMEOUT_SECONDS = 4
+OPENAI_TTS_MAX_RETRIES = 3
+
 # After the primary provider refuses a clip, how long to send lines straight to
 # the fallback. A refusal is usually a plan or quota problem that will not fix
 # itself between sentences, and retrying it first would add a failed round trip
@@ -47,11 +52,15 @@ class OpenAITTS:
         import httpx
         from openai import OpenAI
 
-        # Same budget as ElevenLabs: lines are spoken one after another, so a
-        # request left on the client's 10-minute default would hold up every
-        # line behind it. A timeout is contained like any TTS failure.
+        # OpenAI's TTS normally starts streaming within ~1.5s, but about one
+        # request in six hangs for 30s+ before sending anything (measured
+        # 2026-10-20). Lines are spoken one after another, so one hung request
+        # stalls every sentence behind it. Give up on a silent request after a
+        # few seconds and send a fresh one, which almost always starts at once.
         self.client = OpenAI(
-            api_key=api_key, timeout=httpx.Timeout(30, connect=5), max_retries=1
+            api_key=api_key,
+            timeout=httpx.Timeout(OPENAI_TTS_READ_TIMEOUT_SECONDS, connect=5),
+            max_retries=OPENAI_TTS_MAX_RETRIES,
         )
         model = (os.getenv("TTS_MODEL") or "").strip()
         self.model = (
