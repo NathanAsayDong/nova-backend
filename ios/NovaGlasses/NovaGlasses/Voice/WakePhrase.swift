@@ -48,6 +48,23 @@ enum WakePhrase {
         return tokens.count >= 2 && prefixes.contains(tokens[0]) && tokens[1] == "nova"
     }
 
+    /// Fillers that can trail a bare wake phrase ("Hey Nova, um").
+    private static let fillers: Set<String> = ["um", "uh", "er", "erm", "hmm", "so", "okay", "ok"]
+
+    /// The utterance is the wake phrase and nothing else: "Hey Nova.",
+    /// "Nova?", "Hey Nova, um". The request is still to come.
+    static func isOnlyWakePhrase(_ value: String) -> Bool {
+        guard startsWithWakePhrase(value) else { return false }
+        var tokens = canonicalTokens(value)
+        if let first = tokens.first, prefixes.contains(first) {
+            tokens.removeFirst()
+        }
+        if tokens.first == "nova" {
+            tokens.removeFirst()
+        }
+        return tokens.allSatisfy { fillers.contains($0) }
+    }
+
     /// Looser check: also accepts "nova" anywhere in a short phrase.
     static func containsWakePhrase(_ value: String) -> Bool {
         let tokens = canonicalTokens(value)

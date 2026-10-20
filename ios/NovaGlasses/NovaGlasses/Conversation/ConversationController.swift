@@ -181,6 +181,8 @@ final class ConversationController {
     @ObservationIgnored private var thinkingTimer: Cancellable?
     @ObservationIgnored private var waitingPulse: Cancellable?
     @ObservationIgnored private var thinkingPulse: Cancellable?
+    /// The on-device transcript of the open wake utterance, as it grows.
+    @ObservationIgnored private var wakeCaption = ""
     /// The server has said `done` for the turn in flight.
     @ObservationIgnored private var turnFinished = true
 
@@ -207,7 +209,10 @@ final class ConversationController {
         socket.onStateChange = { [weak self] state in self?.handleConnection(state) }
         player.onDrained = { [weak self] in self?.playbackDrained() }
         wake.onWake = { [weak self] in self?.handleWake() }
-        wake.onTranscript = { [weak self] text in self?.maybeTakePhoto(for: text) }
+        wake.onTranscript = { [weak self] text in
+            self?.wakeCaption = text
+            self?.maybeTakePhoto(for: text)
+        }
 
         detector.onSpeechOnset = { [weak self] in self?.speechOnset() }
         detector.onSpeechStart = { [weak self] in self?.speechOnset() }
@@ -276,6 +281,7 @@ final class ConversationController {
             }
             if !wakeUtteranceOpen {
                 wakeUtteranceOpen = true
+                wakeCaption = ""
                 wake.beginUtterance(seed: preRoll.snapshot())
             }
             return
@@ -343,6 +349,11 @@ final class ConversationController {
             return
         }
         guard phase == .listening, let capture, capture.promoted, !capture.discarded else { return }
+        if capture.purpose == .sentry, WakePhrase.isOnlyWakePhrase(wakeCaption) {
+            // "Hey Nova." and a pause: the request is still to come.
+            listenForRequest()
+            return
+        }
         closeWakeUtterance()
         earcons.play(.thinking)
         setPhase(.thinking, "Thinking…")
@@ -372,6 +383,12 @@ final class ConversationController {
     private func promoteSentryOrListen() {
         wakeGraceTimer?.cancel()
         if let capture, capture.purpose == .sentry, !capture.promoted, !capture.discarded {
+            if capture.utteranceEnded, WakePhrase.isOnlyWakePhrase(wakeCaption) {
+                // The wake was confirmed after "Hey Nova." had already ended:
+                // nothing to send, just listen for the request.
+                listenForRequest()
+                return
+            }
             setPhase(.listening, "Listening…")
             promote(capture)
             if capture.utteranceEnded {
@@ -390,6 +407,24 @@ final class ConversationController {
         }
     }
 
+    /// A bare "Hey Nova": drop that utterance (it says nothing the server
+    /// needs) and listen for the request as a fresh turn, without sending
+    /// anything or playing the thinking tick.
+    private func listenForRequest() {
+        AudioLog.shared.add("Wake phrase alone — listening for the request")
+        settleTimer?.cancel()
+        wakeGraceTimer?.cancel()
+        dropCapture(sendAbort: true)
+        closeWakeUtterance()
+        wakeCaption = ""
+        partialTranscript = ""
+        setPhase(.listening, "Listening…")
+        armListenTimeout(cue: .cancel)
+        if !socket.isOpen {
+            socket.connect()
+        }
+    }
+
     /// A wake confirmed on an utterance the detector already closed: give it
     /// `wakeGraceSeconds` to prove it was a mid-thought pause (resumed speech
     /// cancels this via `speechOnset()`) before treating it as a finished,
@@ -398,6 +433,11 @@ final class ConversationController {
         settleTimer?.cancel()
         settleTimer = scheduler.after(Self.wakeGraceSeconds) { [weak self] in
             guard let self, self.capture === capture, self.phase == .listening else { return }
+            if WakePhrase.isOnlyWakePhrase(self.wakeCaption) {
+                // The recognizer's words arrived after its wake: still bare.
+                self.listenForRequest()
+                return
+            }
             self.earcons.play(.thinking)
             self.setPhase(.thinking, "Thinking…")
             self.armThinkingTimeout()

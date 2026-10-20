@@ -46,6 +46,7 @@
 		E81F1D0352C8D18D8D845424 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 799416FC1F197A76E8242701 /* AppModel.swift */; };
 		E968E9031183E7DA0F776AC1 /* TurnDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0BA6B13175CCC394A4D6714 /* TurnDetectorTests.swift */; };
 		F8C0321AE89E8C6271481816 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3306D79455CCFCD9EE0A227D /* Assets.xcassets */; };
+		F9860259D47769A32ECD670A /* WakeStraightToListeningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 816F6B4E3E2F681A80D3D08F /* WakeStraightToListeningTests.swift */; };
 		FAB2B775ABB5360A9D4689AF /* SpeechWakeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51BAE2E5CF39131FB31B30D8 /* SpeechWakeDetector.swift */; };
 		FE516ED1EBDC007BD3E5B2AD /* SidekickController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E29DF668F5FA5577AD34901 /* SidekickController.swift */; };
 		FEB499170370A1FA5F91A252 /* NovaGlassesApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85D8081920A2CB606DE8CE6E /* NovaGlassesApp.swift */; };
@@ -86,6 +87,7 @@
 		799416FC1F197A76E8242701 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		7B920D98B34009C22C690FFF /* ConversationController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationController.swift; sourceTree = "<group>"; };
 		7E29DF668F5FA5577AD34901 /* SidekickController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidekickController.swift; sourceTree = "<group>"; };
+		816F6B4E3E2F681A80D3D08F /* WakeStraightToListeningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeStraightToListeningTests.swift; sourceTree = "<group>"; };
 		85D8081920A2CB606DE8CE6E /* NovaGlassesApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NovaGlassesApp.swift; sourceTree = "<group>"; };
 		8A72807FC26237D5484235A8 /* MP3StreamDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP3StreamDecoder.swift; sourceTree = "<group>"; };
 		955BDB2A7AD4940F4D3C15D6 /* VisionIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionIntent.swift; sourceTree = "<group>"; };
@@ -204,6 +206,7 @@
 				C0BA6B13175CCC394A4D6714 /* TurnDetectorTests.swift */,
 				D35EB73C828C29173923E17A /* VisionTests.swift */,
 				728955D6DE3B93BFB700F76E /* WakePhraseTests.swift */,
+				816F6B4E3E2F681A80D3D08F /* WakeStraightToListeningTests.swift */,
 				37F621678F363B3F86D50252 /* Fixtures */,
 			);
 			path = NovaGlassesTests;
@@ -391,6 +394,7 @@
 				E968E9031183E7DA0F776AC1 /* TurnDetectorTests.swift in Sources */,
 				87267BF0561A0B186AF58C14 /* VisionTests.swift in Sources */,
 				04BC4F22D7048D0D7B02B273 /* WakePhraseTests.swift in Sources */,
+				F9860259D47769A32ECD670A /* WakeStraightToListeningTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
