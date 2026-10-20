@@ -132,6 +132,8 @@ final class ConversationControllerTests: XCTestCase {
         let ids: ConversationIdStore
         let controller: ConversationController
         var ms: Double = 0
+        /// Utterances forwarded to `onAmbientUtterance` (Sidekick, in the app).
+        var ambientUtterances: [Data] = []
 
         init(camera: GlassesCamera? = nil, vision: VisionUploading? = nil) {
             let defaults = UserDefaults(suiteName: "test.\(UUID().uuidString)")!
@@ -141,6 +143,7 @@ final class ConversationControllerTests: XCTestCase {
                 scheduler: scheduler, conversationIds: ids,
                 camera: camera, vision: vision
             )
+            controller.onAmbientUtterance = { [weak self] pcm in self?.ambientUtterances.append(pcm) }
         }
 
         /// 20 ms frames of a 440 Hz tone at `amplitude` (0…1).
@@ -348,6 +351,43 @@ final class ConversationControllerTests: XCTestCase {
         rig.silence(ConversationController.listenTimeoutSeconds * 1000 + 100)
         XCTAssertEqual(rig.controller.phase, .idle)
         XCTAssertEqual(rig.earcons.played.last, .done)
+    }
+
+    func testSidekickFollowUpOpensListeningThenSettlesQuietlyToIdle() {
+        let rig = Rig.idle()
+        rig.earcons.played.removeAll()
+        rig.controller.expectSidekickFollowUp()
+        XCTAssertEqual(rig.controller.phase, .listening)
+
+        // Nobody answers: standing down is quiet — Sidekick's remark was
+        // already the cue, a timeout earcon on top would be noise.
+        rig.silence(ConversationController.sidekickFollowUpSeconds * 1000 + 100)
+        XCTAssertEqual(rig.controller.phase, .idle)
+        XCTAssertTrue(rig.earcons.played.isEmpty)
+        XCTAssertTrue(rig.ambientUtterances.isEmpty)
+        XCTAssertTrue(rig.socket.log.isEmpty, "never reaches the main conversation socket")
+    }
+
+    func testSpeakingInTheSidekickFollowUpWindowIsForwardedAsAmbient() {
+        let rig = Rig.idle()
+        rig.controller.expectSidekickFollowUp()
+        XCTAssertEqual(rig.controller.phase, .listening)
+
+        // "Yes" — well inside the window, no wake phrase.
+        rig.speak(300)
+        XCTAssertEqual(rig.controller.phase, .listening, "still listening while the answer is spoken")
+        rig.silence(1500) // a real pause ends the utterance
+        rig.silence(1000) // past wakeGraceSeconds: the grace timer flushes it
+
+        XCTAssertEqual(rig.ambientUtterances.count, 1, "the answer reaches Sidekick")
+        XCTAssertTrue(rig.socket.log.isEmpty, "never promoted as a direct-conversation turn")
+        XCTAssertEqual(rig.controller.phase, .idle, "back to idle once the answer is handled")
+    }
+
+    func testSidekickFollowUpIsANoOpOutsideIdle() {
+        let rig = Rig.thinking()
+        rig.controller.expectSidekickFollowUp()
+        XCTAssertEqual(rig.controller.phase, .thinking, "Sidekick never speaks over a direct conversation")
     }
 
     func testStopPhraseEndsTheConversation() {

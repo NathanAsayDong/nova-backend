@@ -76,7 +76,8 @@ final class AppModel {
             vision: vision,
             scheduler: MainScheduler(),
             conversationIds: conversationIds,
-            mainIsIdle: { controller.phase == .idle }
+            mainIsIdle: { controller.phase == .idle },
+            expectFollowUp: { controller.expectSidekickFollowUp() }
         )
         // Late-bound so a server or token change applies on the next connect
         // without rebuilding the socket.

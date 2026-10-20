@@ -40,6 +40,9 @@ from uuid import UUID
 LULL_SECONDS = 1.5
 # Balanced chattiness: at most one unprompted remark this often.
 COOLDOWN_SECONDS = 30.0
+# A remark that asked a question suspends the cooldown for this long, so the
+# gate can act on the answer right away instead of waiting out COOLDOWN_SECONDS.
+EXPECTS_REPLY_OVERRIDE_SECONDS = 5.0
 # Server-side backstop for the phone's own auto-off.
 SESSION_MAX_SECONDS = 60 * 60
 
@@ -200,6 +203,9 @@ class SidekickSession:
         self.conversation_uuid = conversation_uuid
         self.started_at = time.monotonic() if now is None else now
         self.last_remark_at: float | None = None
+        # Set by `note_remark` when the last remark asked a question; while
+        # now is before this, `cooling_down` ignores COOLDOWN_SECONDS.
+        self._expects_reply_until: float | None = None
         self._lines: deque[tuple[float, str]] = deque()
         self._remarks: deque[str] = deque(maxlen=REMARKS_KEPT)
 
@@ -235,11 +241,20 @@ class SidekickSession:
         return now - self.last_remark_at
 
     def cooling_down(self, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        if self._expects_reply_until is not None and now < self._expects_reply_until:
+            return False
         since = self.seconds_since_remark(now)
         return since is not None and since < COOLDOWN_SECONDS
 
-    def note_remark(self, text: str, now: float | None = None) -> None:
-        self.last_remark_at = time.monotonic() if now is None else now
+    def note_remark(
+        self, text: str, now: float | None = None, *, expects_reply: bool = False
+    ) -> None:
+        now = time.monotonic() if now is None else now
+        self.last_remark_at = now
+        self._expects_reply_until = (
+            now + EXPECTS_REPLY_OVERRIDE_SECONDS if expects_reply else None
+        )
         if text.strip():
             self._remarks.append(text.strip())
 
