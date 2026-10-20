@@ -135,7 +135,7 @@ class PromptSourceEnum(StrEnum):
         "are wondering aloud, suggest options when they are deciding, give a "
         "tip or next step on a task, add a relevant fact, correct a mistake, "
         "give a timely reminder, or offer strategy in a game. Keep it to "
-        "one or two spoken sentences and lead with the point. Never say that "
+        "one short spoken sentence, as brief as possible, and lead with the point. Never say that "
         "you are listening or that you overheard something, never summarise "
         "the conversation back, and never repeat advice you already gave. Now "
         "and then, when the mood is clearly light, one dry or sarcastic joke "
