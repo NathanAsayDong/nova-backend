@@ -343,6 +343,26 @@ final class ConversationControllerTests: XCTestCase {
         XCTAssertEqual(rig.socket.starts.first?.conversationId, "conv-1")
     }
 
+    func testASpokenStepThatEndsMidTurnShowsWorkingNotSpeaking() {
+        let rig = Rig.speaking()
+        rig.socket.emit(.audioStreamEnd(streamId: "s1"))
+        rig.player.finishPlaying()
+        // A tool is running: no audio, turn not done.
+        XCTAssertEqual(rig.controller.phase, .speaking, "barge-in stays available")
+        XCTAssertTrue(rig.controller.betweenLines)
+        XCTAssertEqual(rig.controller.statusMessage, "Working…")
+
+        rig.socket.emit(.audioStreamStart(streamId: "s2", mimeType: "audio/mpeg", role: .final))
+        XCTAssertFalse(rig.controller.betweenLines)
+        XCTAssertEqual(rig.controller.statusMessage, "Speaking…")
+
+        rig.socket.emit(.audioStreamEnd(streamId: "s2"))
+        rig.socket.emit(.done(message: "Done", conversationId: "conv-1", assistantText: "It's noon."))
+        rig.player.finishPlaying()
+        XCTAssertEqual(rig.controller.phase, .listening)
+        XCTAssertFalse(rig.controller.betweenLines)
+    }
+
     func testFollowUpTimesOutBackToIdle() {
         let rig = Rig.speaking()
         rig.socket.emit(.audioStreamEnd(streamId: "s1"))

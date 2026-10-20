@@ -44,9 +44,15 @@ class OpenAITTS:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is not set.")
 
+        import httpx
         from openai import OpenAI
 
-        self.client = OpenAI(api_key=api_key)
+        # Same budget as ElevenLabs: lines are spoken one after another, so a
+        # request left on the client's 10-minute default would hold up every
+        # line behind it. A timeout is contained like any TTS failure.
+        self.client = OpenAI(
+            api_key=api_key, timeout=httpx.Timeout(30, connect=5), max_retries=1
+        )
         model = (os.getenv("TTS_MODEL") or "").strip()
         self.model = (
             model

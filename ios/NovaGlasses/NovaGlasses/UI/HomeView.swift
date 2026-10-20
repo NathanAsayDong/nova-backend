@@ -14,7 +14,7 @@ struct HomeView: View {
                             .fill(phaseColor)
                             .frame(width: 14, height: 14)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(controller.phase.rawValue.capitalized)
+                            Text(controller.betweenLines ? "Working" : controller.phase.rawValue.capitalized)
                                 .font(.headline)
                             Text(controller.statusMessage)
                                 .font(.subheadline)
@@ -121,7 +121,8 @@ struct HomeView: View {
     }
 
     private var phaseColor: Color {
-        switch controller.phase {
+        if controller.betweenLines { return .orange }
+        return switch controller.phase {
         case .off: .gray
         case .idle: .blue
         case .listening: .green

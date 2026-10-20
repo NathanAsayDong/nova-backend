@@ -69,6 +69,11 @@ final class ConversationController {
     private(set) var phase: Phase = .off
     private(set) var connection: SocketConnectionState = .disconnected
     private(set) var statusMessage = "Off."
+    /// Mid-turn and nothing is playing: a spoken step finished and Nova is
+    /// running a tool before the next one. The phase stays `.speaking` so
+    /// "Hey Nova" can still barge in, but the screen must not claim Nova is
+    /// talking through a long silence.
+    private(set) var betweenLines = false
     private(set) var partialTranscript = ""
     private(set) var lastTranscript = ""
     private(set) var lastReply = ""
@@ -705,6 +710,7 @@ final class ConversationController {
 
     private func setPhase(_ phase: Phase, _ message: String) {
         self.phase = phase
+        betweenLines = false
         statusMessage = message
         refreshThinkingPulse()
     }
@@ -779,6 +785,10 @@ final class ConversationController {
     private func playbackDrained() {
         // A spoken step ended but the turn goes on (a tool is running).
         refreshThinkingPulse()
+        if phase == .speaking, !turnFinished {
+            betweenLines = true
+            statusMessage = "Working…"
+        }
         if turnLost {
             goIdle(cue: .error, message: "Connection lost.")
             return
@@ -887,6 +897,9 @@ final class ConversationController {
             if phase == .thinking {
                 thinkingTimer?.cancel()
                 setPhase(.speaking, "Speaking…")
+            } else if betweenLines {
+                betweenLines = false
+                statusMessage = "Speaking…"
             }
 
         case .audioStreamChunk(let streamId, let chunkBase64, _):
