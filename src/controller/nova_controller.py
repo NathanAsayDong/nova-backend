@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 import time
+import traceback
 import uuid
 from pathlib import Path
 from uuid import UUID
@@ -1268,6 +1269,8 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     except Exception:
                         pass
                 except Exception as exc:
+                    print(f"[turn] voice pipeline failed: {exc!r}")
+                    traceback.print_exc()
                     try:
                         await websocket.send_json(
                             {
@@ -1299,3 +1302,11 @@ async def transcribe_socket(websocket: WebSocket) -> None:
 
     except WebSocketDisconnect:
         pass
+    except RuntimeError as exc:
+        # A send failed mid-turn (client or tunnel dropped), which marks the
+        # socket closed on our side while the client's next frame is still
+        # queued; answering it raises this. The connection is over either
+        # way, so end it quietly instead of as an ASGI crash.
+        if "close message has been sent" not in str(exc):
+            raise
+        print("[ws] client socket closed mid-turn; ending connection")
