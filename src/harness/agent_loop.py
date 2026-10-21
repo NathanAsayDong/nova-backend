@@ -40,6 +40,7 @@ from src.service.mcp_server_service import McpServerService
 from src.service.memory_chunk_service import MemoryChunkService
 from src.service.tool_service import ToolExecutionError, ToolService
 from src.service.update_service import UpdateService
+from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 
 _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
 _MIN_SENTENCE_CHARS = 30
@@ -290,19 +291,39 @@ class AgentLoop:
             return None
 
     @staticmethod
-    def _collect_memory(memory_future: "Future | None") -> str:
+    def _collect_memory(
+        memory_future: "Future | None", timer: "TurnTimer | None" = None
+    ) -> str:
         """Retrieved memory, or "" if there was none or it ran out of time."""
         if memory_future is None:
             return ""
+        started_at = time.monotonic()
         try:
-            return memory_future.result(
-                timeout=_MEMORY_RETRIEVAL_TIMEOUT_SECONDS
-            ) or ""
+            result = memory_future.result(timeout=_MEMORY_RETRIEVAL_TIMEOUT_SECONDS) or ""
+            _mark_timing(
+                timer,
+                "memory_collected",
+                blocked_ms=round((time.monotonic() - started_at) * 1000),
+                result="block" if result else "empty",
+            )
+            return result
         except FutureTimeout:
             print("Memory retrieval exceeded its budget; answering without it.")
+            _mark_timing(
+                timer,
+                "memory_collected",
+                blocked_ms=round((time.monotonic() - started_at) * 1000),
+                result="timeout",
+            )
             return ""
         except Exception as exc:
             print(f"Memory retrieval failed (continuing without it): {exc}")
+            _mark_timing(
+                timer,
+                "memory_collected",
+                blocked_ms=round((time.monotonic() - started_at) * 1000),
+                result="error",
+            )
             return ""
 
     @staticmethod
@@ -764,6 +785,7 @@ class AgentLoop:
         conversation: Conversation | None = None,
         images: list[dict[str, Any]] | None = None,
         persist_prompt_as: str | None = None,
+        timer: "TurnTimer | None" = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Run a single conversation turn as a bounded ReAct loop, as an event stream.
@@ -821,10 +843,15 @@ class AgentLoop:
         user message left in history. Sidekick uses it so the overheard
         excerpt it prompts with is not kept, only the line that set it off.
 
+        `timer` is an optional `TurnTimer` (see src/harness/turn_timer.py) for
+        `[timing]` latency logs on a voice turn — None everywhere else (chat
+        SSE, sidekick, calls, sms, background agents), which is a no-op.
+
         Turns are persisted to the conversation/message tables. Raises
         ConversationClosedError before yielding anything if the conversation
         has been closed — closed conversations can never be continued.
         """
+        _mark_timing(timer, "loop_entered")
         pending_writes: list[Future] = []
         turn_state: dict[str, Any] = {}
         try:
@@ -837,6 +864,7 @@ class AgentLoop:
                 images,
                 persist_prompt_as,
                 turn_state,
+                timer,
             )
         finally:
             user_message = turn_state.get("user_message")
@@ -860,6 +888,7 @@ class AgentLoop:
         images: list[dict[str, Any]] | None = None,
         persist_prompt_as: str | None = None,
         turn_state: dict[str, Any] | None = None,
+        timer: "TurnTimer | None" = None,
     ) -> Iterator[dict[str, Any]]:
         if self.tool_service is None:
             self.tool_service = ToolService()
@@ -885,6 +914,7 @@ class AgentLoop:
             raise ConversationClosedError(
                 f"Conversation {conversation_uuid} is closed and cannot be continued."
             )
+        _mark_timing(timer, "conversation_ready")
 
         # Kick off memory retrieval now and collect it just before the request
         # goes out. The history load below does not depend on it, so the
@@ -893,7 +923,8 @@ class AgentLoop:
 
         # Rehydrate LLM history from persisted messages when this process
         # hasn't seen the conversation yet (e.g. after a restart).
-        if conversation_uuid not in self.conversations:
+        rehydrated = conversation_uuid not in self.conversations
+        if rehydrated:
             self.conversations[conversation_uuid] = self.conversation_service.load_history(
                 conversation
             )
@@ -901,6 +932,7 @@ class AgentLoop:
         # Where this turn starts in history, so a sidekick pass can take the
         # whole turn back out.
         history_start = len(history)
+        _mark_timing(timer, "history_loaded", rehydrated=rehydrated, messages=len(history))
 
         # A sidekick turn may end in a pass, and a pass leaves no trace: the
         # overheard excerpt is not kept unless Nova actually said something
@@ -935,10 +967,17 @@ class AgentLoop:
 
         started_at = time.monotonic()
 
+        tools_wait_started = time.monotonic()
         try:
             tools = tools_future.result()
         except Exception:
             tools = []
+        _mark_timing(
+            timer,
+            "tools_collected",
+            blocked_ms=round((time.monotonic() - tools_wait_started) * 1000),
+            count=len(tools),
+        )
 
         tools_by_name: dict[str, Any] = {}
         claude_tools: list[dict[str, Any]] = []
@@ -969,7 +1008,14 @@ class AgentLoop:
         # Remote MCP servers, resolved once per turn so a registry change
         # mid-turn can't flip the tool list between iterations. The lookup
         # never raises (see _load_mcp_servers).
+        mcp_wait_started = time.monotonic()
         mcp_servers = mcp_future.result() or None
+        _mark_timing(
+            timer,
+            "mcp_collected",
+            blocked_ms=round((time.monotonic() - mcp_wait_started) * 1000),
+            count=len(mcp_servers or []),
+        )
 
         # Everything the retrieval was overlapping with is done; collect it and
         # open the turn.
@@ -981,7 +1027,7 @@ class AgentLoop:
         # same reason — the next turn's cached prefix has to be byte-identical
         # to what this turn sent. Only the user's own words are persisted; the
         # memory is derived, and re-derives on rehydration.
-        memory_block = self._collect_memory(memory_future)
+        memory_block = self._collect_memory(memory_future, timer)
         user_text = self._augment(prompt, memory_block)
         if images:
             # Images before the text, as Claude reads them best.
@@ -995,6 +1041,7 @@ class AgentLoop:
             history.append({"role": "user", "content": user_text})
         if turn_state is not None:
             turn_state["user_message"] = history[-1]
+        _mark_timing(timer, "user_message_appended")
         user_row = self._photo_note(
             prompt if persist_prompt_as is None else persist_prompt_as, images
         )
@@ -1027,6 +1074,14 @@ class AgentLoop:
         # regardless, and this is where a chat turn drops it.
         speak = prompt_source.wants_spoken_summary()
         early_line: str | None = None
+        first_speech_marked = False
+
+        def mark_first_speech(role: str, text: str) -> None:
+            """Mark the turn's first spoken line, once, across every round."""
+            nonlocal first_speech_marked
+            if not first_speech_marked:
+                first_speech_marked = True
+                _mark_timing(timer, "first_speech_line", role=role, chars=len(text))
 
         def deliver(events: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
             """
@@ -1061,9 +1116,10 @@ class AgentLoop:
                 ):
                     continue
                 early_line = say
+                mark_first_speech(event["role"], say)
                 yield {"type": "speech_text", "text": say, "role": event["role"]}
 
-        for _ in range(_AGENT_MAX_ITERATIONS):
+        for round_no in range(1, _AGENT_MAX_ITERATIONS + 1):
             if time.monotonic() - started_at > _AGENT_LOOP_TIMEOUT_SECONDS:
                 fallback = "I hit a time limit while working on that and had to stop."
                 history.append({"role": "assistant", "content": fallback})
@@ -1080,12 +1136,30 @@ class AgentLoop:
             hold = _PassHold(sidekick)
 
             try:
+                _mark_timing(
+                    timer,
+                    "model_request_sent",
+                    round=round_no,
+                    model=self.claude_service.get_current_model(),
+                    effort=self.claude_service.effort,
+                    tools=len(tools_arg or []),
+                    history_msgs=len(history),
+                )
+                # `timer`/`round_no` are only passed when there is a timer:
+                # several tests stub `stream_response` with a fixed signature
+                # that has no room for extra kwargs, and timer is None on
+                # every one of them, so there is nothing for those kwargs to
+                # log anyway.
+                stream_kwargs: dict[str, Any] = {}
+                if timer is not None:
+                    stream_kwargs = {"timer": timer, "round_no": round_no}
                 turn = self.claude_service.stream_response(
                     "",
                     context=history,
                     tools=tools_arg,
                     system=system_blocks,
                     mcp_servers=mcp_servers,
+                    **stream_kwargs,
                 )
                 # This is the latency win, on both tracks. The `<speak>` block
                 # is written first, so its closing tag lands while the markdown
@@ -1193,6 +1267,7 @@ class AgentLoop:
                     # Speech first, so the transport can start synthesizing
                     # before the prose is sent.
                     if spoken_text and early_line is None:
+                        mark_first_speech("final", spoken_text)
                         yield {
                             "type": "speech_text",
                             "text": spoken_text,
@@ -1264,6 +1339,7 @@ class AgentLoop:
                 if say_it:
                     progress_spoken += 1
                     last_progress = progress_line
+                    mark_first_speech("status", progress_line)
                     yield {
                         "type": "speech_text",
                         "text": progress_line,
@@ -1290,9 +1366,16 @@ class AgentLoop:
 
                 arguments = block.input if isinstance(block.input, dict) else {}
                 yield {"type": "tool_call", "tool": block.name, "input": arguments}
+                tool_started_at = time.monotonic()
                 try:
                     print(f"Calling tool: {tool.name} with arguments: {arguments}")
                     result = self.tool_service.call_tool(tool, arguments, context=tool_context)
+                    _mark_timing(
+                        timer,
+                        "tool_done",
+                        name=tool.name,
+                        dur_ms=round((time.monotonic() - tool_started_at) * 1000),
+                    )
                     content = self._tool_result_content(result)
                     tool_results.append(
                         {
@@ -1315,6 +1398,13 @@ class AgentLoop:
                         ),
                     )
                 except ToolExecutionError as exc:
+                    _mark_timing(
+                        timer,
+                        "tool_done",
+                        name=tool.name,
+                        dur_ms=round((time.monotonic() - tool_started_at) * 1000),
+                        error=True,
+                    )
                     persist(
                         MessageRole.TOOL,
                         json.dumps(

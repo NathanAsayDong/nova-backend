@@ -485,7 +485,15 @@ class SidekickSocketTests(unittest.TestCase):
             self.decoded.append(pcm)
             return self.transcripts.get(pcm, "")
 
-        async def fake_tts(websocket, text, role="final", send_lock=None, previous_text=None, iteration=None):
+        async def fake_tts(
+            websocket,
+            text,
+            role="final",
+            send_lock=None,
+            previous_text=None,
+            iteration=None,
+            timer=None,
+        ):
             async with send_lock:
                 await websocket.send_json({"type": "assistant_audio_stream_start", "streamId": "s", "role": role})
                 await websocket.send_json({"type": "assistant_audio_stream_end", "streamId": "s"})

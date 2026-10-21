@@ -33,7 +33,13 @@ class FakeAgentLoop:
         return uuid.uuid4()
 
     def conversation_loop_events(
-        self, prompt, conversation_uuid, prompt_source=None, conversation=None, images=None
+        self,
+        prompt,
+        conversation_uuid,
+        prompt_source=None,
+        conversation=None,
+        images=None,
+        timer=None,
     ):
         self.prompts.append(prompt)
         yield {"type": "text", "text": "Understood."}
@@ -91,7 +97,9 @@ class TranscribeSocketTests(unittest.TestCase):
         self.addCleanup(lambda: [p.stop() for p in self.patches])
 
     @staticmethod
-    async def _no_tts(websocket, text, role="final", send_lock=None, previous_text=None):
+    async def _no_tts(
+        websocket, text, role="final", send_lock=None, previous_text=None, timer=None
+    ):
         return True
 
     # ---------- helpers ----------

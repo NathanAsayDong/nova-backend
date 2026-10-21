@@ -1,8 +1,11 @@
 from anthropic import Anthropic
 import os
+import time
 from collections.abc import Callable, Iterator
 from typing import Any, Optional
 from anthropic.types.message import Message
+
+from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 
 # Server-side tool executed by Anthropic, not by ToolService. Results come back
 # as server_tool_use / web_search_tool_result blocks in the same response.
@@ -82,11 +85,18 @@ class TurnStream:
         self,
         open_stream: Optional[Callable[[], Any]] = None,
         message: Optional[Message] = None,
+        timer: "TurnTimer | None" = None,
+        round_no: int | None = None,
     ) -> None:
         self._open_stream = open_stream
         self._message = message
         self._drained = message is not None
         self._started = False
+        # Timing instrumentation (logging only — see src/harness/turn_timer.py).
+        # None on every caller that doesn't pass one, which makes every mark
+        # below a no-op.
+        self._timer = timer
+        self._round_no = round_no
 
     def __iter__(self) -> Iterator[str | ToolUseStarted]:
         if self._open_stream is None:
@@ -106,6 +116,12 @@ class TurnStream:
             raise RuntimeError("A TurnStream can only be read once.")
         self._started = True
 
+        timer = self._timer
+        round_no = self._round_no
+        first_event_marked = False
+        first_text_marked = False
+        thinking_started_at: float | None = None
+
         # The SDK stream is iterated event by event rather than through
         # `text_stream`, because the latter hides the one non-text event this
         # needs: the start of a tool_use block. Text deltas are surfaced as
@@ -114,15 +130,42 @@ class TurnStream:
         with self._open_stream() as stream:
             for event in stream:
                 event_type = getattr(event, "type", None)
+                if timer is not None and not first_event_marked:
+                    first_event_marked = True
+                    _mark_timing(timer, "first_stream_event", round=round_no, event=event_type)
                 if event_type == "text":
                     delta = getattr(event, "text", "")
                     if delta:
+                        if timer is not None and not first_text_marked:
+                            first_text_marked = True
+                            _mark_timing(timer, "first_text_delta", round=round_no)
                         yield delta
                 elif event_type == "content_block_start":
                     block = getattr(event, "content_block", None)
-                    if getattr(block, "type", None) == "tool_use":
+                    block_type = getattr(block, "type", None)
+                    if block_type == "tool_use":
+                        _mark_timing(timer, "tool_use_started", round=round_no)
                         yield TOOL_USE_STARTED
+                    elif block_type == "thinking":
+                        thinking_started_at = time.monotonic()
+                        _mark_timing(timer, "thinking_started", round=round_no)
+                elif event_type == "content_block_stop" and thinking_started_at is not None:
+                    # Best-effort: a round has at most one thinking block, and
+                    # it closes before any text block opens, so the first
+                    # content_block_stop seen after thinking_started is it.
+                    dur_ms = round((time.monotonic() - thinking_started_at) * 1000)
+                    _mark_timing(timer, "thinking_stopped", round=round_no, dur_ms=dur_ms)
+                    thinking_started_at = None
             self._message = stream.get_final_message()
+            if timer is not None:
+                usage = getattr(self._message, "usage", None)
+                _mark_timing(
+                    timer,
+                    "round_complete",
+                    round=round_no,
+                    stop_reason=getattr(self._message, "stop_reason", None),
+                    output_tokens=getattr(usage, "output_tokens", None) if usage else None,
+                )
         self._drained = True
 
     @property
@@ -322,6 +365,8 @@ class ClaudeService:
         tools: Optional[list] = None,
         system: Optional[str | list] = None,
         mcp_servers: Optional[list] = None,
+        timer: "TurnTimer | None" = None,
+        round_no: int | None = None,
     ) -> TurnStream:
         """
         Open a streaming turn against the Claude API.
@@ -350,9 +395,13 @@ class ClaudeService:
             return TurnStream(
                 lambda: self.client.beta.messages.stream(
                     betas=[MCP_CONNECTOR_BETA], **params
-                )
+                ),
+                timer=timer,
+                round_no=round_no,
             )
-        return TurnStream(lambda: self.client.messages.stream(**params))
+        return TurnStream(
+            lambda: self.client.messages.stream(**params), timer=timer, round_no=round_no
+        )
 
     def get_response(
         self,

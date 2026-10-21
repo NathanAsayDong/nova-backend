@@ -2,6 +2,8 @@ import os
 import time
 from collections.abc import Iterator
 
+from src.harness.turn_timer import TurnTimer, mark as _mark_timing
+
 DEFAULT_OPENAI_TTS_MODEL = "gpt-4o-mini-tts"
 DEFAULT_OPENAI_TTS_VOICE = "cedar"
 DEFAULT_OPENAI_TTS_FORMAT = "mp3"
@@ -72,8 +74,15 @@ class OpenAITTS:
         self.response_format = DEFAULT_OPENAI_TTS_FORMAT
 
     def stream_text_to_speech(
-        self, text: str, chunk_size: int = 4096, previous_text: str | None = None
+        self,
+        text: str,
+        chunk_size: int = 4096,
+        previous_text: str | None = None,
+        timer: "TurnTimer | None" = None,
     ) -> Iterator[bytes]:
+        _mark_timing(timer, "tts_request_sent", provider="openai")
+        request_started_at = time.monotonic()
+        first_byte_marked = False
         with self.client.audio.speech.with_streaming_response.create(
             model=self.model,
             voice=self.voice,
@@ -84,6 +93,14 @@ class OpenAITTS:
         ) as response:
             for audio_chunk in response.iter_bytes(chunk_size=chunk_size):
                 if audio_chunk:
+                    if not first_byte_marked:
+                        first_byte_marked = True
+                        _mark_timing(
+                            timer,
+                            "first_tts_byte",
+                            provider="openai",
+                            wait_ms=round((time.monotonic() - request_started_at) * 1000),
+                        )
                     yield audio_chunk
 
     def output_mime_type(self) -> str:
@@ -128,14 +145,26 @@ class TTSService:
         print(f"TTS provider: {self.provider}" + (" (OpenAI fallback)" if self.fallback else ""))
 
     def stream_text_to_speech(
-        self, text: str, chunk_size: int = 4096, previous_text: str | None = None
+        self,
+        text: str,
+        chunk_size: int = 4096,
+        previous_text: str | None = None,
+        timer: "TurnTimer | None" = None,
     ) -> Iterator[bytes]:
         if self.fallback is not None and time.monotonic() < self._primary_down_until:
-            yield from self.fallback.stream_text_to_speech(text, chunk_size=chunk_size)
+            _mark_timing(
+                timer, "tts_provider", provider="openai", cooldown=True, chars=len(text)
+            )
+            yield from self.fallback.stream_text_to_speech(
+                text, chunk_size=chunk_size, timer=timer
+            )
             return
 
+        _mark_timing(
+            timer, "tts_provider", provider=self.provider, cooldown=False, chars=len(text)
+        )
         chunks = self.primary.stream_text_to_speech(
-            text, chunk_size=chunk_size, previous_text=previous_text
+            text, chunk_size=chunk_size, previous_text=previous_text, timer=timer
         )
         try:
             first = next(chunks, None)
@@ -147,7 +176,15 @@ class TTSService:
                 f"{self.provider} TTS failed; using OpenAI for the next "
                 f"{PRIMARY_COOLDOWN_SECONDS // 60} minutes: {exc}"
             )
-            yield from self.fallback.stream_text_to_speech(text, chunk_size=chunk_size)
+            _mark_timing(
+                timer,
+                "tts_fallback_switch",
+                from_provider=self.provider,
+                reason=str(exc)[:80],
+            )
+            yield from self.fallback.stream_text_to_speech(
+                text, chunk_size=chunk_size, timer=timer
+            )
             return
 
         if first is not None:

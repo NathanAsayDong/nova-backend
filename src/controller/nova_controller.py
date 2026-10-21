@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from prompting.prompt_source_prompt import PromptSourceEnum
 from src.harness.agent_loop import AgentLoop
 from src.harness.streaming import iter_in_thread
+from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 from src.controller.audio_ws import (
     asr_service,
     audio_file_bytes,
@@ -465,6 +466,7 @@ async def stream_tts_audio(
     iteration: int | None = None,
     send_lock: asyncio.Lock | None = None,
     previous_text: str | None = None,
+    timer: "TurnTimer | None" = None,
 ) -> bool:
     """
     Speak `text` to the client as a chunked audio stream.
@@ -501,7 +503,9 @@ async def stream_tts_audio(
 
     sequence = 0
     tts_error: str | None = None
-    audio_chunks = tts_service.stream_text_to_speech(text, previous_text=previous_text)
+    audio_chunks = tts_service.stream_text_to_speech(
+        text, previous_text=previous_text, timer=timer
+    )
     while True:
         try:
             audio_chunk = await asyncio.to_thread(next, audio_chunks, _TTS_EXHAUSTED)
@@ -523,9 +527,12 @@ async def stream_tts_audio(
             },
             send_lock,
         )
+        if sequence == 1:
+            _mark_timing(timer, "first_audio_sent", role=role, chars=len(text))
 
     if tts_error is not None:
         print(f"TTS stream {stream_id} failed after {sequence} chunks: {tts_error}")
+        _mark_timing(timer, "tts_error", stream_id=stream_id, chunks_sent=sequence)
         preview = tts_error if len(tts_error) <= 300 else tts_error[:300] + "…"
         await _send_locked(
             websocket,
@@ -948,6 +955,15 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     continue
 
                 file_path: Path | None = None
+                # Full timing instrumentation (logging only) for this turn's
+                # voice pipeline — see src/harness/turn_timer.py. `timer` is
+                # threaded explicitly through the agent loop and TTS calls
+                # below rather than held in a global, because both run on
+                # worker threads via iter_in_thread/asyncio.to_thread.
+                timer = TurnTimer(uuid.uuid4().hex[:8], start=stop_received_at)
+                _mark_timing(
+                    timer, "stop_received", speculative_ready=speculative_transcript is not None
+                )
                 # From here until the turn is answered, Sidekick holds its
                 # tongue: the user is talking to Nova on purpose.
                 SidekickService.begin_direct_turn()
@@ -957,6 +973,9 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         # over byte-identical audio minus the trailing silence.
                         transcript = speculative_transcript
                         print(f"[turn] transcript ready at stop (speculative): {transcript!r}")
+                        _mark_timing(
+                            timer, "transcript_ready", path="speculative", chars=len(transcript)
+                        )
                     else:
                         suffix = suffix_for_mime(mime_type)
                         with tempfile.NamedTemporaryFile(
@@ -969,12 +988,26 @@ async def transcribe_socket(websocket: WebSocket) -> None:
 
                         # Off the event loop, and serialized behind any
                         # in-flight partial pass so two whisper runs never
-                        # share the GPU.
+                        # share the GPU. Timed as one span — this is called
+                        # through `transcribe_serialized` (patched wholesale
+                        # by several tests with a fixed signature), so the
+                        # lock-wait-vs-decode split isn't worth threading a
+                        # new argument through it.
+                        transcribe_started_at = time.monotonic()
                         transcript = await asyncio.to_thread(
                             transcribe_serialized, file_path, language
                         )
                         transcript = (transcript or "").strip()
                         print(f"[turn] transcribed at stop (full buffer): {transcript!r}")
+                        _mark_timing(
+                            timer,
+                            "transcript_ready",
+                            path="full_buffer",
+                            chars=len(transcript),
+                            transcribe_ms=round(
+                                (time.monotonic() - transcribe_started_at) * 1000
+                            ),
+                        )
 
                     if purpose == "wake_check":
                         if has_wake_phrase(transcript):
@@ -1107,6 +1140,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         prompt_source=voice_prompt_source(capture_client),
                         conversation=existing,
                         images=images,
+                        timer=timer,
                     )
                     display_parts: list[str] = []
                     final_text: str | None = None
@@ -1120,7 +1154,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     # in order while the turn carries on; the client already
                     # queues the audio streams the same way.
                     send_lock = asyncio.Lock()
-                    speech_queue: asyncio.Queue[tuple[str, str] | None] = (
+                    speech_queue: asyncio.Queue[tuple[str, str, float] | None] = (
                         asyncio.Queue()
                     )
 
@@ -1138,18 +1172,29 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                                 return
                             if not tts_available:
                                 continue
-                            line, line_role = item
+                            line, line_role, queued_at = item
+                            _mark_timing(
+                                timer,
+                                "speech_queue_wait",
+                                role=line_role,
+                                wait_ms=round((time.monotonic() - queued_at) * 1000),
+                                chars=len(line),
+                            )
                             if images and previous_line is None:
                                 print(
                                     "[vision] stop->first audio ms="
                                     f"{(time.monotonic() - stop_received_at) * 1000:.0f}"
                                 )
+                            _mark_timing(
+                                timer, "stream_tts_start", role=line_role, chars=len(line)
+                            )
                             tts_available = await stream_tts_audio(
                                 websocket,
                                 line,
                                 role=line_role,
                                 send_lock=send_lock,
                                 previous_text=previous_line,
+                                timer=timer,
                             )
                             previous_line = line
 
@@ -1191,7 +1236,9 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                                         "conversationId": str(conversation_id),
                                     }
                                 )
-                                speech_queue.put_nowait((event["text"], line_role))
+                                speech_queue.put_nowait(
+                                    (event["text"], line_role, time.monotonic())
+                                )
                             elif event_type == "status_text":
                                 # Pre-tool acknowledgment. Shown here, spoken
                                 # by the speech_text event alongside it — and
@@ -1240,6 +1287,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             ),
                         }
                     )
+                    _mark_timing(timer, "done")
 
                     # Nova decided the user was finished (end_session tool).
                     # Sent after "done" so the goodbye is spoken first, and
@@ -1286,6 +1334,8 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     SidekickService.end_direct_turn()
                     if file_path and file_path.exists():
                         os.remove(file_path)
+                    if timer is not None:
+                        timer.summary()
 
                 recording_started = False
                 chunks.clear()

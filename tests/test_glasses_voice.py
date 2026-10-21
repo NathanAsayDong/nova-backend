@@ -105,7 +105,13 @@ class FakeAgentLoop:
         return uuid.uuid4()
 
     def conversation_loop_events(
-        self, prompt, conversation_uuid, prompt_source=None, conversation=None, images=None
+        self,
+        prompt,
+        conversation_uuid,
+        prompt_source=None,
+        conversation=None,
+        images=None,
+        timer=None,
     ):
         self.prompt_sources.append(prompt_source)
         self.images.append(images)
@@ -128,7 +134,9 @@ class GlassesSocketTests(unittest.TestCase):
                 self.decoded.append((file_path.suffix, wav.getframerate(), frames))
             return "What time is it?"
 
-        async def no_tts(websocket, text, role="final", send_lock=None, previous_text=None):
+        async def no_tts(
+            websocket, text, role="final", send_lock=None, previous_text=None, timer=None
+        ):
             return True
 
         self.patches = [

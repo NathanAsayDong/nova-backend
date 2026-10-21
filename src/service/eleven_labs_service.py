@@ -1,6 +1,9 @@
 from collections.abc import Iterator
 import os
+import time
 import requests
+
+from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 
 # Flash is ElevenLabs' low-latency model: ~150ms to first audio against ~1.3s
 # for multilingual_v2 (measured from the Mac, 2026-10-11). Nova speaks a reply
@@ -55,6 +58,7 @@ class ElevenLabsService:
         text: str,
         chunk_size: int = 4096,
         previous_text: str | None = None,
+        timer: "TurnTimer | None" = None,
     ) -> Iterator[bytes]:
         """
         Stream `text` as MP3 chunks.
@@ -79,6 +83,8 @@ class ElevenLabsService:
         if previous_text:
             data["previous_text"] = previous_text[-MAX_PREVIOUS_TEXT_CHARS:]
 
+        _mark_timing(timer, "tts_request_sent", provider="elevenlabs")
+        request_started_at = time.monotonic()
         response = self.session.post(
             url,
             headers={"Accept": "audio/mpeg"},
@@ -90,7 +96,17 @@ class ElevenLabsService:
         with response:
             if not response.ok:
                 raise RuntimeError(_describe_failure(response, self.voice_id))
-            yield from response.iter_content(chunk_size=chunk_size)
+            first_byte_marked = False
+            for chunk in response.iter_content(chunk_size=chunk_size):
+                if not first_byte_marked:
+                    first_byte_marked = True
+                    _mark_timing(
+                        timer,
+                        "first_tts_byte",
+                        provider="elevenlabs",
+                        wait_ms=round((time.monotonic() - request_started_at) * 1000),
+                    )
+                yield chunk
 
     def text_to_speech(self, text: str) -> tuple[bytes, str]:
         audio_bytes = b"".join(self.stream_text_to_speech(text))
