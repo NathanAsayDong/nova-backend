@@ -18,10 +18,66 @@ Disable with `NOVA_TIMING_LOGS=0`. On by default, so a bare redeploy gets
 the timeline with no config.
 """
 
+import logging
 import os
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 from typing import Any
+
+_FILE_LOGGER_NAME = "nova.turn_timer"
+
+
+def _default_log_path() -> str:
+    # src/harness/turn_timer.py -> repo root is two levels up from src/.
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(repo_root, "logs", "turn_timing.log")
+
+
+def _build_file_logger() -> "logging.Logger | None":
+    # Lazily configured, module-wide RotatingFileHandler so every TurnTimer
+    # instance shares one open file handle. Any failure here (bad path,
+    # read-only filesystem, etc.) must not block import or turn processing —
+    # timing just falls back to console-only output.
+    try:
+        logger = logging.getLogger(_FILE_LOGGER_NAME)
+        if logger.handlers:
+            return logger
+        log_path = os.getenv("NOVA_TIMING_LOG_FILE") or _default_log_path()
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        handler = RotatingFileHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        return logger
+    except Exception:
+        return None
+
+
+_FILE_LOGGER = _build_file_logger()
+
+
+def _emit(line: str) -> None:
+    """Console + log-file sink for a single `[timing]` line.
+
+    Mirrors the existing `[turn]`-style print() logging in
+    nova_controller.py for console output, and additionally writes to
+    logs/turn_timing.log (or NOVA_TIMING_LOG_FILE) via RotatingFileHandler.
+    Both destinations are best-effort: a failure writing to either one is
+    swallowed so it can never break a turn.
+    """
+    try:
+        print(line)
+    except Exception:
+        pass
+    if _FILE_LOGGER is not None:
+        try:
+            _FILE_LOGGER.info(line)
+        except Exception:
+            pass
 
 # Stage pairs for the SUMMARY line, in the order they're meant to read: the
 # path from "user stopped talking" to "first sound the user hears". A stage
@@ -85,10 +141,10 @@ class TurnTimer:
             )
             if fields:
                 line += " " + " ".join(f"{key}={value}" for key, value in fields.items())
-            print(line)
+            _emit(line)
         except Exception as exc:
             try:
-                print(f"[timing] turn={self.turn_id} mark {mark_name!r} failed (ignored): {exc}")
+                _emit(f"[timing] turn={self.turn_id} mark {mark_name!r} failed (ignored): {exc}")
             except Exception:
                 pass
 
@@ -120,10 +176,10 @@ class TurnTimer:
                 + " ".join(parts)
                 + f" stop->first_audio_sent={stop_to_audio} total={total}"
             )
-            print(line)
+            _emit(line)
         except Exception as exc:
             try:
-                print(f"[timing] turn={self.turn_id} summary failed (ignored): {exc}")
+                _emit(f"[timing] turn={self.turn_id} summary failed (ignored): {exc}")
             except Exception:
                 pass
 

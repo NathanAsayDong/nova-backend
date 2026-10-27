@@ -37,3 +37,6 @@ graph.json
 graphify-out/
 # Face detector / recognizer weights (scripts/fetch_face_models.py)
 /models/
+
+# Turn-timing instrumentation logs (src/harness/turn_timer.py)
+logs/
