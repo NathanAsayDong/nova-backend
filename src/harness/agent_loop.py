@@ -38,6 +38,7 @@ from src.service.conversation_service import (
 )
 from src.service.mcp_server_service import McpServerService
 from src.service.memory_chunk_service import MemoryChunkService
+from src.service.persona_service import PersonaService
 from src.service.tool_service import ToolExecutionError, ToolService
 from src.service.update_service import UpdateService
 from src.harness.turn_timer import TurnTimer, mark as _mark_timing
@@ -214,9 +215,12 @@ class AgentLoop:
         # Whether every turn gets relevant memory pre-loaded into its prompt.
         # The fetch_memory tool is unaffected either way.
         self.memory_retrieval_enabled = _env_flag("NOVA_MEMORY_INJECTION", True)
-        # Nova's identity — WHO the assistant is and HOW it behaves. Loaded
-        # once per process; fails fast at startup if the file is missing.
-        self.persona_prompt = PromptEnums.NOVA_PERSONA_PROMPT.load()
+        # Nova's identity — WHO the assistant is and HOW it behaves. Built
+        # lazily (see the persona_prompt property below): it now comes from
+        # the database by default, live-editable via the update_persona tool,
+        # and falls back to the shipped markdown file when the database has
+        # nothing usable.
+        self.persona_service: PersonaService | None = None
         # WHERE Nova is running — the tower or the Mac itself. It decides what
         # run_terminal_command and run_mac_command actually mean, so the model
         # has to be told rather than left to assume the tower. Fixed for the
@@ -226,6 +230,19 @@ class AgentLoop:
         # observability; finished threads are pruned on the next spawn.
         self.background_threads: list[threading.Thread] = []
 
+    @property
+    def persona_prompt(self) -> str:
+        """
+        Nova's identity text, read fresh (through PersonaService's own short
+        TTL cache) on every call rather than cached on `self` — unlike the
+        host block, the persona can now change mid-process via the
+        update_persona tool, and the next turn should see it without a
+        restart.
+        """
+        if self.persona_service is None:
+            self.persona_service = PersonaService()
+        return self.persona_service.get_active_content()
+
     def _system_blocks(self, steer: str = "") -> list[dict[str, Any]]:
         """
         Assemble the system prompt for one conversation request.
@@ -233,11 +250,14 @@ class AgentLoop:
         The persona and the host description are the stable prefix, and the
         LAST of them carries the cache breakpoint — tools render before system
         in the prompt, so this one marker caches the tool list, the persona and
-        the host together. Both are process-lifetime constants, so putting the
-        host block inside the cached span costs nothing. The per-medium steer
-        (e.g. the spoken-reply brevity instruction) changes between chat and
-        voice turns, so it must come AFTER the breakpoint or every switch of
-        medium would invalidate the cache.
+        the host together. The host block is a process-lifetime constant; the
+        persona is not any more (see the property above) but changes rarely
+        enough that caching it under the same breakpoint is still the right
+        trade — an update invalidates the prompt cache for the next turn,
+        which is the correct behavior, not a bug. The per-medium steer (e.g.
+        the spoken-reply brevity instruction) changes between chat and voice
+        turns, so it must come AFTER the breakpoint or every switch of medium
+        would invalidate the cache.
         """
         blocks: list[dict[str, Any]] = [
             {"type": "text", "text": self.persona_prompt},

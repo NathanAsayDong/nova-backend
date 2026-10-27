@@ -1,4 +1,5 @@
 from .memory_chunk import MemoryChunk
+from .persona_prompt import PersonaPrompt
 from .project import Project
 from .conversation import Conversation
 from .meeting import Meeting, MeetingChunk, MeetingNotes, MeetingSegment, MeetingStatus
@@ -17,6 +18,7 @@ __all__ = [
     "MemoryChunk",
     "Message",
     "MessageRole",
+    "PersonaPrompt",
     "Project",
     "Responsibility",
     "ServiceMethodToolConfig",
