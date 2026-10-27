@@ -46,6 +46,13 @@ _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
 _MIN_SENTENCE_CHARS = 30
 _AGENT_MAX_ITERATIONS = 50
 
+# Stand-in for a tool_result the agent loop never got to record — the tool
+# call was interrupted by a timeout, a retry, or a crash partway through.
+# Anthropic rejects every later request on a conversation with a dangling
+# tool_use id, so every one must get a result before the next request goes
+# out; see `AgentLoop.repair_tool_pairing`.
+_INTERRUPTED_TOOL_RESULT = "Tool call was interrupted and returned no result."
+
 # How many progress lines one turn may say out loud before it stops narrating
 # and just works. A multi-step turn should not leave the user in silence, but
 # it should not talk the whole way through either — past about three, the
@@ -359,6 +366,129 @@ class AgentLoop:
             return json.dumps(result)
         except TypeError:
             return str(result)
+
+    @staticmethod
+    def _interrupted_tool_result(tool_use_id: str) -> dict[str, Any]:
+        """A placeholder tool_result for a tool_use id that never got one."""
+        return {
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": _INTERRUPTED_TOOL_RESULT,
+            "is_error": True,
+        }
+
+    @staticmethod
+    def _tool_use_ids(message: dict[str, Any] | None) -> list[str]:
+        """tool_use ids carried by an assistant message's content blocks, in order."""
+        if not message:
+            return []
+        content = message.get("content")
+        if not isinstance(content, list):
+            return []
+        return [
+            block["id"]
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id")
+        ]
+
+    @classmethod
+    def repair_tool_pairing(cls, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Make `history` valid for the next request to the model, in place.
+
+        A tool call interrupted mid-flight — a timeout, a retry, a crash
+        before the result was recorded — can leave an assistant tool_use
+        block in history with no matching tool_result in the user message
+        right after it. The Anthropic API rejects every later request on
+        that conversation with a 400 once that happens ("tool_use ids were
+        found without tool_result blocks immediately after"), and the
+        in-process history for a conversation (`self.conversations`) is
+        never rehydrated from the DB again once it exists, so the break
+        would otherwise persist for the life of the process. This runs
+        before every request:
+
+        - any tool_use id with no tool_result in the following message gets
+          a placeholder tool_result inserted (or a whole placeholder user
+          message, if none follows at all);
+        - any tool_result block that doesn't answer a tool_use id from the
+          message immediately before it is dropped as an orphan.
+
+        This is a backstop. The agent loop itself should never create the
+        broken state in the first place (see the tool-call loop in
+        `_conversation_turn`, which always records a result — real or
+        placeholder — for every tool_use before moving on); this exists for
+        whatever gets past that, including history assembled or edited by
+        other code paths.
+
+        Returns `history` for convenience; the list is also mutated in place
+        so a caller holding the same reference sees the fix.
+        """
+        i = 0
+        while i < len(history):
+            message = history[i]
+            role = message.get("role")
+
+            if role == "user" and isinstance(message.get("content"), list):
+                prev = history[i - 1] if i > 0 else None
+                prev_ids = set(cls._tool_use_ids(prev)) if prev and prev.get("role") == "assistant" else set()
+                content = message["content"]
+                has_tool_result = any(
+                    isinstance(block, dict) and block.get("type") == "tool_result"
+                    for block in content
+                )
+                if has_tool_result or prev_ids:
+                    # Keep every non-tool_result block, and only tool_result
+                    # blocks that answer this round's tool_use ids — anything
+                    # else is an orphan.
+                    kept = [
+                        block
+                        for block in content
+                        if not (
+                            isinstance(block, dict)
+                            and block.get("type") == "tool_result"
+                            and block.get("tool_use_id") not in prev_ids
+                        )
+                    ]
+                    present_ids = {
+                        block.get("tool_use_id")
+                        for block in kept
+                        if isinstance(block, dict) and block.get("type") == "tool_result"
+                    }
+                    missing = [tid for tid in prev_ids if tid not in present_ids]
+                    if missing:
+                        kept = kept + [cls._interrupted_tool_result(tid) for tid in missing]
+                    if kept != content:
+                        history[i] = {**message, "content": kept}
+                i += 1
+                continue
+
+            if role == "assistant":
+                pending_ids = cls._tool_use_ids(message)
+                if pending_ids:
+                    next_message = history[i + 1] if i + 1 < len(history) else None
+                    next_is_user_list = (
+                        next_message is not None
+                        and next_message.get("role") == "user"
+                        and isinstance(next_message.get("content"), list)
+                    )
+                    if not next_is_user_list:
+                        # Nothing follows this tool_use at all (end of
+                        # history, or the next message isn't a tool_result
+                        # carrier) — insert one so every pending id gets
+                        # answered before the next request. The following
+                        # loop iteration fills it in via the branch above.
+                        history.insert(
+                            i + 1,
+                            {
+                                "role": "user",
+                                "content": [
+                                    cls._interrupted_tool_result(tid) for tid in pending_ids
+                                ],
+                            },
+                        )
+            i += 1
+
+        return history
 
     @staticmethod
     def _without_images(content: Any) -> Any:
@@ -1136,6 +1266,11 @@ class AgentLoop:
             hold = _PassHold(sidekick)
 
             try:
+                # Repair before every request, not just the first: a
+                # dangling tool_use can also be left by a round that failed
+                # further down in this same loop (see the tool-call loop
+                # below). Cheap no-op when history is already well-formed.
+                self.repair_tool_pairing(history)
                 _mark_timing(
                     timer,
                     "model_request_sent",
@@ -1346,7 +1481,16 @@ class AgentLoop:
                         "role": "status",
                     }
 
+            # `abort_reason` is set the moment a tool call turns out fatal —
+            # an unrecoverable ToolExecutionError, or anything that escaped
+            # ToolService's own wrapping entirely (a crash, a hard timeout,
+            # a cancellation). The loop still finishes bookkeeping for every
+            # tool_use below before acting on it: the assistant message
+            # already in history (above) has every one of these ids, and the
+            # API will reject the very next request unless each gets a
+            # tool_result now, real or placeholder.
             tool_results: list[dict[str, Any]] = []
+            abort_reason: str | None = None
             for block in tool_uses:
                 tool = tools_by_name.get(block.name)
                 if tool is None:
@@ -1362,6 +1506,13 @@ class AgentLoop:
                         MessageRole.TOOL,
                         json.dumps({"tool": block.name, "error": "Unknown tool."}),
                     )
+                    continue
+
+                if abort_reason is not None:
+                    # An earlier tool_use in this same round already ended
+                    # the turn; the rest never ran, but they still need a
+                    # result so none of them is left dangling.
+                    tool_results.append(self._interrupted_tool_result(block.id))
                     continue
 
                 arguments = block.input if isinstance(block.input, dict) else {}
@@ -1411,14 +1562,6 @@ class AgentLoop:
                             {"tool": block.name, "input": arguments, "error": str(exc)}
                         ),
                     )
-                    if not exc.recoverable:
-                        fallback = "I ran into a tool execution issue and had to stop."
-                        history.append({"role": "assistant", "content": fallback})
-                        persist(MessageRole.NOVA, fallback)
-                        yield from self._failure_events(
-                            prompt_source, fallback, early_line is not None
-                        )
-                        return
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -1427,8 +1570,47 @@ class AgentLoop:
                             "is_error": True,
                         }
                     )
+                    if not exc.recoverable:
+                        abort_reason = "I ran into a tool execution issue and had to stop."
+                except Exception as exc:
+                    # Anything else is a tool call that never produced a
+                    # result at all — a crash, a timeout that escaped
+                    # ToolService, a cancellation. A placeholder goes in its
+                    # place so this tool_use is never left dangling; the
+                    # repair step before the next request would otherwise
+                    # have to catch it instead.
+                    _mark_timing(
+                        timer,
+                        "tool_done",
+                        name=tool.name,
+                        dur_ms=round((time.monotonic() - tool_started_at) * 1000),
+                        error=True,
+                    )
+                    try:
+                        persist(
+                            MessageRole.TOOL,
+                            json.dumps(
+                                {"tool": block.name, "input": arguments, "error": str(exc)}
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    tool_results.append(self._interrupted_tool_result(block.id))
+                    abort_reason = "I ran into a tool execution issue and had to stop."
 
+            # Every tool_use from this round has a result now, so the pairing
+            # is valid the moment this message lands in history — never
+            # append the assistant's tool_use blocks and the fallback text
+            # without it in between.
             history.append({"role": "user", "content": tool_results})
+
+            if abort_reason is not None:
+                history.append({"role": "assistant", "content": abort_reason})
+                persist(MessageRole.NOVA, abort_reason)
+                yield from self._failure_events(
+                    prompt_source, abort_reason, early_line is not None
+                )
+                return
 
         fallback = "I hit a loop limit while working on that and had to stop."
         history.append({"role": "assistant", "content": fallback})
@@ -1687,6 +1869,9 @@ class AgentLoop:
                 return "I hit a time limit while working on that and had to stop."
 
             try:
+                # Same backstop as the conversation loop: fix any dangling
+                # tool_use/tool_result pairing before it reaches the API.
+                self.repair_tool_pairing(history)
                 response = self.claude_service.get_response(
                     "",
                     context=history,
