@@ -11,7 +11,8 @@ from src.service.claude_service import TOOL_USE_STARTED, TurnStream
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
 from src.service.conversation_service import ConversationClosedError
-from src.service.tool_service import ToolService
+from src.model.tool import Tool
+from src.service.tool_service import ToolExecutionError, ToolService
 
 
 @dataclass
@@ -1430,3 +1431,314 @@ class PrefetchedConversationTests(unittest.TestCase):
         )
 
         self.assertEqual(self.service.ensure_calls, 1)
+
+
+def _tool_result_ids(message: dict) -> set:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return set()
+    return {
+        block.get("tool_use_id")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    }
+
+
+class ToolPairingRepairTests(unittest.TestCase):
+    """
+    `AgentLoop.repair_tool_pairing` is the backstop for the bug reported in
+    production: once a tool call is interrupted, the conversation carries an
+    assistant tool_use id with no tool_result after it, and the Anthropic
+    API rejects every later request on that conversation with "messages.N:
+    tool_use ids were found without tool_result blocks immediately after."
+    These exercise the repair directly, independent of how the broken state
+    came to exist.
+    """
+
+    def test_dangling_tool_use_at_end_of_history_gets_a_placeholder(self):
+        history = [
+            {"role": "user", "content": "do the thing"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(len(history), 3)
+        self.assertEqual(history[2]["role"], "user")
+        self.assertEqual(_tool_result_ids(history[2]), {"t1"})
+        self.assertTrue(history[2]["content"][0]["is_error"])
+
+    def test_dangling_tool_use_mid_history_gets_a_placeholder_inserted(self):
+        """
+        An assistant tool_use directly followed by another assistant message
+        (no tool_result in between at all) - the shape left behind when a
+        turn crashes between appending its tool_use and ever recording a
+        result for it.
+        """
+        history = [
+            {"role": "user", "content": "do the thing"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "x", "input": {}}],
+            },
+            {"role": "assistant", "content": "sorry, I had to stop"},
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(len(history), 4)
+        self.assertEqual(history[2]["role"], "user")
+        self.assertEqual(_tool_result_ids(history[2]), {"t1"})
+        self.assertEqual(history[3], {"role": "assistant", "content": "sorry, I had to stop"})
+
+    def test_multiple_tool_uses_with_only_some_results_fills_in_the_rest(self):
+        history = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "a", "input": {}},
+                    {"type": "tool_use", "id": "t2", "name": "b", "input": {}},
+                    {"type": "tool_use", "id": "t3", "name": "c", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "t3", "content": "ok"},
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(len(history), 2)
+        ids = _tool_result_ids(history[1])
+        self.assertEqual(ids, {"t1", "t2", "t3"})
+        # The real results are untouched; only the missing one is synthetic.
+        placeholder = next(
+            block for block in history[1]["content"] if block["tool_use_id"] == "t2"
+        )
+        self.assertTrue(placeholder["is_error"])
+        real = next(
+            block for block in history[1]["content"] if block["tool_use_id"] == "t1"
+        )
+        self.assertEqual(real["content"], "ok")
+
+    def test_orphaned_tool_result_is_dropped(self):
+        """
+        A tool_result with no preceding tool_use for it - left behind by, say,
+        a history edit elsewhere - does not belong in the request at all.
+        """
+        history = [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "ghost", "content": "??"}
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(history[0], {"role": "user", "content": "hello"})
+        self.assertEqual(history[1]["content"], [])
+
+    def test_orphan_is_dropped_even_next_to_a_valid_pairing(self):
+        """
+        Only tool_result blocks answering the immediately preceding
+        assistant's tool_use ids survive; anything else in that same message
+        is still an orphan and is dropped alongside the valid one.
+        """
+        history = [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "a", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "stale", "content": "??"},
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(_tool_result_ids(history[1]), {"t1"})
+
+    def test_well_formed_history_is_left_unchanged(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "a", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+            },
+        ]
+        original = [dict(message) for message in history]
+
+        result = AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(history, original)
+        self.assertIs(result, history)
+
+
+class InterruptedToolCallTests(unittest.TestCase):
+    """
+    The agent loop's own tool-call loop should never create the broken state
+    `repair_tool_pairing` exists to fix. Whatever ends a tool call early -
+    an unrecoverable ToolExecutionError, or a bare crash that escapes
+    ToolService's own wrapping entirely - every tool_use the model asked for
+    in that round must still get a tool_result, real or placeholder, before
+    the turn's fallback message is added.
+    """
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        self.conversation_id = uuid4()
+        self.tool_service = ToolService.__new__(ToolService)
+        self.tool_service.tool_dao = self._tool_dao(["flaky_tool", "good_tool"])
+        self.agent_loop.tool_service = self.tool_service
+        self.agent_loop.conversation_service = FakeConversationService()
+
+    @staticmethod
+    def _tool_dao(names):
+        tools = [
+            Tool(name=name, config={"input_schema": {"type": "object", "properties": {}}})
+            for name in names
+        ]
+
+        class _Dao:
+            def get_all(self_inner):
+                return tools
+
+        return _Dao()
+
+    def _rounds(self, responses):
+        queue = list(responses)
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            return TurnStream.completed(queue.pop(0))
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+    def _run(self):
+        return list(
+            self.agent_loop.conversation_loop_events("do it", self.conversation_id)
+        )
+
+    def _assert_valid_pairing(self):
+        """Every assistant tool_use id has a matching tool_result in the very next message."""
+        history = self.agent_loop.conversations[self.conversation_id]
+        for index, message in enumerate(history):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            tool_use_ids = {
+                block["id"]
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "tool_use"
+            }
+            if not tool_use_ids:
+                continue
+            self.assertLess(
+                index + 1, len(history), "tool_use with nothing after it in history"
+            )
+            next_message = history[index + 1]
+            self.assertEqual(next_message.get("role"), "user")
+            self.assertEqual(_tool_result_ids(next_message), tool_use_ids)
+
+    def test_unrecoverable_tool_error_still_pairs_its_tool_use(self):
+        self.tool_service.call_tool = lambda tool, arguments, context=None: (_ for _ in ()).throw(
+            ToolExecutionError("config is broken", recoverable=False)
+        )
+        self._rounds(
+            [
+                FakeMessage(
+                    content=[FakeToolUseBlock(id="t1", name="flaky_tool", input={})]
+                )
+            ]
+        )
+
+        list(self._run())
+
+        self._assert_valid_pairing()
+        history = self.agent_loop.conversations[self.conversation_id]
+        # The fallback text comes after the (now complete) tool_results message.
+        self.assertEqual(history[-1]["role"], "assistant")
+        self.assertIn("tool execution issue", history[-1]["content"])
+
+    def test_unexpected_crash_during_a_tool_call_still_pairs_its_tool_use(self):
+        """
+        A crash that escapes ToolService.call_tool entirely (not wrapped in
+        ToolExecutionError at all) - the "crash mid-call" case from the bug
+        report - must not leave the tool_use dangling either.
+        """
+
+        def _boom(tool, arguments, context=None):
+            raise RuntimeError("the process hiccuped")
+
+        self.tool_service.call_tool = _boom
+        self._rounds(
+            [
+                FakeMessage(
+                    content=[FakeToolUseBlock(id="t1", name="flaky_tool", input={})]
+                )
+            ]
+        )
+
+        list(self._run())
+
+        self._assert_valid_pairing()
+
+    def test_only_some_tool_calls_in_a_round_fail_all_still_get_results(self):
+        """
+        Three tool_use blocks in one round; the second one is fatal. The
+        first already succeeded, and the third never ran - both still need a
+        tool_result so the assistant message's three ids are fully answered.
+        """
+        call_log = []
+
+        def _call(tool, arguments, context=None):
+            call_log.append(tool.name)
+            if tool.name == "flaky_tool":
+                raise ToolExecutionError("nope", recoverable=False)
+            return "fine"
+
+        self.tool_service.call_tool = _call
+        self._rounds(
+            [
+                FakeMessage(
+                    content=[
+                        FakeToolUseBlock(id="t1", name="good_tool", input={}),
+                        FakeToolUseBlock(id="t2", name="flaky_tool", input={}),
+                        FakeToolUseBlock(id="t3", name="good_tool", input={}),
+                    ]
+                )
+            ]
+        )
+
+        list(self._run())
+
+        self._assert_valid_pairing()
+        # The third tool never actually ran - the turn had already ended.
+        self.assertEqual(call_log, ["good_tool", "flaky_tool"])
+        history = self.agent_loop.conversations[self.conversation_id]
+        results_message = history[2]
+        by_id = {block["tool_use_id"]: block for block in results_message["content"]}
+        self.assertEqual(by_id["t1"]["content"], "fine")
+        self.assertTrue(by_id["t2"]["is_error"])
+        self.assertTrue(by_id["t3"]["is_error"])
