@@ -121,6 +121,10 @@ class TurnTimer:
         # once (e.g. "model_request_sent" on round 2) still prints every
         # time, but only its first timing feeds the SUMMARY stages below.
         self._marks: dict[str, float] = {}
+        # Prompt-cache fields off the round-1 "usage" mark, captured so
+        # SUMMARY can report them without re-deriving anything. None until
+        # (and unless) a round=1 usage mark arrives.
+        self._round1_usage: dict[str, Any] | None = None
 
     def mark(self, mark_name: str, **fields: Any) -> None:
         # The positional parameter is `mark_name`, not `name` — several call
@@ -135,6 +139,16 @@ class TurnTimer:
                 delta_ms = (now - self._last) * 1000
                 self._last = now
                 self._marks.setdefault(mark_name, elapsed_ms)
+                if (
+                    mark_name == "usage"
+                    and self._round1_usage is None
+                    and fields.get("round") == 1
+                ):
+                    self._round1_usage = {
+                        "cache_read": fields.get("cache_read", 0),
+                        "cache_write": fields.get("cache_write", 0),
+                        "cache_hit_pct": fields.get("cache_hit_pct", "n/a"),
+                    }
             line = (
                 f"[timing] turn={self.turn_id} t=+{elapsed_ms:.0f}ms "
                 f"(+{delta_ms:.0f}ms) {mark_name}"
@@ -154,6 +168,7 @@ class TurnTimer:
         try:
             with self._lock:
                 marks = dict(self._marks)
+                round1_usage = self._round1_usage
             parts = []
             for start_name, end_name, label in _SUMMARY_STAGES:
                 start_ms = marks.get(start_name)
@@ -171,10 +186,19 @@ class TurnTimer:
             done_ms = marks.get("done")
             total = f"{done_ms - stop_ms:.0f}ms" if done_ms is not None else "n/a"
 
+            if round1_usage is None:
+                cache_read = cache_write = cache_hit_pct = "n/a"
+            else:
+                cache_read = round1_usage["cache_read"]
+                cache_write = round1_usage["cache_write"]
+                cache_hit_pct = round1_usage["cache_hit_pct"]
+
             line = (
                 f"[timing] turn={self.turn_id} SUMMARY "
                 + " ".join(parts)
                 + f" stop->first_audio_sent={stop_to_audio} total={total}"
+                + f" cache_read={cache_read} cache_write={cache_write}"
+                + f" cache_hit_pct={cache_hit_pct}"
             )
             _emit(line)
         except Exception as exc:

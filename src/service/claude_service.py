@@ -159,12 +159,43 @@ class TurnStream:
             self._message = stream.get_final_message()
             if timer is not None:
                 usage = getattr(self._message, "usage", None)
+                output_tokens = getattr(usage, "output_tokens", None) if usage else None
                 _mark_timing(
                     timer,
                     "round_complete",
                     round=round_no,
                     stop_reason=getattr(self._message, "stop_reason", None),
-                    output_tokens=getattr(usage, "output_tokens", None) if usage else None,
+                    output_tokens=output_tokens,
+                )
+                # Prompt-cache visibility, logging only (see src/harness/turn_timer.py).
+                # Read off the final message's usage block rather than the
+                # message_start/message_delta events: simpler, and the same
+                # object round_complete above already uses.
+                try:
+                    input_tokens = (getattr(usage, "input_tokens", None) or 0) if usage else 0
+                    cache_write = (
+                        (getattr(usage, "cache_creation_input_tokens", None) or 0)
+                        if usage
+                        else 0
+                    )
+                    cache_read = (
+                        (getattr(usage, "cache_read_input_tokens", None) or 0) if usage else 0
+                    )
+                    output = output_tokens or 0
+                    denom = input_tokens + cache_read + cache_write
+                    cache_hit_pct = round(cache_read / denom * 100) if denom else "n/a"
+                except Exception:
+                    input_tokens = cache_write = cache_read = output = 0
+                    cache_hit_pct = "n/a"
+                _mark_timing(
+                    timer,
+                    "usage",
+                    round=round_no,
+                    input=input_tokens,
+                    cache_read=cache_read,
+                    cache_write=cache_write,
+                    output=output,
+                    cache_hit_pct=cache_hit_pct,
                 )
         self._drained = True
 
