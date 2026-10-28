@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from typing import ClassVar
 from uuid import UUID
 
 from src.dao.memory_chunk_dao import MemoryChunkDao
@@ -11,9 +12,37 @@ from src.service.claude_service import ClaudeService
 from src.service.conversation_service import ConversationService
 from src.service.embedding_service import EmbeddingService
 
+# Cap applied to a single summarizer call's output (see _parse_chunks).
 _MAX_CHUNKS_PER_CONVERSATION = 12
 _MAX_TOOL_CONTENT_CHARS = 400
 _FETCH_LIMIT = 5
+
+# Hard cap on how many transcript characters go into one summarizer call.
+# _build_transcript previously sent the whole conversation with no limit, so
+# a long-running voice/app conversation could balloon the prompt to the point
+# it fails the summarizer outright, and a failed conversation just retries
+# the same oversized prompt forever. 60k chars is comfortably inside typical
+# context limits even after the surrounding prompt text, and is tunable
+# because "sane" depends on the model in use.
+_MAX_TRANSCRIPT_CHARS_PER_PIECE = int(
+    os.getenv("NOVA_MEMORY_MAX_TRANSCRIPT_CHARS", "60000")
+)
+
+# Ceiling on chunks extracted from ONE conversation even when its transcript
+# had to be split into several pieces to stay under the cap above. Each piece
+# is still capped at _MAX_CHUNKS_PER_CONVERSATION (12) by _parse_chunks, so a
+# conversation split into N pieces could otherwise contribute up to 12*N
+# chunks; this keeps that bounded regardless of how many pieces a
+# pathologically long conversation gets split into. 36 (3x the per-piece cap)
+# gives a long conversation room for meaningfully more durable content than a
+# normal one without being unbounded.
+_MAX_CHUNKS_PER_CONVERSATION_CEILING = 36
+
+# A conversation that keeps failing to distill (bad transcript, model error,
+# etc.) must not retry forever at the worker's 5-minute cadence and burn a
+# model call every time. This caps consecutive in-process attempts before the
+# worker gives up on it.
+_MAX_PROCESS_ATTEMPTS = int(os.getenv("NOVA_MEMORY_MAX_PROCESS_ATTEMPTS", "3"))
 
 # --- automatic retrieval (memory injected into the prompt, unasked) ---------
 
@@ -70,6 +99,14 @@ Conversation transcript:
 
 
 class MemoryChunkService:
+    # In-process retry counter: conversation uuid -> consecutive failed
+    # distillation attempts. Class-level (same pattern as
+    # ConversationService._switch_targets) so it survives across the fresh
+    # MemoryChunkService() instance the worker creates each run, without
+    # needing a DB column or migration. Resets on worker restart — see the
+    # PR notes for why that trade-off was chosen over a schema change.
+    _failed_attempts: ClassVar[dict[UUID, int]] = {}
+
     def __init__(self):
         self.memory_chunk_dao = MemoryChunkDao()
         self.conversation_service = ConversationService()
@@ -85,7 +122,10 @@ class MemoryChunkService:
         project fk when it has one), then mark the conversation processed.
         Failures on one conversation are logged and skipped so the batch
         keeps moving; the conversation stays unprocessed and is retried on
-        the next scheduler run. Not exposed as a tool — the worker runs this.
+        the next scheduler run, up to _MAX_PROCESS_ATTEMPTS, after which it
+        is marked processed anyway so it stops burning a model call every
+        run (see _record_failed_attempt). Not exposed as a tool — the worker
+        runs this.
         """
         conversations = self.conversation_service.get_unprocessed_closed_conversations()
         processed = 0
@@ -94,12 +134,32 @@ class MemoryChunkService:
 
         for conversation in conversations:
             try:
-                chunks_created += self._process_conversation(conversation)
-                self.conversation_service.mark_processed(conversation.uuid)
-                processed += 1
+                conversation_chunks = self._process_conversation(conversation)
             except Exception as exc:
                 failed += 1
-                print(f"Failed to process conversation {conversation.uuid}: {exc}")
+                self._record_failed_attempt(conversation, exc)
+                continue
+
+            chunks_created += conversation_chunks
+            try:
+                self.conversation_service.mark_processed(conversation.uuid)
+                processed += 1
+                MemoryChunkService._failed_attempts.pop(conversation.uuid, None)
+            except Exception as exc:
+                failed += 1
+                # Chunks are already inserted at this point — a retry re-runs
+                # the whole conversation and will insert them again. There is
+                # no cheap dedupe without a DB migration (e.g. an idempotency
+                # key), so this is called out loudly instead; the retry cap
+                # below at least bounds how many times it can happen.
+                print(
+                    f"Inserted {conversation_chunks} memory chunk(s) for "
+                    f"conversation {conversation.uuid} but failed to mark it "
+                    f"processed: {exc}. DUPLICATE CHUNKS risk: a retry will "
+                    "re-summarize and re-insert for this conversation until "
+                    "it succeeds or the retry cap gives up on it."
+                )
+                self._record_failed_attempt(conversation, exc)
 
         summary = {
             "conversations_processed": processed,
@@ -109,12 +169,46 @@ class MemoryChunkService:
         print(f"process_conversations: {summary}")
         return summary
 
+    def _record_failed_attempt(self, conversation: Conversation, exc: Exception) -> None:
+        """
+        Track a failed distillation attempt and give up after the cap.
+
+        Giving up marks the conversation processed (so the worker stops
+        retrying it every 5 minutes) and logs loudly so the failure is
+        visible rather than silently swallowed. It will not be retried again
+        until the worker restarts, since the counter is in-process only.
+        """
+        attempts = MemoryChunkService._failed_attempts.get(conversation.uuid, 0) + 1
+        MemoryChunkService._failed_attempts[conversation.uuid] = attempts
+
+        if attempts < _MAX_PROCESS_ATTEMPTS:
+            print(
+                f"Failed to process conversation {conversation.uuid} "
+                f"(attempt {attempts}/{_MAX_PROCESS_ATTEMPTS}): {exc}"
+            )
+            return
+
+        print(
+            f"GIVING UP on conversation {conversation.uuid} after {attempts} "
+            f"failed distillation attempts (last error: {exc}); marking it "
+            "processed so the worker stops retrying it. It will not be "
+            "retried again until the worker restarts."
+        )
+        try:
+            self.conversation_service.mark_processed(conversation.uuid)
+        except Exception as mark_exc:
+            print(
+                f"Also failed to mark {conversation.uuid} processed while "
+                f"giving up on it: {mark_exc}"
+            )
+        MemoryChunkService._failed_attempts.pop(conversation.uuid, None)
+
     def _process_conversation(self, conversation: Conversation) -> int:
         transcript = self._build_transcript(conversation)
         if not transcript:
             return 0
 
-        chunk_texts = self._summarize_to_chunks(transcript)
+        chunk_texts = self._summarize_transcript(transcript)
         if not chunk_texts:
             return 0
 
@@ -129,6 +223,59 @@ class MemoryChunkService:
         ]
         self.memory_chunk_dao.insert_memory_chunks(chunks)
         return len(chunks)
+
+    def _summarize_transcript(self, transcript: str) -> list[str]:
+        """
+        Summarize a transcript into chunks, splitting it first if oversized.
+
+        A single piece goes through the normal one-call path unchanged. Split
+        transcripts get summarized piece by piece (each piece already
+        standalone-sendable, since it only cuts on message-line boundaries)
+        and the results are combined, capped at
+        _MAX_CHUNKS_PER_CONVERSATION_CEILING overall regardless of how many
+        pieces there were.
+        """
+        pieces = self._split_transcript(transcript)
+        if len(pieces) == 1:
+            return self._summarize_to_chunks(pieces[0])
+
+        overall_limit = min(
+            _MAX_CHUNKS_PER_CONVERSATION * len(pieces),
+            _MAX_CHUNKS_PER_CONVERSATION_CEILING,
+        )
+        combined: list[str] = []
+        for piece in pieces:
+            combined.extend(self._summarize_to_chunks(piece))
+            if len(combined) >= overall_limit:
+                break
+        return combined[:overall_limit]
+
+    @staticmethod
+    def _split_transcript(transcript: str) -> list[str]:
+        """
+        Split a transcript into pieces no larger than
+        _MAX_TRANSCRIPT_CHARS_PER_PIECE, cutting only on message-line
+        boundaries (never mid-message) so each piece stays a coherent,
+        standalone-readable slice of the conversation.
+        """
+        if len(transcript) <= _MAX_TRANSCRIPT_CHARS_PER_PIECE:
+            return [transcript]
+
+        lines = transcript.split("\n")
+        pieces: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line) + 1  # +1 for the joining newline
+            if current and current_len + line_len > _MAX_TRANSCRIPT_CHARS_PER_PIECE:
+                pieces.append("\n".join(current))
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += line_len
+        if current:
+            pieces.append("\n".join(current))
+        return pieces
 
     def _build_transcript(self, conversation: Conversation) -> str:
         """Flatten a conversation's messages into labelled lines for summarization."""

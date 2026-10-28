@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 from src.dao.base_dao import BaseDao
 from src.model.conversation import Conversation
@@ -79,17 +79,100 @@ class ConversationDao(BaseDao):
         )
         return [self._to_model(self._model_class, row) for row in response.data]
 
-    def check_for_stale_conversations(self) -> None:
-        """Conversations that are not closed and have no messages within the last 24 hours, update them to closed."""
+    @staticmethod
+    def _is_idle(
+        conversation: Conversation,
+        now: datetime,
+        idle_hours: float,
+        sms_idle_hours: float,
+    ) -> bool:
+        """
+        Whether a conversation has sat quiet long enough to auto-close.
+
+        SMS threads get sms_idle_hours instead of idle_hours — sms_controller
+        uses the same window to decide whether an incoming text resumes the
+        existing thread, so closing it any sooner here would break that
+        continuity. A conversation with no last_message_timestamp_utc (never
+        actually messaged) is left alone rather than guessed at; the model
+        has no created-time column to fall back on.
+        """
+        if conversation.is_closed:
+            return False
+        last = conversation.last_message_timestamp_utc
+        if last is None:
+            print(
+                f"check_for_stale_conversations: skipping {conversation.uuid}, "
+                "no last_message_timestamp_utc to judge idleness from."
+            )
+            return False
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        threshold_hours = sms_idle_hours if conversation.sms_phone_number else idle_hours
+        return now - last > timedelta(hours=threshold_hours)
+
+    @staticmethod
+    def _is_past_rollover(conversation: Conversation, rollover_cutoff_utc: datetime) -> bool:
+        """
+        Whether a conversation's last activity predates the daily rollover.
+
+        Nate wants no conversation — voice, app, glasses, SMS, calls, all of
+        them — to carry over from one local day to the next. rollover_cutoff_utc
+        is the most recent local midnight (in NOVA_CONVERSATION_ROLLOVER_TZ)
+        expressed in UTC; a conversation last touched before it belongs to a
+        prior day and gets closed regardless of how recently that was (even a
+        conversation active 2 minutes before midnight closes). Same null/
+        already-closed handling as _is_idle.
+        """
+        if conversation.is_closed:
+            return False
+        last = conversation.last_message_timestamp_utc
+        if last is None:
+            print(
+                f"check_for_stale_conversations: skipping {conversation.uuid}, "
+                "no last_message_timestamp_utc to judge rollover from."
+            )
+            return False
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return last < rollover_cutoff_utc
+
+    def check_for_stale_conversations(
+        self,
+        idle_hours: float,
+        sms_idle_hours: float,
+        rollover_cutoff_utc: datetime,
+    ) -> None:
+        """
+        Close conversations that have gone idle past their threshold, or that
+        are left over from a prior local day (rollover_cutoff_utc).
+
+        Fetches every open conversation once and judges both conditions in
+        Python with a timezone-aware UTC "now" (the prior version compared
+        against a naive datetime.now(), which is a bug risk against
+        timestamps stored in UTC) rather than issuing a .lt() query — a
+        single query can't apply two different idle thresholds (SMS vs.
+        non-SMS) plus the rollover cutoff at once, and this also keeps the
+        decision in easily-testable places (_is_idle, _is_past_rollover).
+        Recomputing rollover_cutoff_utc fresh from the current time on every
+        call (see ConversationService.check_for_stale_conversations) is what
+        makes this restart-safe: if the worker was down over a midnight, the
+        next run's cutoff is still "the most recent local midnight before
+        right now", so a conversation from two days ago still closes — there
+        is no missed-event state to recover.
+        """
+        now = datetime.now(timezone.utc)
         response = (
             self.client.table(self._table)
             .select("*")
             .eq("is_closed", False)
-            .lt("last_message_timestamp_utc", datetime.now() - timedelta(hours=24))
             .execute()
         )
         for row in response.data:
-            self._update_columns(UUID(row["uuid"]), {"is_closed": True})
+            conversation = self._to_model(self._model_class, row)
+            if self._is_idle(
+                conversation, now, idle_hours, sms_idle_hours
+            ) or self._is_past_rollover(conversation, rollover_cutoff_utc):
+                self._update_columns(conversation.uuid, {"is_closed": True})
 
     def touch_last_message(self, uuid: UUID, timestamp_utc: str) -> Conversation | None:
         return self._update_columns(uuid, {"last_message_timestamp_utc": timestamp_utc})

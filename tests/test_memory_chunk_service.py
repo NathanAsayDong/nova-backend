@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import dataclass, field
+from unittest import mock
 from uuid import uuid4
 
 from src.model.conversation import Conversation
@@ -19,13 +20,20 @@ class FakeClaudeResponse:
 
 
 class FakeClaudeService:
-    def __init__(self, reply: str):
+    def __init__(self, reply="[]"):
+        # `reply` may be a single string (every call gets it) or a list of
+        # strings (one per call, in order) for tests that need the
+        # summarizer to behave differently across multiple pieces/attempts.
         self.reply = reply
         self.prompts: list[str] = []
 
     def get_response(self, prompt, role=None, context=None, tools=None):
         self.prompts.append(prompt)
-        return FakeClaudeResponse(content=[FakeTextBlock(text=self.reply)])
+        if isinstance(self.reply, list):
+            text = self.reply[len(self.prompts) - 1]
+        else:
+            text = self.reply
+        return FakeClaudeResponse(content=[FakeTextBlock(text=text)])
 
 
 class FakeEmbeddingService:
@@ -213,6 +221,161 @@ class FetchMemoryTests(unittest.TestCase):
         service = build_service()
         with self.assertRaises(ValueError):
             service.fetch_memory("   ")
+
+
+class SplitTranscriptTests(unittest.TestCase):
+    def test_short_transcript_is_a_single_piece(self):
+        transcript = "line one\nline two"
+        self.assertEqual(
+            MemoryChunkService._split_transcript(transcript), [transcript]
+        )
+
+    @mock.patch("src.service.memory_chunk_service._MAX_TRANSCRIPT_CHARS_PER_PIECE", 25)
+    def test_splits_on_message_line_boundaries(self):
+        lines = ["[user] 0123456789", "[nova] 0123456789", "[user] 0123456789"]
+        transcript = "\n".join(lines)
+
+        pieces = MemoryChunkService._split_transcript(transcript)
+
+        # Every original line must survive intact in exactly one piece, and
+        # no piece should ever be a line cut in half.
+        self.assertEqual("\n".join(pieces), transcript)
+        for piece in pieces:
+            for piece_line in piece.split("\n"):
+                self.assertIn(piece_line, lines)
+        self.assertGreater(len(pieces), 1)
+
+    @mock.patch("src.service.memory_chunk_service._MAX_TRANSCRIPT_CHARS_PER_PIECE", 10)
+    def test_oversized_single_line_becomes_its_own_piece(self):
+        transcript = "[user] " + ("x" * 50)
+        pieces = MemoryChunkService._split_transcript(transcript)
+        self.assertEqual(pieces, [transcript])
+
+
+class SummarizeTranscriptLimitsTests(unittest.TestCase):
+    @mock.patch("src.service.memory_chunk_service._MAX_TRANSCRIPT_CHARS_PER_PIECE", 20)
+    @mock.patch("src.service.memory_chunk_service._MAX_CHUNKS_PER_CONVERSATION_CEILING", 36)
+    def test_combines_chunks_from_each_piece(self):
+        service = build_service()
+        service.claude_service = FakeClaudeService(
+            ['["a", "b"]', '["c", "d"]', '["e"]']
+        )
+        # 6 lines of 8 chars each pair up into exactly 3 pieces under a
+        # 20-char cap (2 lines + newline = 17 chars per piece).
+        lines = [f"msgline{i}" for i in range(6)]
+        transcript = "\n".join(lines)
+        self.assertEqual(len(MemoryChunkService._split_transcript(transcript)), 3)
+
+        chunks = service._summarize_transcript(transcript)
+
+        self.assertEqual(len(service.claude_service.prompts), 3)
+        self.assertEqual(chunks, ["a", "b", "c", "d", "e"])
+
+    @mock.patch("src.service.memory_chunk_service._MAX_TRANSCRIPT_CHARS_PER_PIECE", 10)
+    @mock.patch("src.service.memory_chunk_service._MAX_CHUNKS_PER_CONVERSATION", 12)
+    @mock.patch("src.service.memory_chunk_service._MAX_CHUNKS_PER_CONVERSATION_CEILING", 3)
+    def test_overall_ceiling_caps_combined_total_even_with_many_pieces(self):
+        service = build_service()
+        # Every piece's summarizer call returns more than the ceiling alone.
+        service.claude_service = FakeClaudeService('["a", "b", "c", "d"]')
+        transcript = "\n".join([f"[user] msg {i}" for i in range(10)])
+
+        chunks = service._summarize_transcript(transcript)
+
+        self.assertLessEqual(len(chunks), 3)
+
+    def test_single_piece_transcript_uses_normal_path(self):
+        service = build_service(claude_reply='["only one"]')
+        chunks = service._summarize_transcript("[user] hi")
+        self.assertEqual(chunks, ["only one"])
+        self.assertEqual(len(service.claude_service.prompts), 1)
+
+
+class RetryCapTests(unittest.TestCase):
+    def setUp(self):
+        MemoryChunkService._failed_attempts.clear()
+
+    def tearDown(self):
+        MemoryChunkService._failed_attempts.clear()
+
+    def _add_conversation(self, service):
+        conversation = Conversation(id=1, uuid=uuid4(), is_closed=True)
+        service.conversation_service.conversations.append(conversation)
+        service.conversation_service.messages[conversation.uuid] = [
+            Message(conversation_uuid=conversation.uuid, role=MessageRole.USER, content="hi"),
+        ]
+        return conversation
+
+    @mock.patch("src.service.memory_chunk_service._MAX_PROCESS_ATTEMPTS", 3)
+    def test_retries_under_cap_leave_conversation_unprocessed(self):
+        service = build_service()
+        conversation = self._add_conversation(service)
+
+        def boom(chunks):
+            raise RuntimeError("summarizer down")
+
+        service.memory_chunk_dao.insert_memory_chunks = boom
+
+        for _ in range(2):
+            service.process_conversations()
+
+        self.assertEqual(service.conversation_service.processed, [])
+        self.assertEqual(MemoryChunkService._failed_attempts[conversation.uuid], 2)
+
+    @mock.patch("src.service.memory_chunk_service._MAX_PROCESS_ATTEMPTS", 3)
+    def test_exceeding_cap_marks_processed_and_stops_tracking(self):
+        service = build_service()
+        conversation = self._add_conversation(service)
+
+        def boom(chunks):
+            raise RuntimeError("summarizer down")
+
+        service.memory_chunk_dao.insert_memory_chunks = boom
+
+        for _ in range(3):
+            service.process_conversations()
+
+        self.assertEqual(service.conversation_service.processed, [conversation.uuid])
+        self.assertNotIn(conversation.uuid, MemoryChunkService._failed_attempts)
+
+    @mock.patch("src.service.memory_chunk_service._MAX_PROCESS_ATTEMPTS", 3)
+    def test_success_after_failure_clears_the_counter(self):
+        service = build_service()
+        conversation = self._add_conversation(service)
+
+        calls = {"n": 0}
+        real_insert = service.memory_chunk_dao.insert_memory_chunks
+
+        def flaky(chunks):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            return real_insert(chunks)
+
+        service.memory_chunk_dao.insert_memory_chunks = flaky
+
+        service.process_conversations()
+        self.assertEqual(MemoryChunkService._failed_attempts.get(conversation.uuid), 1)
+
+        service.process_conversations()
+        self.assertEqual(service.conversation_service.processed, [conversation.uuid])
+        self.assertNotIn(conversation.uuid, MemoryChunkService._failed_attempts)
+
+    @mock.patch("src.service.memory_chunk_service._MAX_PROCESS_ATTEMPTS", 3)
+    def test_mark_processed_failure_is_also_tracked_and_logged(self):
+        service = build_service()
+        conversation = self._add_conversation(service)
+
+        def boom(_uuid):
+            raise RuntimeError("db down")
+
+        service.conversation_service.mark_processed = boom
+
+        service.process_conversations()
+
+        self.assertEqual(MemoryChunkService._failed_attempts.get(conversation.uuid), 1)
+        # Chunks were inserted even though marking processed failed.
+        self.assertEqual(len(service.memory_chunk_dao.inserted), 2)
 
 
 if __name__ == "__main__":
