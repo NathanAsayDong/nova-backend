@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 from typing import ClassVar
 from uuid import UUID, uuid4
@@ -7,6 +8,20 @@ from src.dao.message_dao import MessageDao
 from src.dao.project_dao import ProjectDao
 from src.model.conversation import Conversation
 from src.model.message import Message, MessageRole
+
+# How long an SMS thread stays "the same conversation" before a new text
+# starts a fresh one instead of resuming it. Defined here (not in
+# sms_controller) so sms_controller's same-thread check and the worker's
+# auto-close job share one source of truth instead of two literals that
+# could drift; sms_controller imports this constant.
+SMS_THREAD_IDLE_HOURS = 12
+
+# How long a non-SMS conversation (voice/app/glasses) may sit idle before the
+# worker auto-closes it, unless overridden by NOVA_CONVERSATION_IDLE_HOURS.
+# Much shorter than the SMS window: voice/app sessions do not have the
+# "reply days later" pattern SMS has to accommodate, and a short default is
+# what makes conversations actually reach memory (see check_for_stale_conversations).
+_DEFAULT_CONVERSATION_IDLE_HOURS = 3
 
 
 class ConversationClosedError(Exception):
@@ -96,8 +111,18 @@ class ConversationService:
         return self.conversation_dao.get_unprocessed_closed()
 
     def check_for_stale_conversations(self) -> None:
-        """Check for conversations that have been open for too long and closes them."""
-        self.conversation_dao.check_for_stale_conversations()
+        """
+        Auto-close conversations the worker hasn't heard from in a while.
+
+        Non-SMS conversations use NOVA_CONVERSATION_IDLE_HOURS (default 3h);
+        SMS threads use SMS_THREAD_IDLE_HOURS (12h) so this matches the
+        continuity window sms_controller uses to decide whether an incoming
+        text resumes the existing thread rather than starting a new one.
+        """
+        idle_hours = float(
+            os.getenv("NOVA_CONVERSATION_IDLE_HOURS", str(_DEFAULT_CONVERSATION_IDLE_HOURS))
+        )
+        self.conversation_dao.check_for_stale_conversations(idle_hours, SMS_THREAD_IDLE_HOURS)
 
     def mark_processed(self, conversation_uuid: UUID) -> Conversation | None:
         return self.conversation_dao.set_processed(conversation_uuid)

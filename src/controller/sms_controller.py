@@ -36,7 +36,11 @@ from src.service.bip_service import (
     SmsRecipientError,
     normalize_phone_number,
 )
-from src.service.conversation_service import ConversationClosedError, ConversationService
+from src.service.conversation_service import (
+    SMS_THREAD_IDLE_HOURS,
+    ConversationClosedError,
+    ConversationService,
+)
 
 router = APIRouter(prefix="/sms", tags=["sms"])
 
@@ -46,10 +50,9 @@ conversation_service = ConversationService()
 agent_loop = AgentLoop()
 agent_loop.conversation_service = conversation_service
 
-# How long an SMS thread stays "the same conversation". Past this, a new text
-# starts a fresh conversation rather than resuming one from days ago whose
-# context no longer matches what the user is asking about.
-SMS_THREAD_IDLE_HOURS = 12
+# SMS_THREAD_IDLE_HOURS lives in conversation_service so the worker's
+# auto-close job (ConversationService.check_for_stale_conversations) uses the
+# exact same window instead of a second hardcoded literal that could drift.
 
 # Guards against one text turning into a runaway reply; the SMS steer already
 # asks for brevity, this is the backstop.

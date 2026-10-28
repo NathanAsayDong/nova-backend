@@ -3,6 +3,8 @@ Nova background worker.
 
 Entry point for scheduled jobs that run outside the request path:
 
+  * check_for_stale_conversations - auto-closes conversations idle past their
+    threshold, so they become eligible for process_conversations below
   * process_conversations - distills closed conversations into memory chunks
   * check_for_responsibilities - runs responsibilities that are due
   * run_scheduled_tasks - runs one-time tasks whose run_at has arrived
@@ -48,6 +50,12 @@ def _run_process_conversations() -> None:
     MemoryChunkService().process_conversations()
 
 
+def _run_check_for_stale_conversations() -> None:
+    from src.service.conversation_service import ConversationService
+
+    ConversationService().check_for_stale_conversations()
+
+
 def _run_check_for_responsibilities() -> None:
     from src.service.responsibility_service import ResponsibilityService
 
@@ -74,9 +82,23 @@ def _recover_stuck_tasks() -> None:
 
 def build_jobs() -> list[ScheduledJob]:
     return [
+        # Nothing closes conversations on its own (voice/app/glasses turns
+        # just keep appending to the same open conversation), so without this
+        # job they never become eligible for process_conversations below and
+        # never reach long-term memory. Runs every 5 minutes so a
+        # conversation reaches memory soon after it actually goes idle,
+        # rather than waiting up to the old 24h hardcoded threshold.
+        ScheduledJob(
+            name="check_for_stale_conversations",
+            interval_seconds=5 * 60,
+            run=_run_check_for_stale_conversations,
+        ),
+        # Runs every 5 minutes (not 30) so a conversation closed by the job
+        # above reaches memory soon after it goes idle instead of waiting up
+        # to half an hour behind it.
         ScheduledJob(
             name="process_conversations",
-            interval_seconds=30 * 60,
+            interval_seconds=5 * 60,
             run=_run_process_conversations,
         ),
         # Checked more often than responsibilities actually run: the service
