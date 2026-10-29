@@ -31,6 +31,13 @@ final class ConversationController {
         case thinking
         /// Nova's reply is playing.
         case speaking
+        /// Sentry mode is selected, Listening is on, but the socket is not
+        /// connected: the microphone is not touched at all (no capture, no
+        /// local buffering) until the connection comes back, at which point
+        /// the controller resumes on its own into `.idle`'s sentry waiting
+        /// state. Conversation mode has no equivalent state — it is only
+        /// sentry that carries the "Nova must be on and connected" rule.
+        case sentryBlocked
     }
 
     // MARK: Tunables (mirrors useNovaRuntime.ts where one exists)
@@ -63,12 +70,21 @@ final class ConversationController {
     /// Sidekick remark that expects an answer: how long the mic stays open,
     /// no wake phrase needed, before standing down quietly.
     static let sidekickFollowUpSeconds: Double = 2.0
+    /// Sentry mode's waiting message, shown in `.idle` instead of the plain
+    /// "Say \"Hey Nova\"." — mirrors the web's `SENTRY_WAITING_MESSAGE`.
+    static let sentryWaitingMessage = "Sentry: say \"Hey Nova\" to ask something."
+    /// Shown in `.sentryBlocked`: Listening is on and sentry mode is chosen,
+    /// but there is no connection to carry a request, so the mic stays off.
+    static let sentryBlockedMessage = "Nova must be turned on and connected for sentry mode to work."
 
     // MARK: Observable state for the UI
 
     private(set) var phase: Phase = .off
     private(set) var connection: SocketConnectionState = .disconnected
     private(set) var statusMessage = "Off."
+    /// `conversation` (default, today's behaviour) or `sentry`. Persisted via
+    /// `voiceModeStore`, mirroring the web client's `nova.voiceMode`.
+    private(set) var voiceMode: VoiceMode
     /// Mid-turn and nothing is playing: a spoken step finished and Nova is
     /// running a tool before the next one. The phase stays `.speaking` so
     /// "Hey Nova" can still barge in, but the screen must not claim Nova is
@@ -95,6 +111,7 @@ final class ConversationController {
     @ObservationIgnored private let wake: WakeDetecting
     @ObservationIgnored private let scheduler: Scheduling
     @ObservationIgnored private let conversationIds: ConversationIdStore
+    @ObservationIgnored private let voiceModeStore: VoiceModeStore
     @ObservationIgnored private let camera: GlassesCamera?
     @ObservationIgnored private let vision: VisionUploading?
     @ObservationIgnored let detector = TurnDetector()
@@ -193,6 +210,7 @@ final class ConversationController {
         wake: WakeDetecting,
         scheduler: Scheduling,
         conversationIds: ConversationIdStore,
+        voiceModeStore: VoiceModeStore = VoiceModeStore(),
         camera: GlassesCamera? = nil,
         vision: VisionUploading? = nil
     ) {
@@ -202,6 +220,8 @@ final class ConversationController {
         self.wake = wake
         self.scheduler = scheduler
         self.conversationIds = conversationIds
+        self.voiceModeStore = voiceModeStore
+        self.voiceMode = voiceModeStore.load()
         self.camera = camera
         self.vision = vision
 
@@ -227,11 +247,18 @@ final class ConversationController {
 
     var isEnabled: Bool { phase != .off }
 
+    /// The idle message for the current mode: plain for conversation, the
+    /// sentry waiting copy for sentry.
+    private var idleMessage: String {
+        voiceMode == .sentry ? Self.sentryWaitingMessage : "Say \"Hey Nova\"."
+    }
+
     func setEnabled(_ enabled: Bool) {
         if enabled {
             guard phase == .off else { return }
-            setPhase(.idle, "Say \"Hey Nova\".")
+            setPhase(.idle, idleMessage)
             socket.connect()
+            syncSentryGate()
         } else {
             guard phase != .off else { return }
             dropCapture(sendAbort: true)
@@ -249,12 +276,58 @@ final class ConversationController {
         }
     }
 
+    // MARK: - Voice mode
+
+    /// Switches between conversation and sentry, persisting the choice. If
+    /// Listening is on and sentry mode has no connection to work with, this
+    /// moves straight to `.sentryBlocked`, same as if the socket had just
+    /// dropped. Mid-turn, nothing is interrupted — the new mode only governs
+    /// what happens once that turn settles (see `playbackDrained`).
+    func setVoiceMode(_ mode: VoiceMode) {
+        guard voiceMode != mode else { return }
+        voiceMode = mode
+        voiceModeStore.save(mode)
+        syncSentryGate()
+    }
+
+    /// Enforces the "sentry needs Nova on and connected" rule: blocks the mic
+    /// the moment sentry mode has no connection, and releases it back to the
+    /// sentry waiting state the moment one comes back — no user action
+    /// needed either way.
+    private func syncSentryGate() {
+        guard phase != .off else { return }
+        if voiceMode == .sentry, connection != .connected {
+            enterSentryBlocked()
+        } else if phase == .sentryBlocked {
+            setPhase(.idle, idleMessage)
+        }
+    }
+
+    /// No mic capture and no local buffering while blocked: drop anything
+    /// already held, close any open wake utterance, and stop every timer.
+    private func enterSentryBlocked() {
+        guard phase != .sentryBlocked else { return }
+        dropCapture(sendAbort: false)
+        discardAwaitingSocket()
+        if wakeUtteranceOpen {
+            wakeUtteranceOpen = false
+            wake.cancel()
+        }
+        cancelTimers()
+        pendingFollowUp = false
+        pendingSidekickFollowUp = false
+        listeningIsSidekickFollowUp = false
+        setPhase(.sentryBlocked, Self.sentryBlockedMessage)
+    }
+
     // MARK: - Microphone
 
     /// One frame of microphone audio: 16 kHz mono Int16 PCM. `now` in ms on a
-    /// monotonic clock.
+    /// monotonic clock. Sentry mode blocked on Nova being off/disconnected
+    /// touches nothing here at all — no detector, no pre-roll, no wake feed —
+    /// so held audio provably never accumulates in that state.
     func ingest(frame: Data, at now: Double) {
-        guard phase != .off else { return }
+        guard phase != .off, phase != .sentryBlocked else { return }
         let level = smoother.apply(rms: PCMFormat.rms(frame), now: now)
         // Onset handlers seed a new capture from the pre-roll, which must not
         // yet contain this frame; the frame is appended right after.
@@ -789,7 +862,7 @@ final class ConversationController {
         }
     }
 
-    private func goIdle(cue: Earcon?, message: String = "Say \"Hey Nova\".") {
+    private func goIdle(cue: Earcon?, message: String? = nil) {
         guard phase != .off else { return }
         turnFinished = true
         if let capture, capture.promoted {
@@ -807,7 +880,7 @@ final class ConversationController {
         if let cue {
             earcons.play(cue)
         }
-        setPhase(.idle, message)
+        setPhase(.idle, message ?? idleMessage)
     }
 
     /// Sidekick's last remark asked a question: once its playback drains,
@@ -845,8 +918,15 @@ final class ConversationController {
         }
         guard pendingFollowUp else { return }
         pendingFollowUp = false
-        // Conversation continues: listen for a follow-up, but not forever.
         guard phase == .speaking || phase == .thinking else { return }
+        if voiceMode == .sentry {
+            // Sentry: no follow-up loop. Every turn — including the very next
+            // one — needs its own "Hey Nova", so a finished reply goes
+            // straight back to the sentry waiting state.
+            goIdle(cue: .done)
+            return
+        }
+        // Conversation continues: listen for a follow-up, but not forever.
         setPhase(.listening, "Listening for a follow-up…")
         armListenTimeout(cue: .done)
     }
@@ -857,6 +937,9 @@ final class ConversationController {
         connection = state
         switch state {
         case .connected:
+            // Sentry, blocked on the connection: resume on its own, no user
+            // action needed, back into the sentry waiting state.
+            syncSentryGate()
             if let pending = awaitingSocket {
                 deliver(pending)
             }
@@ -865,6 +948,14 @@ final class ConversationController {
             statusMessage = "Signed out. Log in again."
             onUnauthorized?()
         case .disconnected:
+            if voiceMode == .sentry {
+                // Sentry never holds audio across a dropped connection — the
+                // whole point of the gate is that nothing is captured while
+                // blocked — so there is nothing to abandon here beyond moving
+                // to the blocked state itself.
+                syncSentryGate()
+                return
+            }
             // A request or reply in flight is lost with the socket. (A capture
             // still held on the phone survives: it waits for the reconnect.)
             if let capture, capture.promoted, !capture.held {

@@ -115,6 +115,36 @@ final class MainScheduler: Scheduling {
     }
 }
 
+/// Mirrors the web client's `VoiceMode` (`types.ts`): `conversation` keeps
+/// listening for follow-ups after a reply; `sentry` requires "Hey Nova" again
+/// for every turn (a room full of people, answer one request per wake).
+enum VoiceMode: String, Equatable, Sendable, CaseIterable {
+    case conversation
+    case sentry
+}
+
+/// Persists the chosen `VoiceMode` across launches, the same way the web
+/// client keeps `nova.voiceMode` in `localStorage`.
+final class VoiceModeStore {
+    private let defaults: UserDefaults
+    private let key = "nova.voiceMode"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func load() -> VoiceMode {
+        guard let raw = defaults.string(forKey: key), let mode = VoiceMode(rawValue: raw) else {
+            return .conversation
+        }
+        return mode
+    }
+
+    func save(_ mode: VoiceMode) {
+        defaults.set(mode.rawValue, forKey: key)
+    }
+}
+
 /// The conversation the voice turns continue, kept across launches the same
 /// way the web client keeps it in localStorage. Cleared when the server says
 /// the conversation is closed.
