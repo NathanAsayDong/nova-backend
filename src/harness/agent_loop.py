@@ -85,6 +85,19 @@ _WRITE_BEHIND_TIMEOUT_SECONDS = 5.0
 # without memory rather than making the user wait for it.
 _MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 1.5
 
+# How long round 1 of a turn waits for memory before sending the model
+# request without it. Retrieval keeps running; if it lands later it is added
+# to the next round's tool-result message (see `_take_late_memory`), so a slow
+# lookup costs the first round its memory instead of costing the user the
+# wait. NOVA_MEMORY_BLOCK_MS=0 never waits; a large value restores the old
+# behaviour of blocking up to the ceiling above.
+def _memory_block_budget_seconds() -> float:
+    try:
+        ms = float(os.getenv("NOVA_MEMORY_BLOCK_MS", "250"))
+    except ValueError:
+        ms = 250.0
+    return max(0.0, min(ms / 1000.0, _MEMORY_RETRIEVAL_TIMEOUT_SECONDS))
+
 # Delimiters for the injected block. Explicit tags rather than bare prose so
 # the model can tell recalled memory from the user's own words, and so the
 # block stays findable in a transcript.
@@ -326,14 +339,16 @@ class AgentLoop:
 
     @staticmethod
     def _collect_memory(
-        memory_future: "Future | None", timer: "TurnTimer | None" = None
+        memory_future: "Future | None",
+        timer: "TurnTimer | None" = None,
+        timeout: float = _MEMORY_RETRIEVAL_TIMEOUT_SECONDS,
     ) -> str:
         """Retrieved memory, or "" if there was none or it ran out of time."""
         if memory_future is None:
             return ""
         started_at = time.monotonic()
         try:
-            result = memory_future.result(timeout=_MEMORY_RETRIEVAL_TIMEOUT_SECONDS) or ""
+            result = memory_future.result(timeout=timeout) or ""
             _mark_timing(
                 timer,
                 "memory_collected",
@@ -342,12 +357,12 @@ class AgentLoop:
             )
             return result
         except FutureTimeout:
-            print("Memory retrieval exceeded its budget; answering without it.")
+            print("Memory retrieval exceeded its budget; sending round 1 without it.")
             _mark_timing(
                 timer,
                 "memory_collected",
                 blocked_ms=round((time.monotonic() - started_at) * 1000),
-                result="timeout",
+                result="deferred" if timeout < _MEMORY_RETRIEVAL_TIMEOUT_SECONDS else "timeout",
             )
             return ""
         except Exception as exc:
@@ -359,6 +374,27 @@ class AgentLoop:
                 result="error",
             )
             return ""
+
+    @staticmethod
+    def _take_late_memory(
+        memory_future: "Future | None", timer: "TurnTimer | None" = None
+    ) -> tuple[str, bool]:
+        """
+        Memory that missed round 1's budget, if it has landed since.
+
+        Returns (block, finished). Never waits. `finished` is False while the
+        lookup is still running, so the caller tries again next round.
+        """
+        if memory_future is None:
+            return "", True
+        if not memory_future.done():
+            return "", False
+        try:
+            block = memory_future.result() or ""
+        except Exception:
+            block = ""
+        _mark_timing(timer, "memory_late", result="block" if block else "empty")
+        return block, True
 
     @staticmethod
     def _augment(prompt: str, memory_block: str) -> str:
@@ -1250,7 +1286,16 @@ class AgentLoop:
         # same reason — the next turn's cached prefix has to be byte-identical
         # to what this turn sent. Only the user's own words are persisted; the
         # memory is derived, and re-derives on rehydration.
-        memory_block = self._collect_memory(memory_future, timer)
+        memory_block = self._collect_memory(
+            memory_future, timer, timeout=_memory_block_budget_seconds()
+        )
+        # Still running after the budget: keep the future so a later round can
+        # pick the result up instead of dropping it.
+        late_memory_future = (
+            memory_future
+            if memory_future is not None and not memory_block and not memory_future.done()
+            else None
+        )
         user_text = self._augment(prompt, memory_block)
         if images:
             # Images before the text, as Claude reads them best.
@@ -1724,7 +1769,21 @@ class AgentLoop:
             # is valid the moment this message lands in history — never
             # append the assistant's tool_use blocks and the fallback text
             # without it in between.
-            history.append({"role": "user", "content": tool_results})
+            tool_message_content: list[dict[str, Any]] = list(tool_results)
+            if late_memory_future is not None:
+                late_block, late_finished = self._take_late_memory(
+                    late_memory_future, timer
+                )
+                if late_finished:
+                    late_memory_future = None
+                if late_block:
+                    tool_message_content.append(
+                        {
+                            "type": "text",
+                            "text": f"{_MEMORY_OPEN_TAG}\n{late_block}\n{_MEMORY_CLOSE_TAG}",
+                        }
+                    )
+            history.append({"role": "user", "content": tool_message_content})
 
             if abort_reason is not None:
                 history.append({"role": "assistant", "content": abort_reason})

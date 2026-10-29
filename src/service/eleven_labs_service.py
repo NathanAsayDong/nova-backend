@@ -83,8 +83,17 @@ class ElevenLabsService:
         if previous_text:
             data["previous_text"] = previous_text[-MAX_PREVIOUS_TEXT_CHARS:]
 
-        _mark_timing(timer, "tts_request_sent", provider="elevenlabs")
+        _mark_timing(
+            timer,
+            "tts_request_sent",
+            provider="elevenlabs",
+            model=self.model_id,
+            chars=len(text),
+            output_format=self.output_format,
+        )
         request_started_at = time.monotonic()
+        total_bytes = 0
+        n_chunks = 0
         response = self.session.post(
             url,
             headers={"Accept": "audio/mpeg"},
@@ -98,6 +107,8 @@ class ElevenLabsService:
                 raise RuntimeError(_describe_failure(response, self.voice_id))
             first_byte_marked = False
             for chunk in response.iter_content(chunk_size=chunk_size):
+                total_bytes += len(chunk)
+                n_chunks += 1
                 if not first_byte_marked:
                     first_byte_marked = True
                     _mark_timing(
@@ -107,6 +118,15 @@ class ElevenLabsService:
                         wait_ms=round((time.monotonic() - request_started_at) * 1000),
                     )
                 yield chunk
+            _mark_timing(
+                timer,
+                "tts_done",
+                provider="elevenlabs",
+                chars=len(text),
+                bytes=total_bytes,
+                chunks=n_chunks,
+                total_ms=round((time.monotonic() - request_started_at) * 1000),
+            )
 
     def text_to_speech(self, text: str) -> tuple[bytes, str]:
         audio_bytes = b"".join(self.stream_text_to_speech(text))

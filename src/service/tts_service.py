@@ -80,9 +80,17 @@ class OpenAITTS:
         previous_text: str | None = None,
         timer: "TurnTimer | None" = None,
     ) -> Iterator[bytes]:
-        _mark_timing(timer, "tts_request_sent", provider="openai")
+        _mark_timing(
+            timer,
+            "tts_request_sent",
+            provider="openai",
+            model=self.model,
+            chars=len(text),
+        )
         request_started_at = time.monotonic()
         first_byte_marked = False
+        total_bytes = 0
+        n_chunks = 0
         with self.client.audio.speech.with_streaming_response.create(
             model=self.model,
             voice=self.voice,
@@ -93,6 +101,8 @@ class OpenAITTS:
         ) as response:
             for audio_chunk in response.iter_bytes(chunk_size=chunk_size):
                 if audio_chunk:
+                    total_bytes += len(audio_chunk)
+                    n_chunks += 1
                     if not first_byte_marked:
                         first_byte_marked = True
                         _mark_timing(
@@ -102,6 +112,15 @@ class OpenAITTS:
                             wait_ms=round((time.monotonic() - request_started_at) * 1000),
                         )
                     yield audio_chunk
+        _mark_timing(
+            timer,
+            "tts_done",
+            provider="openai",
+            chars=len(text),
+            bytes=total_bytes,
+            chunks=n_chunks,
+            total_ms=round((time.monotonic() - request_started_at) * 1000),
+        )
 
     def output_mime_type(self) -> str:
         return "audio/mpeg"
