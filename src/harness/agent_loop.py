@@ -54,6 +54,13 @@ _AGENT_MAX_ITERATIONS = 50
 # out; see `AgentLoop.repair_tool_pairing`.
 _INTERRUPTED_TOOL_RESULT = "Tool call was interrupted and returned no result."
 
+# Stand-in content for an assistant message that `repair_tool_pairing` emptied
+# out entirely — every block it carried was an orphaned server-executed tool
+# call or result (mcp_tool_use/mcp_tool_result, server_tool_use/*_tool_result)
+# with no matching counterpart. An empty content list is invalid, so this
+# keeps the message (and the role alternation around it) valid.
+_ORPHANED_TOOL_CALL_TEXT = "[a tool call was interrupted and removed from history]"
+
 # How many progress lines one turn may say out loud before it stops narrating
 # and just works. A multi-step turn should not leave the user in silence, but
 # it should not talk the whole way through either — past about three, the
@@ -433,6 +440,25 @@ class AgentLoop:
         - any tool_result block that doesn't answer a tool_use id from the
           message immediately before it is dropped as an orphan.
 
+        Server-executed tool calls — `mcp_tool_use`/`mcp_tool_result` from an
+        MCP connector, `server_tool_use`/`*_tool_result` from a built-in tool
+        like web search — are different: both the call and its result are
+        blocks inside the *same* assistant message rather than spanning two
+        messages. An interrupted turn can still leave one side missing (a
+        Teams check through an MCP server has persisted its `mcp_tool_use`
+        audit row and then the turn ended with no result recorded), and
+        Anthropic rejects that the same way. For every assistant message:
+
+        - any `*_tool_use` block (other than the plain client `tool_use`,
+          handled above) with no `*_tool_result` block answering its id in
+          the same message is dropped as an orphan;
+        - any `*_tool_result` block (other than the plain client
+          `tool_result`) that doesn't answer a `*_tool_use` id in the same
+          message is dropped as an orphan;
+        - if that leaves the message with no content at all, it is replaced
+          with a short placeholder so the role alternation around it stays
+          valid.
+
         This is a backstop. The agent loop itself should never create the
         broken state in the first place (see the tool-call loop in
         `_conversation_turn`, which always records a result — real or
@@ -447,6 +473,53 @@ class AgentLoop:
         while i < len(history):
             message = history[i]
             role = message.get("role")
+
+            if role == "assistant" and isinstance(message.get("content"), list):
+                content = message["content"]
+                use_ids = {
+                    block["id"]
+                    for block in content
+                    if isinstance(block, dict)
+                    and isinstance(block.get("type"), str)
+                    and block["type"] != "tool_use"
+                    and block["type"].endswith("_tool_use")
+                    and block.get("id")
+                }
+                result_ids = {
+                    block["tool_use_id"]
+                    for block in content
+                    if isinstance(block, dict)
+                    and isinstance(block.get("type"), str)
+                    and block["type"] != "tool_result"
+                    and block["type"].endswith("_tool_result")
+                    and block.get("tool_use_id")
+                }
+                if use_ids or result_ids:
+                    filtered = [
+                        block
+                        for block in content
+                        if not (
+                            isinstance(block, dict)
+                            and isinstance(block.get("type"), str)
+                            and (
+                                (
+                                    block["type"] != "tool_use"
+                                    and block["type"].endswith("_tool_use")
+                                    and block.get("id") not in result_ids
+                                )
+                                or (
+                                    block["type"] != "tool_result"
+                                    and block["type"].endswith("_tool_result")
+                                    and block.get("tool_use_id") not in use_ids
+                                )
+                            )
+                        )
+                    ]
+                    if not filtered:
+                        filtered = [{"type": "text", "text": _ORPHANED_TOOL_CALL_TEXT}]
+                    if filtered != content:
+                        message = {**message, "content": filtered}
+                        history[i] = message
 
             if role == "user" and isinstance(message.get("content"), list):
                 prev = history[i - 1] if i > 0 else None
@@ -1272,8 +1345,12 @@ class AgentLoop:
         for round_no in range(1, _AGENT_MAX_ITERATIONS + 1):
             if time.monotonic() - started_at > _AGENT_LOOP_TIMEOUT_SECONDS:
                 fallback = "I hit a time limit while working on that and had to stop."
-                history.append({"role": "assistant", "content": fallback})
+                # Persisted to the DB and spoken to the user below, but never
+                # appended to the replayable `history` — this is a loop-level
+                # giveup, not an assistant turn, and leaving it in history
+                # would just be more text for the next request to carry.
                 persist(MessageRole.NOVA, fallback)
+                del history[history_start:]
                 yield from self._failure_events(prompt_source, fallback)
                 return
 
@@ -1284,74 +1361,99 @@ class AgentLoop:
             early_line = None
             live = LiveReply()
             hold = _PassHold(sidekick)
+            # Set once this round retries after a pairing repair, so a
+            # request that fails again never retries a second time.
+            retried_after_pairing_repair = False
 
-            try:
-                # Repair before every request, not just the first: a
-                # dangling tool_use can also be left by a round that failed
-                # further down in this same loop (see the tool-call loop
-                # below). Cheap no-op when history is already well-formed.
-                self.repair_tool_pairing(history)
-                _mark_timing(
-                    timer,
-                    "model_request_sent",
-                    round=round_no,
-                    model=self.claude_service.get_current_model(),
-                    effort=self.claude_service.effort,
-                    tools=len(tools_arg or []),
-                    history_msgs=len(history),
-                )
-                # `timer`/`round_no` are only passed when there is a timer:
-                # several tests stub `stream_response` with a fixed signature
-                # that has no room for extra kwargs, and timer is None on
-                # every one of them, so there is nothing for those kwargs to
-                # log anyway.
-                stream_kwargs: dict[str, Any] = {}
-                if timer is not None:
-                    stream_kwargs = {"timer": timer, "round_no": round_no}
-                turn = self.claude_service.stream_response(
-                    "",
-                    context=history,
-                    tools=tools_arg,
-                    system=system_blocks,
-                    mcp_servers=mcp_servers,
-                    **stream_kwargs,
-                )
-                # This is the latency win, on both tracks. The `<speak>` block
-                # is written first, so its closing tag lands while the markdown
-                # answer beneath it is still being generated — and the moment
-                # it does, TTS can start. The prose then streams to the screen
-                # as it is written, and a pre-tool acknowledgment is spoken
-                # the instant the tool_use block opens rather than after its
-                # arguments finish. Waiting for the final message here (as
-                # this used to) meant every voice turn paid for the length of
-                # the WRITTEN answer before a word of the spoken one was said,
-                # and every chat turn saw nothing until the last token.
-                for item in turn:
-                    if item is TOOL_USE_STARTED:
-                        yield from deliver(hold.flush(live.tool_use_started()))
-                    else:
-                        yield from deliver(hold.feed(live.push(item)))
-                response = turn.message
-            except TimeoutError:
-                # A line that had closed but was still waiting on its role is
-                # said now: the stream got far enough to say it.
-                yield from deliver(hold.flush(live.finish()))
-                fallback = "I hit a backend timeout while working on that and had to stop."
-                history.append({"role": "assistant", "content": fallback})
-                persist(MessageRole.NOVA, fallback)
-                yield from self._failure_events(
-                    prompt_source, fallback, early_line is not None
-                )
-                return
-            except Exception as exc:
-                yield from deliver(hold.flush(live.finish()))
-                fallback = f"Agent loop failed: {str(exc)}"
-                history.append({"role": "assistant", "content": fallback})
-                persist(MessageRole.NOVA, fallback)
-                yield from self._failure_events(
-                    prompt_source, fallback, early_line is not None
-                )
-                return
+            while True:
+                try:
+                    # Repair before every request, not just the first: a
+                    # dangling tool_use can also be left by a round that failed
+                    # further down in this same loop (see the tool-call loop
+                    # below). Cheap no-op when history is already well-formed.
+                    self.repair_tool_pairing(history)
+                    _mark_timing(
+                        timer,
+                        "model_request_sent",
+                        round=round_no,
+                        model=self.claude_service.get_current_model(),
+                        effort=self.claude_service.effort,
+                        tools=len(tools_arg or []),
+                        history_msgs=len(history),
+                    )
+                    # `timer`/`round_no` are only passed when there is a timer:
+                    # several tests stub `stream_response` with a fixed signature
+                    # that has no room for extra kwargs, and timer is None on
+                    # every one of them, so there is nothing for those kwargs to
+                    # log anyway.
+                    stream_kwargs: dict[str, Any] = {}
+                    if timer is not None:
+                        stream_kwargs = {"timer": timer, "round_no": round_no}
+                    turn = self.claude_service.stream_response(
+                        "",
+                        context=history,
+                        tools=tools_arg,
+                        system=system_blocks,
+                        mcp_servers=mcp_servers,
+                        **stream_kwargs,
+                    )
+                    # This is the latency win, on both tracks. The `<speak>` block
+                    # is written first, so its closing tag lands while the markdown
+                    # answer beneath it is still being generated — and the moment
+                    # it does, TTS can start. The prose then streams to the screen
+                    # as it is written, and a pre-tool acknowledgment is spoken
+                    # the instant the tool_use block opens rather than after its
+                    # arguments finish. Waiting for the final message here (as
+                    # this used to) meant every voice turn paid for the length of
+                    # the WRITTEN answer before a word of the spoken one was said,
+                    # and every chat turn saw nothing until the last token.
+                    for item in turn:
+                        if item is TOOL_USE_STARTED:
+                            yield from deliver(hold.flush(live.tool_use_started()))
+                        else:
+                            yield from deliver(hold.feed(live.push(item)))
+                    response = turn.message
+                    break
+                except TimeoutError:
+                    # A line that had closed but was still waiting on its role is
+                    # said now: the stream got far enough to say it.
+                    yield from deliver(hold.flush(live.finish()))
+                    fallback = "I hit a backend timeout while working on that and had to stop."
+                    persist(MessageRole.NOVA, fallback)
+                    del history[history_start:]
+                    yield from self._failure_events(
+                        prompt_source, fallback, early_line is not None
+                    )
+                    return
+                except Exception as exc:
+                    # Anthropic's 400 for a dangling tool_use/mcp_tool_use is
+                    # recoverable: `repair_tool_pairing` fixes exactly what it
+                    # is complaining about, so retry the request once before
+                    # giving up. Anything else, or a second failure after the
+                    # repair, falls through to the fallback below.
+                    status = getattr(exc, "status_code", None)
+                    lowered = str(exc).lower()
+                    looks_like_pairing_error = (
+                        not retried_after_pairing_repair
+                        and (status == 400 or (status is None and "400" in lowered))
+                        and "invalid_request_error" in lowered
+                        and ("tool_result" in lowered or "tool_use" in lowered)
+                    )
+                    if looks_like_pairing_error:
+                        retried_after_pairing_repair = True
+                        self.repair_tool_pairing(history)
+                        early_line = None
+                        live = LiveReply()
+                        hold = _PassHold(sidekick)
+                        continue
+                    yield from deliver(hold.flush(live.finish()))
+                    fallback = f"Agent loop failed: {str(exc)}"
+                    persist(MessageRole.NOVA, fallback)
+                    del history[history_start:]
+                    yield from self._failure_events(
+                        prompt_source, fallback, early_line is not None
+                    )
+                    return
 
             # Only client-side tool_use blocks need execution here; anything
             # Anthropic ran server-side (web search) already has its results
@@ -1888,21 +1990,42 @@ class AgentLoop:
             if time.monotonic() - started_at > _AGENT_LOOP_TIMEOUT_SECONDS:
                 return "I hit a time limit while working on that and had to stop."
 
-            try:
-                # Same backstop as the conversation loop: fix any dangling
-                # tool_use/tool_result pairing before it reaches the API.
-                self.repair_tool_pairing(history)
-                response = self.claude_service.get_response(
-                    "",
-                    context=history,
-                    tools=tools_arg,
-                    system=system,
-                    mcp_servers=mcp_servers,
-                )
-            except TimeoutError:
-                return "I hit a backend timeout while working on that and had to stop."
-            except Exception as exc:
-                return f"Agent loop failed: {str(exc)}"
+            # Set once this round retries after a pairing repair, so a
+            # request that fails again never retries a second time.
+            retried_after_pairing_repair = False
+            while True:
+                try:
+                    # Same backstop as the conversation loop: fix any dangling
+                    # tool_use/tool_result pairing before it reaches the API.
+                    self.repair_tool_pairing(history)
+                    response = self.claude_service.get_response(
+                        "",
+                        context=history,
+                        tools=tools_arg,
+                        system=system,
+                        mcp_servers=mcp_servers,
+                    )
+                    break
+                except TimeoutError:
+                    return "I hit a backend timeout while working on that and had to stop."
+                except Exception as exc:
+                    # Same self-heal as the conversation loop: a 400 for a
+                    # dangling tool_use/mcp_tool_use is exactly what
+                    # `repair_tool_pairing` fixes, so retry once before
+                    # giving up.
+                    status = getattr(exc, "status_code", None)
+                    lowered = str(exc).lower()
+                    looks_like_pairing_error = (
+                        not retried_after_pairing_repair
+                        and (status == 400 or (status is None and "400" in lowered))
+                        and "invalid_request_error" in lowered
+                        and ("tool_result" in lowered or "tool_use" in lowered)
+                    )
+                    if looks_like_pairing_error:
+                        retried_after_pairing_repair = True
+                        self.repair_tool_pairing(history)
+                        continue
+                    return f"Agent loop failed: {str(exc)}"
 
             tool_uses = [
                 block for block in response.content

@@ -726,6 +726,147 @@ class FailureSpeechTests(unittest.TestCase):
         )
 
 
+class _FakeBadRequestError(Exception):
+    """Stands in for anthropic.BadRequestError without pulling in the SDK's own type."""
+
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+_DANGLING_MCP_TOOL_USE_MESSAGE = (
+    "Error code: 400 - {'error': {'type': 'invalid_request_error', "
+    "'message': 'messages.1: `mcp_tool_use` with id `mcptoolu_1` was found "
+    "without a corresponding `mcp_tool_result` block immediately after it.'}}"
+)
+
+
+class FailureHistoryAndRetryTests(unittest.TestCase):
+    """
+    Covers the rest of the production bug: a failed turn must not leave its
+    own fallback text in the replayable history (that is what kept the
+    conversation stuck after a restart-free recovery was attempted), and a
+    400 caused by exactly the kind of dangling tool_use `repair_tool_pairing`
+    fixes should be retried once, automatically, before giving up.
+    """
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        self.conversation_id = uuid4()
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.agent_loop.conversation_service = FakeConversationService()
+
+    def _events(self, prompt_source=PromptSourceEnum.CHAT_PROMPT):
+        return list(
+            self.agent_loop.conversation_loop_events(
+                "hi", self.conversation_id, prompt_source=prompt_source
+            )
+        )
+
+    def test_failure_text_is_not_left_in_history(self):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            raise RuntimeError("claude exploded")
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        events = self._events()
+
+        # Still surfaced to the user...
+        self.assertTrue(
+            any("claude exploded" in event.get("text", "") for event in events)
+        )
+        # ...but history has nothing left over from this failed turn at all,
+        # so the very next request starts clean rather than carrying a
+        # fallback string (or anything else from the failed attempt).
+        history = self.agent_loop.conversations[self.conversation_id]
+        self.assertEqual(history, [])
+
+    def test_backend_timeout_leaves_no_trace_in_history(self):
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            raise TimeoutError()
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        self._events()
+
+        history = self.agent_loop.conversations[self.conversation_id]
+        self.assertEqual(history, [])
+
+    def test_dangling_tool_use_400_is_repaired_and_retried_once(self):
+        """
+        The exact failure from production: the request is rejected for a
+        dangling mcp_tool_use. The loop should repair history and retry the
+        same request once, transparently, rather than surfacing the error.
+        """
+        calls = {"n": 0}
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _FakeBadRequestError(_DANGLING_MCP_TOOL_USE_MESSAGE)
+            return TurnStream.completed(
+                FakeMessage(content=[FakeTextBlock(text="All sorted now.")])
+            )
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        events = self._events()
+
+        self.assertEqual(calls["n"], 2)
+        self.assertTrue(
+            any(
+                event.get("type") == "text" and "All sorted now." in event.get("text", "")
+                for event in events
+            )
+        )
+        # The retry succeeded, so nothing about the failed first attempt
+        # should be visible to the user or left in history.
+        self.assertFalse(
+            any("Agent loop failed" in event.get("text", "") for event in events)
+        )
+
+    def test_retry_never_happens_more_than_once(self):
+        """A pairing error that persists after the repair still only retries once."""
+        calls = {"n": 0}
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            calls["n"] += 1
+            raise _FakeBadRequestError(_DANGLING_MCP_TOOL_USE_MESSAGE)
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        events = self._events()
+
+        # One real attempt, one retry after the repair, and then it gives up
+        # - never a third call for the same request.
+        self.assertEqual(calls["n"], 2)
+        self.assertTrue(
+            any("Agent loop failed" in event.get("text", "") for event in events)
+        )
+        history = self.agent_loop.conversations[self.conversation_id]
+        self.assertEqual(history, [])
+
+    def test_unrelated_400_is_not_retried(self):
+        """A 400 that isn't about tool pairing should fail on the first try."""
+        calls = {"n": 0}
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            calls["n"] += 1
+            raise _FakeBadRequestError(
+                "Error code: 400 - {'error': {'type': 'invalid_request_error', "
+                "'message': 'max_tokens is too large for this model.'}}"
+            )
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        self._events()
+
+        self.assertEqual(calls["n"], 1)
+
+
 class TurnStreamTests(unittest.TestCase):
     def test_a_completed_turn_replays_its_text(self):
         stream = TurnStream.completed(
@@ -1591,6 +1732,201 @@ class ToolPairingRepairTests(unittest.TestCase):
 
         self.assertEqual(history, original)
         self.assertIs(result, history)
+
+    def test_unpaired_mcp_tool_use_is_removed(self):
+        """
+        An mcp_tool_use with no mcp_tool_result in the same message - the
+        shape left behind in production when a Teams check through the
+        Pipedream MCP server persisted its audit row and the turn ended
+        before the result ever landed in history.
+        """
+        history = [
+            {"role": "user", "content": "check teams"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "mcp_tool_use",
+                        "id": "mcptoolu_1",
+                        "name": "list_messages",
+                        "server_name": "teams",
+                        "input": {},
+                    },
+                    {"type": "text", "text": "Checking Teams..."},
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        content = history[1]["content"]
+        self.assertEqual(
+            [block["type"] for block in content],
+            ["text"],
+        )
+
+    def test_paired_mcp_tool_use_and_result_untouched(self):
+        history = [
+            {"role": "user", "content": "check teams"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "mcp_tool_use",
+                        "id": "mcptoolu_1",
+                        "name": "list_messages",
+                        "server_name": "teams",
+                        "input": {},
+                    },
+                    {
+                        "type": "mcp_tool_result",
+                        "tool_use_id": "mcptoolu_1",
+                        "content": "no new messages",
+                    },
+                    {"type": "text", "text": "Nothing new."},
+                ],
+            },
+        ]
+        original = [dict(message) for message in history]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(history, original)
+
+    def test_orphan_mcp_tool_result_is_removed(self):
+        history = [
+            {"role": "user", "content": "check teams"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "mcp_tool_result",
+                        "tool_use_id": "ghost",
+                        "content": "stale",
+                    },
+                    {"type": "text", "text": "Done."},
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        content = history[1]["content"]
+        self.assertEqual([block["type"] for block in content], ["text"])
+
+    def test_unpaired_server_tool_use_is_removed(self):
+        """Same treatment for built-in server tools (e.g. web search)."""
+        history = [
+            {"role": "user", "content": "search for something"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_1",
+                        "name": "web_search",
+                        "input": {"query": "nova backend"},
+                    },
+                    {"type": "text", "text": "Searching..."},
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        content = history[1]["content"]
+        self.assertEqual([block["type"] for block in content], ["text"])
+
+    def test_paired_server_tool_use_and_result_untouched(self):
+        history = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_1",
+                        "name": "web_search",
+                        "input": {"query": "nova backend"},
+                    },
+                    {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_1",
+                        "content": [],
+                    },
+                    {"type": "text", "text": "Here's what I found."},
+                ],
+            },
+        ]
+        original = [dict(message) for message in history]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(history, original)
+
+    def test_assistant_message_emptied_by_repair_gets_a_placeholder(self):
+        """
+        A message whose only content was an orphaned server-side call or
+        result is left with something valid rather than an empty list, so
+        role alternation around it stays intact.
+        """
+        history = [
+            {"role": "user", "content": "check teams"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "mcp_tool_use",
+                        "id": "mcptoolu_1",
+                        "name": "list_messages",
+                        "server_name": "teams",
+                        "input": {},
+                    }
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        content = history[1]["content"]
+        self.assertTrue(content)
+        self.assertNotEqual(content, [])
+
+    def test_client_tool_use_repair_still_works_alongside_mcp_blocks(self):
+        """
+        A single round can mix a client tool_use (needing a tool_result in
+        the next message) with a properly paired mcp_tool_use/result in the
+        same assistant message - the mcp pairing repair must not disturb the
+        client one.
+        """
+        history = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "mcp_tool_use",
+                        "id": "mcptoolu_1",
+                        "name": "list_messages",
+                        "server_name": "teams",
+                        "input": {},
+                    },
+                    {
+                        "type": "mcp_tool_result",
+                        "tool_use_id": "mcptoolu_1",
+                        "content": "ok",
+                    },
+                    {"type": "tool_use", "id": "t1", "name": "a", "input": {}},
+                ],
+            },
+        ]
+
+        AgentLoop.repair_tool_pairing(history)
+
+        self.assertEqual(len(history), 2)
+        self.assertEqual(_tool_result_ids(history[1]), {"t1"})
+        mcp_blocks = [
+            block for block in history[0]["content"] if block["type"].startswith("mcp_")
+        ]
+        self.assertEqual(len(mcp_blocks), 2)
 
 
 class InterruptedToolCallTests(unittest.TestCase):
