@@ -99,6 +99,15 @@ class ConversationDao(BaseDao):
         if conversation.is_closed:
             return False
         last = conversation.last_message_timestamp_utc
+        # The dao hands back raw rows via model_class(**row) without Pydantic
+        # validation (SQLModel table models skip that on init), so a str
+        # ISO8601 value from Supabase (with 'Z' or '+00:00', or naive) comes
+        # through as-is here instead of a datetime. Coerce it before use.
+        if isinstance(last, str):
+            try:
+                last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            except ValueError:
+                last = None
         if last is None:
             print(
                 f"check_for_stale_conversations: skipping {conversation.uuid}, "
@@ -126,6 +135,14 @@ class ConversationDao(BaseDao):
         if conversation.is_closed:
             return False
         last = conversation.last_message_timestamp_utc
+        # Same str-coercion need as _is_idle: last_message_timestamp_utc
+        # comes back unvalidated from the dao and may still be an ISO8601
+        # string (naive or with 'Z'/'+00:00') rather than a datetime.
+        if isinstance(last, str):
+            try:
+                last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            except ValueError:
+                last = None
         if last is None:
             print(
                 f"check_for_stale_conversations: skipping {conversation.uuid}, "
@@ -168,11 +185,18 @@ class ConversationDao(BaseDao):
             .execute()
         )
         for row in response.data:
-            conversation = self._to_model(self._model_class, row)
-            if self._is_idle(
-                conversation, now, idle_hours, sms_idle_hours
-            ) or self._is_past_rollover(conversation, rollover_cutoff_utc):
-                self._update_columns(conversation.uuid, {"is_closed": True})
+            try:
+                conversation = self._to_model(self._model_class, row)
+                if self._is_idle(
+                    conversation, now, idle_hours, sms_idle_hours
+                ) or self._is_past_rollover(conversation, rollover_cutoff_utc):
+                    self._update_columns(conversation.uuid, {"is_closed": True})
+            except Exception as e:
+                print(
+                    f"check_for_stale_conversations: error processing conversation "
+                    f"{row.get('uuid', '<unknown>')}: {e}"
+                )
+                continue
 
     def touch_last_message(self, uuid: UUID, timestamp_utc: str) -> Conversation | None:
         return self._update_columns(uuid, {"last_message_timestamp_utc": timestamp_utc})
