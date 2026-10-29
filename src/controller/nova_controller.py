@@ -629,10 +629,14 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 temp.write(audio_file_bytes(mime_type, audio_bytes))
                 file_path = Path(temp.name)
 
+            asr_started_at = time.monotonic()
             text = await asyncio.to_thread(transcribe_serialized, file_path, language)
             if token != speculative_state["token"]:
                 return  # speech resumed, or the turn was already consumed
             text = (text or "").strip()
+            speculative_state["asr_ms"] = round((time.monotonic() - asr_started_at) * 1000)
+            speculative_state["finished_at"] = time.monotonic()
+            speculative_state["audio_bytes"] = len(audio_bytes)
             speculative_state["text"] = text
             speculative_state["valid_for"] = token
 
@@ -927,12 +931,17 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                 # immediately — and when it does not, waiting on it still
                 # beats starting the same work from scratch below.
                 speculative_transcript: str | None = None
+                speculative_wait_ms = 0
                 if speculative_task is not None:
                     expected_token = speculative_state["token"]
+                    spec_wait_started = time.monotonic()
                     try:
                         await speculative_task
                     except Exception as exc:
                         print(f"Speculative transcription failed (ignored): {exc}")
+                    speculative_wait_ms = round(
+                        (time.monotonic() - spec_wait_started) * 1000
+                    )
                     if speculative_state["valid_for"] == expected_token:
                         speculative_transcript = speculative_state["text"]
                     speculative_task = None
@@ -973,8 +982,22 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         # over byte-identical audio minus the trailing silence.
                         transcript = speculative_transcript
                         print(f"[turn] transcript ready at stop (speculative): {transcript!r}")
+                        finished_at = speculative_state.get("finished_at")
                         _mark_timing(
-                            timer, "transcript_ready", path="speculative", chars=len(transcript)
+                            timer,
+                            "transcript_ready",
+                            path="speculative",
+                            chars=len(transcript),
+                            asr_ms=speculative_state.get("asr_ms"),
+                            audio_bytes=speculative_state.get("audio_bytes"),
+                            # Positive: ASR finished this long before stop, hidden behind
+                            # the silence window. Negative: stop waited on it.
+                            finished_before_stop_ms=(
+                                round((stop_received_at - finished_at) * 1000)
+                                if finished_at
+                                else None
+                            ),
+                            stop_wait_ms=speculative_wait_ms,
                         )
                     else:
                         suffix = suffix_for_mime(mime_type)
@@ -1004,6 +1027,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             "transcript_ready",
                             path="full_buffer",
                             chars=len(transcript),
+                            audio_bytes=sum(len(c) for c in chunks),
                             transcribe_ms=round(
                                 (time.monotonic() - transcribe_started_at) * 1000
                             ),
