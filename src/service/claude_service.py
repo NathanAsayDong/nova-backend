@@ -27,6 +27,27 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"false", "0", "no", "off"}
 
 
+
+def _maybe_dump_request(params: dict, uses_mcp: bool) -> None:
+    """Debug aid: with NOVA_DUMP_REQUEST=<path>, overwrite <path> with the exact
+    request about to be sent, so scripts/replay_request.py can replay it.
+    Auth tokens are redacted. Off unless the env var is set; never raises."""
+    path = os.getenv("NOVA_DUMP_REQUEST")
+    if not path:
+        return
+    try:
+        import copy
+        import json
+
+        dump = copy.deepcopy(params)
+        for server in dump.get("mcp_servers") or []:
+            if "authorization_token" in server:
+                server["authorization_token"] = "REDACTED"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"uses_mcp": uses_mcp, "params": dump}, fh, default=str)
+    except Exception:
+        pass
+
 class ToolUseStarted:
     """
     Marker yielded by a TurnStream the moment the model opens a tool_use block.
@@ -422,6 +443,7 @@ class ClaudeService:
             **self._generation_kwargs(),
             **self._build_kwargs(tools, system, mcp_servers),
         )
+        _maybe_dump_request(params, bool(mcp_servers))
         if mcp_servers:
             return TurnStream(
                 lambda: self.client.beta.messages.stream(
