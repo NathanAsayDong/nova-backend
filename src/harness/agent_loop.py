@@ -41,6 +41,7 @@ from src.service.memory_chunk_service import MemoryChunkService
 from src.service.persona_service import PersonaService
 from src.service.tool_service import ToolExecutionError, ToolService
 from src.service.update_service import UpdateService
+from src.harness.history_compaction import compact_history
 from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 
 _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
@@ -1188,10 +1189,18 @@ class AgentLoop:
                 conversation
             )
         history = self.conversations[conversation_uuid]
+        compaction = compact_history(history)
         # Where this turn starts in history, so a sidekick pass can take the
         # whole turn back out.
         history_start = len(history)
-        _mark_timing(timer, "history_loaded", rehydrated=rehydrated, messages=len(history))
+        _mark_timing(
+            timer,
+            "history_loaded",
+            rehydrated=rehydrated,
+            messages=len(history),
+            cleared=compaction["cleared"],
+            dropped=compaction["dropped"],
+        )
 
         # A sidekick turn may end in a pass, and a pass leaves no trace: the
         # overheard excerpt is not kept unless Nova actually said something
