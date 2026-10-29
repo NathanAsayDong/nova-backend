@@ -135,12 +135,15 @@ final class ConversationControllerTests: XCTestCase {
         /// Utterances forwarded to `onAmbientUtterance` (Sidekick, in the app).
         var ambientUtterances: [Data] = []
 
-        init(camera: GlassesCamera? = nil, vision: VisionUploading? = nil) {
+        init(camera: GlassesCamera? = nil, vision: VisionUploading? = nil, voiceMode: VoiceMode = .conversation) {
             let defaults = UserDefaults(suiteName: "test.\(UUID().uuidString)")!
             ids = ConversationIdStore(defaults: defaults)
+            let voiceModeStore = VoiceModeStore(defaults: defaults)
+            voiceModeStore.save(voiceMode)
             controller = ConversationController(
                 socket: socket, player: player, earcons: earcons, wake: wake,
                 scheduler: scheduler, conversationIds: ids,
+                voiceModeStore: voiceModeStore,
                 camera: camera, vision: vision
             )
             controller.onAmbientUtterance = { [weak self] pcm in self?.ambientUtterances.append(pcm) }
@@ -178,8 +181,22 @@ final class ConversationControllerTests: XCTestCase {
         }
 
         /// Enabled, calibrated, waiting for the wake phrase.
-        static func idle(camera: GlassesCamera? = nil, vision: VisionUploading? = nil) -> Rig {
-            let rig = Rig(camera: camera, vision: vision)
+        static func idle(camera: GlassesCamera? = nil, vision: VisionUploading? = nil, voiceMode: VoiceMode = .conversation) -> Rig {
+            let rig = Rig(camera: camera, vision: vision, voiceMode: voiceMode)
+            rig.controller.setEnabled(true)
+            rig.silence(800)
+            return rig
+        }
+
+        /// Sentry mode, enabled, connected, waiting for the wake phrase. The
+        /// socket is opened *before* enabling and before the calibration
+        /// silence: otherwise sentry would start blocked (disconnected) for
+        /// that 800 ms window, `ingest` would no-op throughout it, and the
+        /// turn detector would reach the first spoken test frame still
+        /// uncalibrated.
+        static func sentryIdle() -> Rig {
+            let rig = Rig(voiceMode: .sentry)
+            rig.socket.open()
             rig.controller.setEnabled(true)
             rig.silence(800)
             return rig
