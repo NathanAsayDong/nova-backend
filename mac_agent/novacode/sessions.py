@@ -429,9 +429,16 @@ class SessionManager:
     # ---------- internals ----------
 
     def _conflicting_session(self, path: Path) -> Session | None:
-        """A live session already working in this directory, if any."""
+        """
+        A live session actively running in this directory, if any.
+
+        An idle session has finished its task and is only waiting for a
+        possible follow-up, so it does not block a new one. Two sessions
+        never run in the same tree at once; an idle one is closed by the
+        idle timer in `_pump` shortly anyway.
+        """
         for session in self.sessions.values():
-            if session.status in ("closed", "error"):
+            if session.status in ("closed", "error", "idle"):
                 continue
             if session.workspace.path == path:
                 return session
@@ -463,6 +470,20 @@ class SessionManager:
                     if event["type"] == protocol.EVT_RESULT:
                         session.last_result = event
                         session.status = "idle"
+                        if self.config.idle_close_seconds > 0:
+                            # Close the session if it is still idle on this
+                            # same result when the timer fires: a follow-up
+                            # flips the status to working and a later result
+                            # replaces last_result, either of which cancels
+                            # the close.
+                            asyncio.get_running_loop().call_later(
+                                self.config.idle_close_seconds,
+                                lambda s=session, r=event: (
+                                    s.status == "idle"
+                                    and s.last_result is r
+                                    and asyncio.ensure_future(self.stop(s.id))
+                                ),
+                            )
                         await self._drain_feedback(session)
         except asyncio.CancelledError:
             raise
