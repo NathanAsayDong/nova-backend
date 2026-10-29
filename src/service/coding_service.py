@@ -59,6 +59,7 @@ class CodingService:
         instructions: str,
         title: str | None = None,
         project_id: int | None = None,
+        isolate: bool = False,
     ) -> dict:
         session_id = uuid.uuid4()
         title = (title or instructions).strip()[:120]
@@ -93,13 +94,26 @@ class CodingService:
                 ),
             }
 
-        result = await self.link.call(
-            "start",
-            session_id=str(session_id),
-            repo=repo,
-            instructions=instructions,
-            title=title,
-        )
+        try:
+            result = await self.link.call(
+                "start",
+                session_id=str(session_id),
+                repo=repo,
+                instructions=instructions,
+                title=title,
+                isolate=isolate,
+            )
+        except Exception as exc:
+            # The Mac refused or the link broke. Without this the row would
+            # sit in 'starting' forever with no process behind it, and
+            # cannot be stopped ('No live session').
+            await asyncio.to_thread(
+                self.dao.update,
+                session_id,
+                status=CodingStatus.ERROR,
+                rollup=f"Start failed: {exc}"[:200],
+            )
+            raise
         await asyncio.to_thread(
             self.dao.update,
             session_id,
@@ -467,6 +481,7 @@ class CodingService:
         instructions: str,
         title: str | None = None,
         project_id: int | None = None,
+        isolate: bool = False,
         conversation_uuid: str | None = None,
     ) -> dict:
         """Tool entry point: hand a coding task to the Mac."""
@@ -476,6 +491,7 @@ class CodingService:
                 instructions=instructions,
                 title=title,
                 project_id=project_id,
+                isolate=isolate,
             )
         )
 
@@ -529,6 +545,26 @@ class CodingService:
         summarises everything still open, which is the shape of the question
         actually asked out loud ("how's that going?").
         """
+        # A start that is genuinely in flight flips to working within
+        # seconds. A row still 'starting' after five minutes never reached
+        # the Mac (a failed start from before the failure handler existed,
+        # or a crash mid-dispatch), so mark it errored instead of letting it
+        # look open forever.
+        now = datetime.now(timezone.utc)
+        for stale in self.dao.list_open():
+            if stale.status != CodingStatus.STARTING:
+                continue
+            created = stale.created_at
+            if isinstance(created, str):
+                created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if (now - created).total_seconds() > 300:
+                self.dao.update(
+                    stale.session_id,
+                    status=CodingStatus.ERROR,
+                    rollup="Start never completed; no live session.",
+                )
         if session_id:
             session = self.dao.get(UUID(session_id))
             if session is None:

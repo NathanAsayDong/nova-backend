@@ -32,8 +32,9 @@ CODING_TOOLS: list[dict] = [
             "feature, fixing a bug, refactoring — not for answering questions about "
             "code, which you should just answer. The task runs in the repo's REAL "
             "working tree on whatever branch is checked out, so edits appear live in "
-            "Nate's editor; it never switches branches or commits on its own. Only "
-            "one task per repo at a time. If the work continues something he has "
+            "Nate's editor; it never switches branches or commits on its own. One "
+            "running task per repo at a time; finished tasks do not block it, and "
+            "pass isolate=true to work in a separate worktree instead. If the work continues something he has "
             "already discussed with Claude, use continue_claude_thread instead so "
             "the context carries over. It runs for minutes to "
             "an hour: say you have started it and move on, then use check_coding_task "
@@ -62,6 +63,10 @@ CODING_TOOLS: list[dict] = [
                     "project_id": {
                         "type": "integer",
                         "description": "Project this work belongs to, if any.",
+                    },
+                    "isolate": {
+                        "type": "boolean",
+                        "description": "Work in its own git worktree instead of the repo's real working tree. Defaults to false.",
                     },
                 },
                 "required": ["repo", "instructions"],

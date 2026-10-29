@@ -246,3 +246,211 @@ class MacShellTests(unittest.TestCase):
             tool["config"]["callable_path"],
             "src.service.command_line_service.CommandLineService.run_terminal_command",
         )
+
+
+class FinishedSessionTowerTests(unittest.TestCase):
+    """
+    Failed starts must not leave a dead 'starting' row, rows already stuck
+    that way get reconciled, and isolate reaches the Mac.
+    """
+
+    def _service(self, link):
+        from unittest.mock import MagicMock
+
+        with patch("src.service.coding_service.CodingSessionDao") as dao_cls:
+            dao_cls.return_value = MagicMock()
+            service = CodingService()
+        service.link = link
+        return service
+
+    def test_a_failed_start_marks_the_row_errored_and_reraises(self):
+        import asyncio
+
+        class BoomLink:
+            connected = True
+
+            async def call(self, command, **fields):
+                raise RuntimeError("'x' is already working in nova-backend")
+
+        service = self._service(BoomLink())
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(service.start(repo="nova-backend", instructions="do it"))
+
+        statuses = [c.kwargs.get("status") for c in service.dao.update.call_args_list]
+        self.assertIn("error", statuses)
+        self.assertNotIn("working", statuses)
+
+    def test_isolate_is_forwarded_to_the_mac(self):
+        import asyncio
+
+        seen = {}
+
+        class SpyLink:
+            connected = True
+
+            async def call(self, command, **fields):
+                seen.update(fields)
+                return {"branch": "b", "cwd": "/tmp/x"}
+
+        service = self._service(SpyLink())
+        asyncio.run(service.start(repo="r", instructions="i", isolate=True))
+
+        self.assertIs(seen["isolate"], True)
+
+    def test_isolate_defaults_to_false(self):
+        import asyncio
+
+        seen = {}
+
+        class SpyLink:
+            connected = True
+
+            async def call(self, command, **fields):
+                seen.update(fields)
+                return {}
+
+        service = self._service(SpyLink())
+        asyncio.run(service.start(repo="r", instructions="i"))
+
+        self.assertIs(seen["isolate"], False)
+
+    def test_stale_starting_rows_are_reconciled_and_fresh_ones_are_not(self):
+        from datetime import timedelta
+        from types import SimpleNamespace
+
+        now = datetime.now(timezone.utc)
+        stale_id, fresh_id, working_id = uuid4(), uuid4(), uuid4()
+        rows = [
+            # Supabase hands timestamps back as ISO strings.
+            SimpleNamespace(
+                session_id=stale_id, status="starting",
+                created_at=(now - timedelta(minutes=10)).isoformat(),
+            ),
+            SimpleNamespace(session_id=fresh_id, status="starting", created_at=now),
+            SimpleNamespace(
+                session_id=working_id, status="working",
+                created_at=now - timedelta(hours=2),
+            ),
+        ]
+        service = self._service(None)
+        service.dao.list_open.return_value = rows
+        service._to_dict = lambda s: {"sessionId": str(s.session_id)}
+
+        service.check_coding_task()
+
+        updated = [c.args[0] for c in service.dao.update.call_args_list]
+        self.assertEqual(updated, [stale_id])
+        self.assertEqual(service.dao.update.call_args.kwargs["status"], "error")
+
+    def test_the_start_tool_schema_exposes_isolate(self):
+        from scripts.register_coding_tools import CODING_TOOLS
+
+        tool = next(t for t in CODING_TOOLS if t["name"] == "start_coding_task")
+        props = tool["config"]["input_schema"]["properties"]
+
+        self.assertEqual(props["isolate"]["type"], "boolean")
+        self.assertNotIn("isolate", tool["config"]["input_schema"]["required"])
+
+
+try:
+    from mac_agent.novacode import protocol as _mac_protocol
+    from mac_agent.novacode import sessions as _mac_sessions
+except ImportError:  # the Claude SDK lives in mac_agent's own venv
+    _mac_sessions = None
+
+
+@unittest.skipIf(_mac_sessions is None, "claude_agent_sdk not installed here")
+class MacSessionLifecycleTests(unittest.TestCase):
+    """An idle session must not block its repo, and closes itself after a while."""
+
+    def _manager(self, idle_close_seconds):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        async def sink(event):
+            pass
+
+        config = SimpleNamespace(idle_close_seconds=idle_close_seconds)
+        return _mac_sessions.SessionManager(config, sink), Path("/tmp/repo")
+
+    def _session(self, manager, path, status, client=None):
+        from types import SimpleNamespace
+
+        session = _mac_sessions.Session(
+            id=str(uuid4()),
+            title="t",
+            workspace=SimpleNamespace(path=path, repo=path, branch=None),
+            client=client,
+            status=status,
+        )
+        manager.sessions[session.id] = session
+        return session
+
+    def test_only_a_running_session_blocks_the_repo(self):
+        manager, path = self._manager(0)
+        for status, blocks in [
+            ("working", True), ("starting", True), ("idle", False),
+            ("error", False), ("closed", False),
+        ]:
+            manager.sessions.clear()
+            self._session(manager, path, status)
+            self.assertEqual(
+                manager._conflicting_session(path) is not None, blocks, status
+            )
+
+    def _pump_one_result(self, manager, session, followup=None):
+        import asyncio
+        from unittest.mock import patch as _patch
+
+        class Client:
+            async def receive_messages(self_inner):
+                yield object()
+                if followup:
+                    await followup()
+
+            async def disconnect(self_inner):
+                pass
+
+        session.client = Client()
+        with _patch.object(
+            _mac_protocol, "encode", return_value=[{"type": _mac_protocol.EVT_RESULT}]
+        ):
+            asyncio.get_event_loop_policy()  # keep the policy initialised
+            return asyncio.run(self._drive(manager, session))
+
+    async def _drive(self, manager, session):
+        import asyncio
+
+        await manager._pump(session)
+        await asyncio.sleep(0.3)
+
+    def test_an_idle_session_closes_itself_after_the_timeout(self):
+        manager, path = self._manager(0.05)
+        session = self._session(manager, path, "starting")
+
+        self._pump_one_result(manager, session)
+
+        self.assertEqual(session.status, "closed")
+        self.assertNotIn(session.id, manager.sessions)
+
+    def test_a_zero_timeout_disables_auto_close(self):
+        manager, path = self._manager(0)
+        session = self._session(manager, path, "starting")
+
+        self._pump_one_result(manager, session)
+
+        self.assertEqual(session.status, "idle")
+        self.assertIn(session.id, manager.sessions)
+
+    def test_a_follow_up_before_the_timer_cancels_the_close(self):
+        manager, path = self._manager(0.1)
+        session = self._session(manager, path, "starting")
+
+        async def follow_up():
+            session.status = "working"  # what feedback() does on a new turn
+
+        self._pump_one_result(manager, session, followup=follow_up)
+
+        self.assertEqual(session.status, "working")
+        self.assertIn(session.id, manager.sessions)

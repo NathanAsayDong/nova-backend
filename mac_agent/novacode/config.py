@@ -70,6 +70,9 @@ class Config:
     sandbox: bool
     max_budget_usd: float | None
     model: str | None
+    # A finished session sits idle so Nate can follow up. After this long with
+    # no follow-up it is closed, so it stops holding its repo. 0 disables.
+    idle_close_seconds: float = 1800.0
 
     @classmethod
     def from_env(cls, reload: bool = False) -> "Config":
@@ -92,6 +95,7 @@ class Config:
             sandbox=_flag("NOVA_CODE_SANDBOX", True),
             max_budget_usd=float(budget) if budget else None,
             model=os.getenv("NOVA_CODE_MODEL") or None,
+            idle_close_seconds=float(os.getenv("NOVA_CODE_IDLE_CLOSE_MINUTES") or 30) * 60,
         )
 
     def child_env(self) -> dict[str, str]:
