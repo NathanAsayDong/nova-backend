@@ -22,12 +22,13 @@ classes.
 
 Edit `project.yml`, not the generated project. The generated `NovaGlasses.xcodeproj` is checked in so Xcode can open it directly.
 
-The tests (63 of them) cover:
+The tests (129 of them) cover:
 - the `TurnDetector` port, case by case against `turnDetector.ts`
 - wake-phrase matching
 - `Codable` round-trips for every client and server event
 - PCM/WAV framing, the pre-roll ring, 48k→16k conversion and incremental MP3 decoding (fixture: `NovaGlassesTests/Fixtures/tone_1s_22050.mp3`)
 - the `ConversationController` state machine, driven through fake socket, player, earcons, wake detector and clock
+- sentry mode (`SentryModeTests.swift`): held capture and promotion on wake, the grace period, the bare-wake listen timeout, returning to waiting after a reply (no follow-up loop), and the Nova-off/disconnected gate (no capture while blocked, automatic resume on reconnect)
 
 ## Install on your iPhone
 
@@ -96,13 +97,13 @@ The glasses camera comes through Meta's Wearables Device Access Toolkit
 | `Voice/TurnDetector.swift` | Port of `turnDetector.ts` (+ the web's level smoothing) |
 | `Voice/WakePhrase.swift`, `Voice/SpeechWakeDetector.swift` | Port of `wakePhrase.ts`; on-device `SFSpeechRecognizer`, one task per utterance, behind `WakeDetecting` |
 | `Net/NovaEvents.swift`, `Net/NovaSocket.swift` | Typed events; bearer on the upgrade, 4401 → logout, 20 s ping, 1/2/5/10/30 s backoff |
-| `Conversation/ConversationController.swift` | The state machine (ports in `Conversation/Ports.swift`) |
+| `Conversation/ConversationController.swift` | The state machine (ports in `Conversation/Ports.swift`), including the conversation/sentry voice mode |
 | `UI/` | Login screen and a minimal home screen |
 
 ## What is verified and what is not
 
 **Verified (simulator):**
-- `xcodebuild build` and `xcodebuild test` pass on the iPhone 16 / iOS 18.5 simulator (63 tests).
+- `xcodebuild build` and `xcodebuild test` pass on the iPhone 16 / iOS 18.5 simulator (63 tests), and on the iPhone 17 / iOS 27.0 simulator (129 tests, after sentry mode was added). One unrelated, pre-existing failure — `AmbientForwardingTests.testNothingIsForwardedWhenSidekickIsOff` — also fails on `main` without any sentry mode changes; everything else, including all 14 new sentry mode tests, passes.
 - The app launches to the login screen.
 
 **Not verified.** None of this can be checked in the simulator, and it has not been run on a device yet:
@@ -112,6 +113,59 @@ The glasses camera comes through Meta's Wearables Device Access Toolkit
 - **MP3 playback through the player node.** Decoding is unit-tested; scheduled playback and the drain → follow-up timing are not.
 - **Against the real server:** login, the WebSocket handshake with the bearer header, 4401 handling, ping/reconnect, and the Phase 1 PCM + `GLASSES_PROMPT` path.
 - **Background:** staying alive while locked, recovery after a phone call or "Hey Meta", and battery.
+
+## Sentry mode
+
+A second voice mode, alongside the default **conversation** mode described
+above. It mirrors the web client's `sentry` mode (`useNovaRuntime.ts`):
+
+| | Conversation (default) | Sentry |
+|---|---|---|
+| After a reply | listens for a follow-up without needing the wake phrase again, until 8 s of silence or "thanks Nova" | goes straight back to waiting for "Hey Nova" — **every** turn, including the next one, needs its own wake phrase |
+| Good for | one person talking back and forth with Nova | a room full of people: answers one request per wake phrase, then stands down |
+
+The mode is a segmented control on the home screen ("Conversation" /
+"Sentry"), persisted in `UserDefaults` under `nova.voiceMode`
+(`Conversation/Ports.swift`'s `VoiceModeStore`), the same way the web client
+keeps `nova.voiceMode` in `localStorage`. The toggle takes effect immediately;
+switching mid-turn does not interrupt the turn in progress, only what happens
+once it settles.
+
+Both modes share the same wake-gated capture: every utterance starting from
+idle is held on the phone (never sent) until the on-device recognizer
+confirms it opened with "Hey Nova," then the whole thing — pre-roll included
+— is sent at once as `purpose: "sentry"`. Sentry mode's timing constants
+(`ConversationController`):
+- `wakeGraceSeconds` (0.9 s) — how long a late wake result can still promote
+  an utterance that already looked finished.
+- `listenTimeoutSeconds` (8 s) — woken with nothing said, or a reply just
+  finished: how long before standing down back to waiting.
+- `sentryWaitingMessage` — "Sentry: say \"Hey Nova\" to ask something.",
+  shown as the status text while idle in sentry mode.
+
+**Sentry mode only runs while Nova (the Listening toggle / the backend
+connection) is on *and* connected.** This is an iOS-specific rule, not a
+straight port of the web app — the web's `ConversationHeader.tsx` does not
+gate its sentry toggle on being connected, it just shows "Reconnecting." On
+the glasses, with no screen to glance at, silently holding a room's audio
+while the socket is down is the wrong default, so it is an explicit state
+instead:
+- If Listening is off, or the WebSocket is not connected, while sentry mode
+  is selected, the controller moves to `Phase.sentryBlocked`. In that state
+  `ingest(frame:at:)` returns immediately — no turn detector, no pre-roll,
+  no wake feed, nothing is captured or buffered, by construction (see
+  `ConversationController.ingest`).
+  - The status text reads "Nova must be turned on and connected for sentry
+    mode to work." (`ConversationController.sentryBlockedMessage`), shown in
+    the home screen's status row.
+- The moment Listening is turned back on, or the socket reconnects, sentry
+  mode resumes on its own — no extra toggle, no re-arming — straight back
+  into the normal sentry waiting state (`syncSentryGate()`, called from
+  `setEnabled`, `setVoiceMode`, and the socket's connection-state callback).
+- Conversation mode has no such gate: like today, a capture started while
+  connected keeps holding locally and waits out a reconnect before sending.
+  That distinction — sentry never holds audio across a dropped connection,
+  conversation does — is the one deliberate difference from a 1:1 web port.
 
 ## On-device field checklist
 

@@ -14,7 +14,7 @@ struct HomeView: View {
                             .fill(phaseColor)
                             .frame(width: 14, height: 14)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(controller.betweenLines ? "Working" : controller.phase.rawValue.capitalized)
+                            Text(controller.betweenLines ? "Working" : phaseLabel)
                                 .font(.headline)
                             Text(controller.statusMessage)
                                 .font(.subheadline)
@@ -30,6 +30,22 @@ struct HomeView: View {
                         get: { model.listeningEnabled },
                         set: { on in Task { await model.setListening(on) } }
                     ))
+                    Picker("Mode", selection: Binding(
+                        get: { controller.voiceMode },
+                        set: { controller.setVoiceMode($0) }
+                    )) {
+                        Text("Conversation").tag(VoiceMode.conversation)
+                        Text("Sentry").tag(VoiceMode.sentry)
+                    }
+                    .pickerStyle(.segmented)
+                    Text(voiceModeCaption)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if controller.phase == .sentryBlocked {
+                        Text(controller.statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     Toggle(isOn: Binding(
                         get: { model.sidekick.isOn },
                         set: { on in model.setSidekick(on) }
@@ -96,6 +112,13 @@ struct HomeView: View {
         }
     }
 
+    private var voiceModeCaption: String {
+        switch controller.voiceMode {
+        case .conversation: "Keeps listening for follow-ups after a reply."
+        case .sentry: "Answers one request per \"Hey Nova\", then waits again. Needs Nova on and connected."
+        }
+    }
+
     private var youSaid: String {
         if !controller.partialTranscript.isEmpty { return controller.partialTranscript }
         return controller.lastTranscript.isEmpty ? "—" : controller.lastTranscript
@@ -120,6 +143,13 @@ struct HomeView: View {
         }
     }
 
+    private var phaseLabel: String {
+        switch controller.phase {
+        case .sentryBlocked: "Sentry (blocked)"
+        default: controller.phase.rawValue.capitalized
+        }
+    }
+
     private var phaseColor: Color {
         if controller.betweenLines { return .orange }
         return switch controller.phase {
@@ -128,6 +158,7 @@ struct HomeView: View {
         case .listening: .green
         case .thinking: .orange
         case .speaking: .purple
+        case .sentryBlocked: .red
         }
     }
 }
