@@ -64,6 +64,31 @@ def _maybe_dump_request(params: dict, uses_mcp: bool) -> None:
     except Exception:
         pass
 
+
+def _maybe_print_prompt(params: dict) -> None:
+    """Debug aid: print the system prompt, tool names and messages about to be
+    sent to the Claude API. Never raises."""
+    try:
+        import json
+
+        system = params.get("system")
+        if isinstance(system, list):
+            for i, block in enumerate(system):
+                cached = " [cache_control]" if block.get("cache_control") else ""
+                print(f"--- system[{i}]{cached} ---\n{block.get('text', '')}")
+        elif system:
+            print(f"--- system ---\n{system}")
+        tool_names = [t.get("name") or t.get("type") for t in params.get("tools") or []]
+        print(f"--- tools ({len(tool_names)}) ---\n{', '.join(map(str, tool_names))}")
+        messages = params.get("messages") or []
+        print(f"--- messages ({len(messages)}) ---")
+        for message in messages:
+            print(f"[{message.get('role')}] {json.dumps(message.get('content'), default=str)}")
+        print("--- end prompt ---", flush=True)
+    except Exception:
+        pass
+
+
 class ToolUseStarted:
     """
     Marker yielded by a TurnStream the moment the model opens a tool_use block.
@@ -499,6 +524,7 @@ class ClaudeService:
             **self._build_kwargs(tools, system, mcp_servers),
         )
         _maybe_dump_request(params, bool(mcp_servers))
+        _maybe_print_prompt(params)
         if mcp_servers:
             return TurnStream(
                 lambda: self.client.beta.messages.stream(
