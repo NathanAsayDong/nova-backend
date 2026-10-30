@@ -81,6 +81,16 @@ _EFFORT_MODEL_PREFIXES = (
 )
 _EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 
+# Up-front adaptive thinking is what makes the first streamed token wait on a
+# full reasoning pass before anything else can happen. `between_tools` keeps
+# thinking for the turns that benefit from it (between tool calls) without
+# that initial delay. Only valid at effort `high` or below — do not raise
+# `effort` above that while this is set. Never use `{"type": "disabled"}`
+# here: Sonnet 5 returns a 400 for it. Fixed as a single constant — not
+# varied per request, route, or turn — because changing thinking config
+# invalidates the prompt cache.
+THINKING_CONFIG = {"type": "between_tools"}
+
 
 class TurnStream:
     """
@@ -334,7 +344,10 @@ class ClaudeService:
         which has no place on the path of every request.
         """
         if self.MODEL.startswith(_EFFORT_MODEL_PREFIXES):
-            return {"output_config": {"effort": self.effort}}
+            return {
+                "output_config": {"effort": self.effort},
+                "thinking": THINKING_CONFIG,
+            }
         return {}
 
     def _build_tools(self, tools: Optional[list]) -> Optional[list]:

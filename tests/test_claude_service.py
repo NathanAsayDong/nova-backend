@@ -158,14 +158,22 @@ class GenerationKwargsTests(unittest.TestCase):
         self.service.MODEL = "claude-opus-5"
 
         self.assertEqual(
-            self.service._generation_kwargs(), {"output_config": {"effort": "medium"}}
+            self.service._generation_kwargs(),
+            {
+                "output_config": {"effort": "medium"},
+                "thinking": {"type": "between_tools"},
+            },
         )
 
     def test_sonnet_5_is_turned_down_too(self):
         self.service.MODEL = "claude-sonnet-5"
 
         self.assertEqual(
-            self.service._generation_kwargs(), {"output_config": {"effort": "medium"}}
+            self.service._generation_kwargs(),
+            {
+                "output_config": {"effort": "medium"},
+                "thinking": {"type": "between_tools"},
+            },
         )
 
     def test_effort_is_configurable(self):
