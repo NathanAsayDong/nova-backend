@@ -7,7 +7,13 @@ from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
 from src.model.mcp_server import McpServer
 from src.model.message import MessageRole
-from src.service.claude_service import ClaudeService, MCP_CONNECTOR_BETA, TurnStream
+from src.service.claude_service import (
+    MCP_CONNECTOR_BETA,
+    TOOL_SEARCH_TOOL_NAME,
+    TOOL_SEARCH_TOOL_TYPE,
+    ClaudeService,
+    TurnStream,
+)
 from src.service.mcp_server_service import McpServerService
 from src.service.tool_service import ToolService
 
@@ -120,11 +126,42 @@ class ClaudeServiceMcpKwargsTests(unittest.TestCase):
         self.assertEqual(
             [t["mcp_server_name"] for t in toolsets], ["alpha", "zeta"]
         )
+        # Deferred loading: schemas for these come on demand through the
+        # tool search tool, not on every request.
+        self.assertTrue(all(t["defer_loading"] is True for t in toolsets))
 
     def test_no_mcp_servers_means_no_connector_fields(self):
         kwargs = self.service._build_kwargs(tools=None, system=None, mcp_servers=None)
         self.assertNotIn("mcp_servers", kwargs)
         self.assertEqual(MCP_CONNECTOR_BETA, "mcp-client-2025-11-20")
+
+    def test_tool_search_tool_added_alongside_mcp_and_never_deferred(self):
+        kwargs = self.service._build_kwargs(
+            tools=[{"name": "run_sql", "description": "", "input_schema": {}}],
+            system=None,
+            mcp_servers=[{"name": "linear", "url": "https://mcp.linear.app/mcp"}],
+        )
+        search_tools = [
+            t for t in kwargs["tools"]
+            if t.get("type") == TOOL_SEARCH_TOOL_TYPE
+        ]
+        self.assertEqual(len(search_tools), 1)
+        self.assertEqual(search_tools[0]["name"], TOOL_SEARCH_TOOL_NAME)
+        self.assertNotIn("defer_loading", search_tools[0])
+
+        # At least one non-deferred tool exists (the client tool and the
+        # search tool itself) — the API 400s if every tool is deferred.
+        non_deferred = [t for t in kwargs["tools"] if not t.get("defer_loading")]
+        self.assertTrue(non_deferred)
+
+    def test_no_mcp_servers_means_no_tool_search_tool(self):
+        kwargs = self.service._build_kwargs(
+            tools=[{"name": "run_sql", "description": "", "input_schema": {}}],
+            system=None,
+            mcp_servers=None,
+        )
+        types = [t.get("type") for t in kwargs.get("tools", [])]
+        self.assertNotIn(TOOL_SEARCH_TOOL_TYPE, types)
 
 
 @dataclass
@@ -243,6 +280,167 @@ class AgentLoopMcpTests(unittest.TestCase):
 
         list(self.agent_loop.conversation_loop_events("hi", uuid4()))
         self.assertIsNone(self.captured["mcp_servers"])
+
+
+class SanitizeMcpHistoryTests(unittest.TestCase):
+    """
+    `AgentLoop.sanitize_mcp_history` — the fix for conversation history
+    containing mcp_tool_use/mcp_tool_result (or deferred tool-search) blocks
+    getting a 400 when replayed after MCP servers are no longer attached.
+    """
+
+    def test_noop_when_mcp_is_available(self):
+        history = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "mcp_tool_use", "id": "t1", "name": "search_issues",
+                     "server_name": "linear", "input": {}},
+                    {"type": "mcp_tool_result", "tool_use_id": "t1", "content": "ok"},
+                ],
+            }
+        ]
+        before = [dict(m) for m in history]
+        result = AgentLoop.sanitize_mcp_history(history, mcp_available=True)
+        self.assertEqual(result, before)
+        self.assertIs(result, history)
+
+    def test_strips_mcp_blocks_when_mcp_unavailable(self):
+        history = [
+            {"role": "user", "content": "check linear"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "mcp_tool_use", "id": "t1", "name": "search_issues",
+                     "server_name": "linear", "input": {"query": "bug"}},
+                    {"type": "mcp_tool_result", "tool_use_id": "t1", "content": "3 issues"},
+                    {"type": "text", "text": "Found 3 issues."},
+                ],
+            },
+        ]
+        AgentLoop.sanitize_mcp_history(history, mcp_available=False)
+
+        sanitized = history[1]["content"]
+        types = [block["type"] for block in sanitized]
+        self.assertNotIn("mcp_tool_use", types)
+        self.assertNotIn("mcp_tool_result", types)
+        # The model's own words are untouched.
+        self.assertIn({"type": "text", "text": "Found 3 issues."}, sanitized)
+        # Something readable stands in for what was dropped.
+        self.assertTrue(
+            any("linear.search_issues" in block.get("text", "") for block in sanitized)
+        )
+
+    def test_strips_tool_search_blocks_too(self):
+        history = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "server_tool_use", "id": "t1",
+                     "name": "tool_search_tool_bm25", "input": {"query": "sensor"}},
+                    {"type": "tool_search_tool_result", "tool_use_id": "t1",
+                     "content": []},
+                ],
+            }
+        ]
+        AgentLoop.sanitize_mcp_history(history, mcp_available=False)
+        types = [block["type"] for block in history[0]["content"]]
+        self.assertEqual(types, ["text", "text"])
+
+    def test_leaves_non_mcp_messages_and_plain_tool_blocks_alone(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Let me check."},
+                    {"type": "tool_use", "id": "x1", "name": "get_weather", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "x1", "content": "sunny"},
+                ],
+            },
+        ]
+        before = [dict(m) for m in history]
+        AgentLoop.sanitize_mcp_history(history, mcp_available=False)
+        self.assertEqual(history, before)
+
+    def test_message_left_with_nothing_gets_a_placeholder(self):
+        history = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "mcp_tool_use", "id": "t1", "name": "ping",
+                     "server_name": "mcp", "input": {}},
+                    {"type": "mcp_tool_result", "tool_use_id": "t1", "content": "ok"},
+                ],
+            }
+        ]
+        AgentLoop.sanitize_mcp_history(history, mcp_available=False)
+        self.assertEqual(len(history[0]["content"]), 2)
+        self.assertTrue(all(b["type"] == "text" for b in history[0]["content"]))
+
+
+class ConversationTurnMcpDisabledReplayTests(unittest.TestCase):
+    """
+    End-to-end: a conversation that called an MCP tool while MCP was enabled,
+    then continues after MCP is disabled, must not resend mcp_tool_use blocks
+    to the model.
+    """
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.conversation_service = FakeConversationService()
+        self.agent_loop.conversation_service = self.conversation_service
+        self.conversation_uuid = uuid4()
+        # Seed in-process history as if an earlier, MCP-enabled turn left an
+        # mcp_tool_use/mcp_tool_result pair behind.
+        self.agent_loop.conversations[self.conversation_uuid] = [
+            {"role": "user", "content": "check linear"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "mcp_tool_use", "id": "t1", "name": "search_issues",
+                     "server_name": "linear", "input": {"query": "bug"}},
+                    {"type": "mcp_tool_result", "tool_use_id": "t1", "content": "3 issues"},
+                    {"type": "text", "text": "Found 3 issues."},
+                ],
+            },
+        ]
+        # MCP now disabled: no servers registered.
+        self.agent_loop.mcp_server_service = FakeMcpService([])
+
+    def test_next_turn_sends_sanitized_history(self):
+        captured = {}
+
+        def fake_stream(prompt, role=None, context=None, tools=None,
+                        system=None, mcp_servers=None):
+            captured["context"] = [dict(m) for m in context]
+            return TurnStream.completed(
+                FakeMessage(content=[FakeBlock(type="text", text="Still here.")])
+            )
+
+        self.agent_loop.claude_service.stream_response = fake_stream
+
+        list(
+            self.agent_loop.conversation_loop_events(
+                "anything new?", self.conversation_uuid
+            )
+        )
+
+        sent_assistant_msg = next(
+            m for m in captured["context"] if m["role"] == "assistant"
+        )
+        sent_types = [block["type"] for block in sent_assistant_msg["content"]]
+        self.assertNotIn("mcp_tool_use", sent_types)
+        self.assertNotIn("mcp_tool_result", sent_types)
 
 
 if __name__ == "__main__":

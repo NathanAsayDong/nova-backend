@@ -55,6 +55,16 @@ _AGENT_MAX_ITERATIONS = 50
 # out; see `AgentLoop.repair_tool_pairing`.
 _INTERRUPTED_TOOL_RESULT = "Tool call was interrupted and returned no result."
 
+# Content block types the MCP connector and the tool search tool add to a
+# response, beyond the plain client tool_use/tool_result pair. Both are
+# server-executed: like mcp_tool_use/mcp_tool_result, a tool_search_tool_result
+# (and the server_tool_use block that precedes it) only validates on a
+# request that actually declares the tool that produced it — see
+# `sanitize_mcp_history` below for what that means for replay.
+_MCP_BLOCK_TYPES = frozenset({"mcp_tool_use", "mcp_tool_result"})
+_TOOL_SEARCH_RESULT_TYPE = "tool_search_tool_result"
+_TOOL_SEARCH_USE_NAMES = frozenset({"tool_search_tool_regex", "tool_search_tool_bm25"})
+
 # Stand-in content for an assistant message that `repair_tool_pairing` emptied
 # out entirely — every block it carried was an orphaned server-executed tool
 # call or result (mcp_tool_use/mcp_tool_result, server_tool_use/*_tool_result)
@@ -618,6 +628,86 @@ class AgentLoop:
                         )
             i += 1
 
+        return history
+
+    @staticmethod
+    def _is_mcp_or_deferred_tool_block(block: Any) -> bool:
+        """Whether `block` only validates on a request that declares MCP/tool-search."""
+        if not isinstance(block, dict):
+            return False
+        block_type = block.get("type")
+        if block_type in _MCP_BLOCK_TYPES or block_type == _TOOL_SEARCH_RESULT_TYPE:
+            return True
+        return block_type == "server_tool_use" and block.get("name") in _TOOL_SEARCH_USE_NAMES
+
+    @staticmethod
+    def _mcp_block_summary(block: dict[str, Any]) -> str:
+        """A plain-text stand-in for a block being dropped from replay."""
+        block_type = block.get("type")
+        if block_type == "mcp_tool_use":
+            server = block.get("server_name", "mcp")
+            name = block.get("name", "tool")
+            return f"[earlier MCP tool call: {server}.{name} (server not attached this turn)]"
+        if block_type == "mcp_tool_result":
+            return "[earlier MCP tool result (server not attached this turn)]"
+        if block_type == _TOOL_SEARCH_RESULT_TYPE:
+            return "[earlier tool search result (tool search not attached this turn)]"
+        return "[earlier tool search call (tool search not attached this turn)]"
+
+    @classmethod
+    def sanitize_mcp_history(
+        cls, history: list[dict[str, Any]], mcp_available: bool
+    ) -> list[dict[str, Any]]:
+        """
+        Make `history` replayable on a request that will not declare MCP servers.
+
+        `mcp_tool_use`/`mcp_tool_result` blocks (and, since they ride the same
+        mcp_servers gate — see `ClaudeService._build_kwargs` — the tool
+        search tool's `server_tool_use`/`tool_search_tool_result` blocks) only
+        validate when the request replaying them declares the MCP connector
+        (mcp_servers + a matching mcp_toolset) or the tool search tool,
+        respectively. A conversation that called an MCP tool while servers
+        were attached, then continued after they were disabled or removed —
+        a settings toggle, a deleted registry row — would otherwise resend
+        those blocks on a request with neither, and the API rejects the
+        whole conversation with a 400: "Input tag 'mcp_tool_use' does not
+        match any of the expected tags." That 400 has no self-heal the way
+        `repair_tool_pairing`'s does, because nothing about the pairing is
+        broken — the blocks are perfectly valid, just for a request this
+        one no longer is.
+
+        Unlike that case, MCP call/result pairs live inside a single
+        assistant message rather than spanning two (see
+        `repair_tool_pairing`'s docstring), so only assistant messages need
+        a pass. Every block of a type above is replaced with a short text
+        summary; everything else in the message — the model's own words,
+        plain client tool_use/tool_result — is left exactly as it was.
+
+        Call with `mcp_available=bool(mcp_servers)` for the request about to
+        be sent — the same value already used to build its `mcp_servers`
+        kwarg. A no-op (returns `history` unchanged) when MCP is available,
+        or when nothing in history needs it. Mutates `history` in place and
+        returns it, like `repair_tool_pairing`.
+        """
+        if mcp_available:
+            return history
+        for index, message in enumerate(history):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            if not any(cls._is_mcp_or_deferred_tool_block(block) for block in content):
+                continue
+            replaced = [
+                {"type": "text", "text": cls._mcp_block_summary(block)}
+                if cls._is_mcp_or_deferred_tool_block(block)
+                else block
+                for block in content
+            ]
+            if not replaced:
+                replaced = [{"type": "text", "text": _ORPHANED_TOOL_CALL_TEXT}]
+            history[index] = {**message, "content": replaced}
         return history
 
     @staticmethod
@@ -1425,6 +1515,11 @@ class AgentLoop:
                     # dangling tool_use can also be left by a round that failed
                     # further down in this same loop (see the tool-call loop
                     # below). Cheap no-op when history is already well-formed.
+                    # Sanitize first: an MCP-disabled turn whose history still
+                    # carries mcp_tool_use/mcp_tool_result (or deferred tool
+                    # search) blocks from an earlier, MCP-enabled turn would
+                    # otherwise be rejected outright — see sanitize_mcp_history.
+                    self.sanitize_mcp_history(history, mcp_available=bool(mcp_servers))
                     self.repair_tool_pairing(history)
                     _mark_timing(
                         timer,
@@ -1434,6 +1529,12 @@ class AgentLoop:
                         effort=self.claude_service.effort,
                         tools=len(tools_arg or []),
                         history_msgs=len(history),
+                        # Lets [timing] logs be grouped by MCP on/off so TTFT
+                        # (this mark -> first_text_delta, see TurnStream) can
+                        # be compared across the two — MCP tool discovery and
+                        # schema payload were the ~2.6s/request this whole
+                        # change exists to avoid.
+                        mcp=bool(mcp_servers),
                     )
                     # `timer`/`round_no` are only passed when there is a timer:
                     # several tests stub `stream_response` with a fixed signature
@@ -1495,6 +1596,7 @@ class AgentLoop:
                     )
                     if looks_like_pairing_error:
                         retried_after_pairing_repair = True
+                        self.sanitize_mcp_history(history, mcp_available=bool(mcp_servers))
                         self.repair_tool_pairing(history)
                         early_line = None
                         live = LiveReply()
@@ -2064,7 +2166,10 @@ class AgentLoop:
             while True:
                 try:
                     # Same backstop as the conversation loop: fix any dangling
-                    # tool_use/tool_result pairing before it reaches the API.
+                    # tool_use/tool_result pairing, and any MCP/tool-search
+                    # blocks history can't carry on an MCP-disabled request,
+                    # before it reaches the API.
+                    self.sanitize_mcp_history(history, mcp_available=bool(mcp_servers))
                     self.repair_tool_pairing(history)
                     response = self.claude_service.get_response(
                         "",
@@ -2091,6 +2196,7 @@ class AgentLoop:
                     )
                     if looks_like_pairing_error:
                         retried_after_pairing_repair = True
+                        self.sanitize_mcp_history(history, mcp_available=bool(mcp_servers))
                         self.repair_tool_pairing(history)
                         continue
                     return f"Agent loop failed: {str(exc)}"
