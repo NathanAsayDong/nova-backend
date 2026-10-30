@@ -19,6 +19,22 @@ WEB_SEARCH_TOOL_NAME = "web_search"
 # mcp_toolset entry in tools.
 MCP_CONNECTOR_BETA = "mcp-client-2025-11-20"
 
+# Tool search tool: lets the model discover tools on demand instead of every
+# schema going out on every request. Declared alongside mcp_servers, with
+# every mcp_toolset entry marked defer_loading (see _build_kwargs) — remote
+# MCP tool discovery + schema payload was measured at ~2.6s of added latency
+# per request, almost entirely up-front cost this avoids.
+#
+# BM25 over the regex variant: Pipedream and RHB Intelligence between them
+# expose tool catalogs running from dozens to hundreds of entries with
+# descriptive, inconsistent names (get_level_sensor_cross_tab,
+# qbo_payroll_get_employee_timeoff_assignments, ...) — ranking by relevance
+# to the conversation's own language fits that shape far better than asking
+# the model to author a regex against names it has never seen. Regex would
+# be the better call for a small, pattern-friendly tool set; this isn't one.
+TOOL_SEARCH_TOOL_TYPE = "tool_search_tool_bm25_20251119"
+TOOL_SEARCH_TOOL_NAME = "tool_search_tool_bm25"
+
 
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.getenv(name)
@@ -286,6 +302,17 @@ class ClaudeService:
             "max_uses": self.web_search_max_uses,
         }
 
+    def tool_search_tool(self) -> dict[str, Any]:
+        """
+        Tool-search tool definition, declared whenever MCP servers are attached.
+
+        Must never carry defer_loading itself (the API rejects a request
+        where every tool is deferred), and its presence is what makes
+        marking the mcp_toolset entries defer_loading safe — without it
+        there would be no way for the model to discover a deferred tool.
+        """
+        return {"type": TOOL_SEARCH_TOOL_TYPE, "name": TOOL_SEARCH_TOOL_NAME}
+
     def set_model(self, model: str) -> bool:
         """
         Switch the model used for Claude API calls.
@@ -391,6 +418,15 @@ class ClaudeService:
         method derives the toolsets rather than trusting callers to pair
         them. Entries are sorted by name to keep the tool list byte-stable
         for prompt caching.
+
+        Every mcp_toolset entry is marked defer_loading: the tool's full
+        schema is fetched on demand through the tool search tool (added
+        alongside it) instead of being sent on every request — this is the
+        whole point of attaching remote MCP tools without paying their
+        up-front discovery/schema cost on every turn. Nova's own client
+        tools and web search stay non-deferred: they are the common case on
+        almost every turn, deferring them would trade a one-time MCP cost
+        for a recurring one on every conversation.
         """
         kwargs: dict[str, Any] = {}
         combined_tools = self._build_tools(tools)
@@ -408,10 +444,16 @@ class ClaudeService:
                     entry["authorization_token"] = server["authorization_token"]
                 server_entries.append(entry)
                 toolsets.append(
-                    {"type": "mcp_toolset", "mcp_server_name": server["name"]}
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": server["name"],
+                        "defer_loading": True,
+                    }
                 )
             kwargs["mcp_servers"] = server_entries
-            combined_tools = (combined_tools or []) + toolsets
+            # The tool search tool is what makes the deferred toolsets
+            # discoverable at all, so it always rides along with them.
+            combined_tools = (combined_tools or []) + [self.tool_search_tool()] + toolsets
 
         if combined_tools:
             kwargs["tools"] = combined_tools
