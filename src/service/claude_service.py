@@ -444,7 +444,7 @@ class ClaudeService:
         them. Entries are sorted by name to keep the tool list byte-stable
         for prompt caching.
 
-        Every mcp_toolset entry is marked defer_loading: the tool's full
+        Every mcp_toolset entry sets default_config.defer_loading: the tool's full
         schema is fetched on demand through the tool search tool (added
         alongside it) instead of being sent on every request — this is the
         whole point of attaching remote MCP tools without paying their
@@ -472,7 +472,9 @@ class ClaudeService:
                     {
                         "type": "mcp_toolset",
                         "mcp_server_name": server["name"],
-                        "defer_loading": True,
+                        # defer_loading is rejected directly on mcp_toolset;
+                        # it must live under default_config (or configs[tool]).
+                        "default_config": {"defer_loading": True},
                     }
                 )
             kwargs["mcp_servers"] = server_entries

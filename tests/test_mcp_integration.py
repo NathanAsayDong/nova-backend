@@ -128,7 +128,11 @@ class ClaudeServiceMcpKwargsTests(unittest.TestCase):
         )
         # Deferred loading: schemas for these come on demand through the
         # tool search tool, not on every request.
-        self.assertTrue(all(t["defer_loading"] is True for t in toolsets))
+        self.assertTrue(
+            all(t["default_config"]["defer_loading"] is True for t in toolsets)
+        )
+        # The API rejects defer_loading directly on an mcp_toolset.
+        self.assertTrue(all("defer_loading" not in t for t in toolsets))
 
     def test_no_mcp_servers_means_no_connector_fields(self):
         kwargs = self.service._build_kwargs(tools=None, system=None, mcp_servers=None)
