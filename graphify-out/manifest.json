@@ -372,8 +372,8 @@
     "semantic_hash": "096e91648c58c391cf2da40318d8d1bc"
   },
   "src/harness/agent_loop.py": {
-    "mtime": 1793369826.870676,
-    "seen": 1793382230.352449,
+    "mtime": 1793382417.2314677,
+    "seen": 1793463944.393856,
     "ast_hash": "853a4af7869565fd97e3d507097b76e8",
     "semantic_hash": ""
   },
@@ -510,9 +510,9 @@
     "semantic_hash": "bce64628938fb1628469918c0d268a9f"
   },
   "src/service/claude_service.py": {
-    "mtime": 1793382224.0061526,
-    "seen": 1793382230.3528,
-    "ast_hash": "86dd3c34e1360c7ee740c86d2a92c3c4",
+    "mtime": 1793463938.110443,
+    "seen": 1793463944.3944929,
+    "ast_hash": "5a1066a20128bb5c9709ff6d2bf7dd33",
     "semantic_hash": ""
   },
   "src/service/code_service.py": {
@@ -696,8 +696,8 @@
     "semantic_hash": "aac29a19c0217b4b059e420d60682914"
   },
   "tests/test_claude_service.py": {
-    "mtime": 1793320323.2995703,
-    "seen": 1793382230.3531919,
+    "mtime": 1793382417.232316,
+    "seen": 1793463944.395293,
     "ast_hash": "8da1c4726dfab5c56e12f141e3fb82ff",
     "semantic_hash": ""
   },
@@ -750,9 +750,9 @@
     "semantic_hash": "59366ff5b3452f567df4c642b0d9f6e7"
   },
   "tests/test_mcp_integration.py": {
-    "mtime": 1793369826.8713317,
-    "seen": 1793382230.353269,
-    "ast_hash": "9e636ac5bcc2413698d578039806762b",
+    "mtime": 1793463937.5283594,
+    "seen": 1793463944.395536,
+    "ast_hash": "8a1e90030332994197c5aa45a365406c",
     "semantic_hash": ""
   },
   "tests/test_mcp_oauth.py": {
@@ -1338,8 +1338,8 @@
     "semantic_hash": ""
   },
   "scripts/effort_latency_bench.py": {
-    "mtime": 1793369826.8883107,
-    "seen": 1793382230.351976,
+    "mtime": 1793382427.4200442,
+    "seen": 1793463944.392858,
     "ast_hash": "95f33ada241ce660197b8a60a506b53a",
     "semantic_hash": ""
   },
