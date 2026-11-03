@@ -7,9 +7,10 @@ from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 
 # Sonic is Cartesia's low-latency TTS model family, the Cartesia equivalent of
 # ElevenLabs' Flash model: built for sentence-by-sentence speech rather than
-# one long narration. "sonic-2" is the current generation; override with
-# CARTESIA_MODEL_ID for an older/newer one (e.g. "sonic-english").
-DEFAULT_CARTESIA_MODEL_ID = "sonic-2"
+# one long narration. "sonic-3" is the current generation (also the first to
+# support generation_config.emotion, see CARTESIA_EMOTION below); override
+# with CARTESIA_MODEL_ID for an older/newer one (e.g. "sonic-3.6").
+DEFAULT_CARTESIA_MODEL_ID = "sonic-3"
 
 # A public library voice from Cartesia's own docs/playground ("Brooke"),
 # present on every account, so the service still starts without a voice
@@ -17,11 +18,22 @@ DEFAULT_CARTESIA_MODEL_ID = "sonic-2"
 DEFAULT_CARTESIA_VOICE_ID = "694f9389-aac1-45b6-b726-9d9369183238"
 
 # Cartesia versions its API by request date, not a semver header; this is the
-# version this integration was written against. Override with
-# CARTESIA_API_VERSION if Cartesia ships a breaking change and a newer
+# current version per Cartesia's docs as of 2026-11-03. Override with
+# CARTESIA_API_VERSION if Cartesia ships a breaking change and an even newer
 # snapshot is needed.
-DEFAULT_CARTESIA_API_VERSION = "2024-11-13"
+DEFAULT_CARTESIA_API_VERSION = "2026-08-14"
 DEFAULT_CARTESIA_LANGUAGE = "en"
+
+# generation_config.emotion, sonic-3 and newer only. Cartesia's predefined
+# list includes at least neutral/calm/angry/content/sad/scared; Nova only
+# exposes the two that make sense for an assistant's voice. "content" is a
+# steady, unremarkable delivery — the right default for most replies —
+# "excited" is for lines that call for it. CARTESIA_EMOTION is validated
+# against exactly these two; anything else (typo, unset, a value from a
+# model generation that doesn't support it) falls back to "content" rather
+# than sending something Cartesia might reject.
+CARTESIA_EMOTION_CHOICES = {"content", "excited"}
+DEFAULT_CARTESIA_EMOTION = "content"
 
 # mp3, so the rest of the pipeline (chunked over the voice websocket, decoded
 # client-side) sees the same container as ElevenLabs and OpenAI and neither
@@ -61,6 +73,12 @@ class CartesiaService:
         self.sample_rate = DEFAULT_CARTESIA_SAMPLE_RATE
         self.bit_rate = DEFAULT_CARTESIA_BIT_RATE
 
+        requested_emotion = (os.getenv("CARTESIA_EMOTION") or "").strip().lower()
+        self.emotion = (
+            requested_emotion if requested_emotion in CARTESIA_EMOTION_CHOICES
+            else DEFAULT_CARTESIA_EMOTION
+        )
+
         # One pooled connection for every clip, same reasoning as
         # ElevenLabsService: a fresh request per sentence would pay a TCP +
         # TLS handshake to api.cartesia.ai each time.
@@ -73,7 +91,10 @@ class CartesiaService:
             }
         )
 
-        print(f"Cartesia TTS: model {self.model_id}, voice id {self.voice_id}")
+        print(
+            f"Cartesia TTS: model {self.model_id}, voice id {self.voice_id}, "
+            f"emotion {self.emotion}"
+        )
 
     def stream_text_to_speech(
         self,
@@ -101,6 +122,9 @@ class CartesiaService:
                 "container": "mp3",
                 "sample_rate": self.sample_rate,
                 "bit_rate": self.bit_rate,
+            },
+            "generation_config": {
+                "emotion": self.emotion,
             },
         }
 

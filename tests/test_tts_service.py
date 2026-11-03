@@ -288,6 +288,8 @@ class CartesiaRequestTests(unittest.TestCase):
         env = {**self.CARTESIA_ENV, **overrides}
         env = {k: v for k, v in env.items() if v is not None}
         env.setdefault("CARTESIA_MODEL_ID", "")
+        env.setdefault("CARTESIA_API_VERSION", "")
+        env.setdefault("CARTESIA_EMOTION", "")
         return patch.dict(os.environ, env, clear=False)
 
     def test_missing_api_key_raises_value_error(self):
@@ -295,11 +297,47 @@ class CartesiaRequestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 CartesiaService()
 
-    def test_sonic_2_is_the_default_model_and_overridable(self):
+    def test_sonic_3_is_the_default_model_and_overridable(self):
         with self._env():
-            self.assertEqual(CartesiaService().model_id, "sonic-2")
-        with self._env(CARTESIA_MODEL_ID="sonic-english"):
-            self.assertEqual(CartesiaService().model_id, "sonic-english")
+            self.assertEqual(CartesiaService().model_id, "sonic-3")
+        with self._env(CARTESIA_MODEL_ID="sonic-3.6"):
+            self.assertEqual(CartesiaService().model_id, "sonic-3.6")
+
+    def test_default_api_version_header_is_sent(self):
+        with self._env():
+            service = CartesiaService()
+        self.assertEqual(service.api_version, "2026-08-14")
+        self.assertEqual(service.session.headers["Cartesia-Version"], "2026-08-14")
+
+    def test_api_version_is_overridable(self):
+        with self._env(CARTESIA_API_VERSION="2099-01-01"):
+            service = CartesiaService()
+        self.assertEqual(service.session.headers["Cartesia-Version"], "2099-01-01")
+
+    def test_content_is_the_default_emotion(self):
+        with self._env():
+            self.assertEqual(CartesiaService().emotion, "content")
+
+    def test_emotion_env_var_accepts_excited(self):
+        with self._env(CARTESIA_EMOTION="excited"):
+            self.assertEqual(CartesiaService().emotion, "excited")
+
+    def test_emotion_env_var_accepts_content_explicitly(self):
+        with self._env(CARTESIA_EMOTION="content"):
+            self.assertEqual(CartesiaService().emotion, "content")
+
+    def test_emotion_env_var_is_case_insensitive(self):
+        with self._env(CARTESIA_EMOTION="EXCITED"):
+            self.assertEqual(CartesiaService().emotion, "excited")
+
+    def test_invalid_emotion_falls_back_to_content(self):
+        for invalid in ("angry", "ecstatic", "not-a-real-emotion", "  "):
+            with self._env(CARTESIA_EMOTION=invalid):
+                self.assertEqual(
+                    CartesiaService().emotion,
+                    "content",
+                    f"expected fallback to content for {invalid!r}",
+                )
 
     def test_request_uses_voice_id_and_mp3_output_format(self):
         with self._env():
@@ -316,6 +354,32 @@ class CartesiaRequestTests(unittest.TestCase):
         self.assertEqual(body["voice"], {"mode": "id", "id": "test-voice"})
         self.assertEqual(body["output_format"]["container"], "mp3")
         self.assertEqual(body["transcript"], "Now.")
+
+    def test_request_body_carries_the_configured_emotion(self):
+        with self._env(CARTESIA_EMOTION="excited"):
+            service = CartesiaService()
+        response = MagicMock(ok=True)
+        response.__enter__.return_value = response
+        response.iter_content.return_value = iter([b"mp3"])
+        service.session.post = MagicMock(return_value=response)
+
+        list(service.stream_text_to_speech("Now."))
+
+        body = service.session.post.call_args.kwargs["json"]
+        self.assertEqual(body["generation_config"], {"emotion": "excited"})
+
+    def test_request_body_falls_back_to_content_in_generation_config(self):
+        with self._env(CARTESIA_EMOTION="bogus"):
+            service = CartesiaService()
+        response = MagicMock(ok=True)
+        response.__enter__.return_value = response
+        response.iter_content.return_value = iter([b"mp3"])
+        service.session.post = MagicMock(return_value=response)
+
+        list(service.stream_text_to_speech("Now."))
+
+        body = service.session.post.call_args.kwargs["json"]
+        self.assertEqual(body["generation_config"], {"emotion": "content"})
 
     def test_failure_response_raises_with_status_and_body(self):
         with self._env():
