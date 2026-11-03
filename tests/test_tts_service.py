@@ -38,6 +38,7 @@ def _env(**overrides):
         "ELEVEN_LABS_API",
         "CARTESIA_API_KEY",
         "CARTESIA_VOICE_ID",
+        "TTS_PROVIDER_COOLDOWN_SECONDS",
     ):
         env.setdefault(key, "")
     return patch.dict(os.environ, env, clear=False)
@@ -46,7 +47,13 @@ def _env(**overrides):
 def _full_chain_env(**overrides):
     env = {**FULL_CHAIN_ENV, **overrides}
     env = {k: v for k, v in env.items() if v is not None}
-    for key in ("TTS_PROVIDER", "TTS_MODEL", "ELEVEN_LABS_MODEL_ID", "ELEVEN_LABS_API"):
+    for key in (
+        "TTS_PROVIDER",
+        "TTS_MODEL",
+        "ELEVEN_LABS_MODEL_ID",
+        "ELEVEN_LABS_API",
+        "TTS_PROVIDER_COOLDOWN_SECONDS",
+    ):
         env.setdefault(key, "")
     return patch.dict(os.environ, env, clear=False)
 
@@ -59,7 +66,9 @@ def _mock_chain(service: tts_service.TTSService, *names: str) -> None:
     credentials during __init__, but nothing beyond that must run for real.
     """
     service.chain = [
-        tts_service._ChainedProvider(name, MagicMock(), tts_service.TTS_FALLBACK_COOLDOWN_SECONDS)
+        tts_service._ChainedProvider(
+            name, MagicMock(), tts_service.DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS
+        )
         for name in names
     ]
     service.primary = service.chain[0].service
@@ -254,6 +263,95 @@ class FallbackChainTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             next(chunks)
         service.chain[1].service.stream_text_to_speech.assert_not_called()
+
+
+class CooldownTests(unittest.TestCase):
+    """The three-hour (by default) cooldown clock: its default and env-var
+    override, that a provider in cooldown is skipped without ever being
+    called, and that it is retried once its cooldown has elapsed. All driven
+    by a fake clock (`time.monotonic` patched to a controllable value) —
+    nothing here sleeps."""
+
+    def _service(self, *names: str) -> tts_service.TTSService:
+        with _env():
+            service = tts_service.TTSService()
+        _mock_chain(service, *names)
+        return service
+
+    def _refuses(self, message: str):
+        def refused():
+            raise RuntimeError(message)
+            yield b""  # pragma: no cover
+
+        return refused
+
+    def test_default_cooldown_is_three_hours(self):
+        self.assertEqual(tts_service.DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS, 10800)
+        with _env():
+            service = tts_service.TTSService()
+        self.assertTrue(all(p.cooldown_seconds == 10800 for p in service.chain))
+
+    def test_cooldown_is_configurable_via_env_var(self):
+        with _env(TTS_PROVIDER_COOLDOWN_SECONDS="60"):
+            service = tts_service.TTSService()
+        self.assertTrue(all(p.cooldown_seconds == 60 for p in service.chain))
+
+    def test_invalid_cooldown_env_var_falls_back_to_the_three_hour_default(self):
+        with _env(TTS_PROVIDER_COOLDOWN_SECONDS="not-a-number"):
+            service = tts_service.TTSService()
+        self.assertTrue(all(p.cooldown_seconds == 10800 for p in service.chain))
+
+    def test_negative_cooldown_env_var_falls_back_to_the_three_hour_default(self):
+        with _env(TTS_PROVIDER_COOLDOWN_SECONDS="-5"):
+            service = tts_service.TTSService()
+        self.assertTrue(all(p.cooldown_seconds == 10800 for p in service.chain))
+
+    def test_a_provider_in_cooldown_is_skipped_with_no_network_attempt(self):
+        service = self._service("elevenlabs", "cartesia", "openai")
+        service.chain[1].service.stream_text_to_speech.side_effect = (
+            lambda *a, **k: iter([b"cartesia-audio"])
+        )
+        clock = [1_000.0]
+        with patch.object(tts_service.time, "monotonic", side_effect=lambda: clock[0]):
+            # ElevenLabs already failed earlier and is down for three hours.
+            service.chain[0].down_until = clock[0] + 10800
+
+            audio = list(service.stream_text_to_speech("Hello."))
+
+        self.assertEqual(audio, [b"cartesia-audio"])
+        service.chain[0].service.stream_text_to_speech.assert_not_called()
+
+    def test_provider_is_retried_once_its_cooldown_expires(self):
+        service = self._service("elevenlabs", "openai")
+        service.chain[0].service.stream_text_to_speech.side_effect = (
+            lambda *a, **k: self._refuses("ElevenLabs TTS failed (401)")()
+        )
+        service.chain[1].service.stream_text_to_speech.side_effect = (
+            lambda *a, **k: iter([b"openai-audio"])
+        )
+        clock = [1_000.0]
+        with patch.object(tts_service.time, "monotonic", side_effect=lambda: clock[0]):
+            # First line: ElevenLabs fails for real and is put into a
+            # three-hour cooldown measured from this fake "now".
+            audio = list(service.stream_text_to_speech("One."))
+            self.assertEqual(audio, [b"openai-audio"])
+            self.assertEqual(service.chain[0].down_until, clock[0] + 10800)
+
+            # Just short of three hours later: still skipped, no attempt.
+            clock[0] += 10800 - 1
+            service.chain[0].service.stream_text_to_speech.reset_mock()
+            list(service.stream_text_to_speech("Two."))
+            service.chain[0].service.stream_text_to_speech.assert_not_called()
+
+            # The cooldown has now elapsed: ElevenLabs is tried again.
+            clock[0] += 2
+            service.chain[0].service.stream_text_to_speech.side_effect = (
+                lambda *a, **k: iter([b"elevenlabs-audio"])
+            )
+            audio = list(service.stream_text_to_speech("Three."))
+
+        self.assertEqual(audio, [b"elevenlabs-audio"])
+        service.chain[0].service.stream_text_to_speech.assert_called_once()
 
 
 class ElevenLabsRequestTests(unittest.TestCase):

@@ -21,10 +21,35 @@ OPENAI_TTS_MAX_RETRIES = 3
 # After a provider refuses a clip, how long to skip straight past it to the
 # next one in the chain. A refusal is usually a plan or quota problem that
 # will not fix itself between sentences, and retrying it first would add a
-# failed round trip to every line Nova says. Each provider in the chain keeps
-# its own cooldown clock (see TTSService), so one dead provider's cooldown
-# never affects another's.
-TTS_FALLBACK_COOLDOWN_SECONDS = 600
+# failed round trip to every line Nova says. Three hours, not ten minutes,
+# because a plan/quota problem is typically a same-day thing to notice and
+# fix, not something that clears itself within the next few turns — and a
+# provider's own cooldown never affects another's: ElevenLabs failing falls
+# to Cartesia immediately, and Cartesia is retried on its own three-hour
+# clock regardless of whether ElevenLabs has recovered. Override with
+# TTS_PROVIDER_COOLDOWN_SECONDS.
+DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS = 10800
+
+
+def _provider_cooldown_seconds() -> float:
+    raw = (os.getenv("TTS_PROVIDER_COOLDOWN_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        print(
+            f"TTS_PROVIDER_COOLDOWN_SECONDS={raw!r} is not a number; using "
+            f"{DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS}."
+        )
+        return DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS
+    if value < 0:
+        print(
+            f"TTS_PROVIDER_COOLDOWN_SECONDS={raw!r} is negative; using "
+            f"{DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS}."
+        )
+        return DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS
+    return value
 
 ELEVEN_LABS_ALIASES = {"elevenlabs", "eleven-labs", "eleven_labs", "11labs", "eleven"}
 
@@ -170,21 +195,22 @@ class TTSService:
 
     Each provider in the chain keeps its own cooldown: after ElevenLabs
     refuses a clip, lines go straight to Cartesia (skipping a doomed retry)
-    for TTS_FALLBACK_COOLDOWN_SECONDS, but Cartesia is tried fresh on every
-    line unless Cartesia has *also* failed recently. A dead Cartesia account
-    therefore never adds a failed-request's worth of latency to a turn that
-    only needed to fall through to it once.
+    for TTS_PROVIDER_COOLDOWN_SECONDS (default three hours), but Cartesia is
+    tried fresh on every line unless Cartesia has *also* failed recently. A
+    dead Cartesia account therefore never adds a failed-request's worth of
+    latency to a turn that only needed to fall through to it once.
     """
 
     def __init__(self) -> None:
         requested = _requested_provider()
+        cooldown_seconds = _provider_cooldown_seconds()
 
         if requested == "openai":
             # Explicit opt-out: skip ElevenLabs and Cartesia entirely, and if
             # OpenAI itself is not configured, let that error propagate — the
             # user asked for exactly one provider.
             self.chain = [
-                _ChainedProvider("openai", OpenAITTS(), TTS_FALLBACK_COOLDOWN_SECONDS)
+                _ChainedProvider("openai", OpenAITTS(), cooldown_seconds)
             ]
         else:
             built: list[tuple[str, object]] = []
@@ -214,7 +240,7 @@ class TTSService:
                 )
 
             self.chain = [
-                _ChainedProvider(name, service, TTS_FALLBACK_COOLDOWN_SECONDS)
+                _ChainedProvider(name, service, cooldown_seconds)
                 for name, service in built
             ]
 
@@ -265,7 +291,7 @@ class TTSService:
                 link.down_until = time.monotonic() + link.cooldown_seconds
                 print(
                     f"{link.name} TTS failed; using the next provider for the "
-                    f"next {link.cooldown_seconds // 60:.0f} minutes: {exc}"
+                    f"next {link.cooldown_seconds / 3600:.1f} hours: {exc}"
                 )
                 _mark_timing(
                     timer,

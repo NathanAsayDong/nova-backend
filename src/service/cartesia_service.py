@@ -15,7 +15,7 @@ DEFAULT_CARTESIA_MODEL_ID = "sonic-3"
 # A public library voice from Cartesia's own docs/playground ("Brooke"),
 # present on every account, so the service still starts without a voice
 # picked out yet. Set CARTESIA_VOICE_ID to Nova's own voice once one exists.
-DEFAULT_CARTESIA_VOICE_ID = "694f9389-aac1-45b6-b726-9d9369183238"
+DEFAULT_CARTESIA_VOICE_ID = "47c38ca4-5f35-497b-b1a3-415245fb35e1"
 
 # Cartesia versions its API by request date, not a semver header; this is the
 # current version per Cartesia's docs as of 2026-11-03. Override with
