@@ -18,11 +18,38 @@ OPENAI_TTS_INSTRUCTIONS = (
 OPENAI_TTS_READ_TIMEOUT_SECONDS = 4
 OPENAI_TTS_MAX_RETRIES = 3
 
-# After the primary provider refuses a clip, how long to send lines straight to
-# the fallback. A refusal is usually a plan or quota problem that will not fix
-# itself between sentences, and retrying it first would add a failed round trip
-# to every line Nova says.
-PRIMARY_COOLDOWN_SECONDS = 600
+# After a provider refuses a clip, how long to skip straight past it to the
+# next one in the chain. A refusal is usually a plan or quota problem that
+# will not fix itself between sentences, and retrying it first would add a
+# failed round trip to every line Nova says. Three hours, not ten minutes,
+# because a plan/quota problem is typically a same-day thing to notice and
+# fix, not something that clears itself within the next few turns — and a
+# provider's own cooldown never affects another's: ElevenLabs failing falls
+# to Cartesia immediately, and Cartesia is retried on its own three-hour
+# clock regardless of whether ElevenLabs has recovered. Override with
+# TTS_PROVIDER_COOLDOWN_SECONDS.
+DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS = 10800
+
+
+def _provider_cooldown_seconds() -> float:
+    raw = (os.getenv("TTS_PROVIDER_COOLDOWN_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        print(
+            f"TTS_PROVIDER_COOLDOWN_SECONDS={raw!r} is not a number; using "
+            f"{DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS}."
+        )
+        return DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS
+    if value < 0:
+        print(
+            f"TTS_PROVIDER_COOLDOWN_SECONDS={raw!r} is negative; using "
+            f"{DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS}."
+        )
+        return DEFAULT_TTS_PROVIDER_COOLDOWN_SECONDS
+    return value
 
 ELEVEN_LABS_ALIASES = {"elevenlabs", "eleven-labs", "eleven_labs", "11labs", "eleven"}
 
@@ -34,6 +61,10 @@ def _requested_provider() -> str:
     TTS_MODEL=elevenlabs is still honoured, because that is how ElevenLabs used
     to be switched on; any other TTS_MODEL value names an OpenAI model and so
     implies the OpenAI provider when TTS_PROVIDER is unset.
+
+    "openai" is a full opt-out: every other provider (ElevenLabs, Cartesia) is
+    skipped even if configured, and nothing is tried if OpenAI itself fails —
+    the explicit choice of a single provider is not overridden by the chain.
     """
     provider = (os.getenv("TTS_PROVIDER") or "").strip().lower()
     if provider:
@@ -126,42 +157,101 @@ class OpenAITTS:
         return "audio/mpeg"
 
 
+class _ChainedProvider:
+    """One link in TTSService's fallback chain: a provider plus its own,
+    independent cooldown clock."""
+
+    __slots__ = ("name", "service", "cooldown_seconds", "down_until")
+
+    def __init__(self, name: str, service, cooldown_seconds: float) -> None:
+        self.name = name
+        self.service = service
+        self.cooldown_seconds = cooldown_seconds
+        self.down_until = 0.0
+
+
+def _build_provider(name: str, factory) -> "object | None":
+    """Construct a provider, or return None (with a console note) if it is
+    not configured. A provider missing its API key is not an error — it is
+    just absent from the chain, same as before Cartesia existed."""
+    try:
+        return factory()
+    except (ValueError, RuntimeError) as exc:
+        print(f"{name} TTS unavailable ({exc}); skipping.")
+        return None
+
+
 class TTSService:
     """
-    Nova's voice. ElevenLabs by default, OpenAI as the fallback.
+    Nova's voice: ElevenLabs, then Cartesia, then OpenAI.
 
-    The fallback matters because the voice is the whole interface on a voice
-    turn: if ElevenLabs refuses a clip (plan lapsed, quota spent, network
-    blip) before any audio has gone out, the same line is spoken through
-    OpenAI rather than Nova going silent. Both produce MP3, so the client
-    never knows. Once ElevenLabs has started streaming a clip, a failure is
-    raised as before — splicing a second voice into half a sentence is worse
-    than stopping.
+    The fallback chain matters because the voice is the whole interface on a
+    voice turn: if a provider refuses a clip (plan lapsed, quota spent,
+    network blip) before any audio has gone out, the same line is spoken
+    through the next provider in the chain rather than Nova going silent. All
+    three produce MP3, so the client never knows. Once a provider has started
+    streaming a clip, a failure is raised as before — splicing a second voice
+    into half a sentence is worse than stopping.
+
+    Each provider in the chain keeps its own cooldown: after ElevenLabs
+    refuses a clip, lines go straight to Cartesia (skipping a doomed retry)
+    for TTS_PROVIDER_COOLDOWN_SECONDS (default three hours), but Cartesia is
+    tried fresh on every line unless Cartesia has *also* failed recently. A
+    dead Cartesia account therefore never adds a failed-request's worth of
+    latency to a turn that only needed to fall through to it once.
     """
 
     def __init__(self) -> None:
-        self.primary = None
-        self.fallback = None
-        self._primary_down_until = 0.0
+        requested = _requested_provider()
+        cooldown_seconds = _provider_cooldown_seconds()
 
-        if _requested_provider() == "openai":
-            self.primary = OpenAITTS()
+        if requested == "openai":
+            # Explicit opt-out: skip ElevenLabs and Cartesia entirely, and if
+            # OpenAI itself is not configured, let that error propagate — the
+            # user asked for exactly one provider.
+            self.chain = [
+                _ChainedProvider("openai", OpenAITTS(), cooldown_seconds)
+            ]
         else:
-            try:
+            built: list[tuple[str, object]] = []
+
+            def _eleven_labs():
                 from src.service.eleven_labs_service import ElevenLabsService
 
-                self.primary = ElevenLabsService()
-            except ValueError as exc:
-                print(f"ElevenLabs TTS unavailable ({exc}); using OpenAI TTS.")
-                self.primary = OpenAITTS()
-            else:
-                try:
-                    self.fallback = OpenAITTS()
-                except RuntimeError:
-                    self.fallback = None
+                return ElevenLabsService()
 
-        self.provider = "openai" if isinstance(self.primary, OpenAITTS) else "elevenlabs"
-        print(f"TTS provider: {self.provider}" + (" (OpenAI fallback)" if self.fallback else ""))
+            def _cartesia():
+                from src.service.cartesia_service import CartesiaService
+
+                return CartesiaService()
+
+            for name, display_name, factory in (
+                ("elevenlabs", "ElevenLabs", _eleven_labs),
+                ("cartesia", "Cartesia", _cartesia),
+                ("openai", "OpenAI", OpenAITTS),
+            ):
+                service = _build_provider(display_name, factory)
+                if service is not None:
+                    built.append((name, service))
+
+            if not built:
+                raise RuntimeError(
+                    "No TTS provider is configured (checked ElevenLabs, Cartesia, OpenAI)."
+                )
+
+            self.chain = [
+                _ChainedProvider(name, service, cooldown_seconds)
+                for name, service in built
+            ]
+
+        # Back-compat surface for existing callers/tests: the active
+        # (first-choice) provider, and the first thing after it to try.
+        self.primary = self.chain[0].service
+        self.fallback = self.chain[1].service if len(self.chain) > 1 else None
+        self.provider = self.chain[0].name
+
+        chain_names = " -> ".join(p.name for p in self.chain)
+        print(f"TTS provider chain: {chain_names}")
 
     def stream_text_to_speech(
         self,
@@ -170,49 +260,64 @@ class TTSService:
         previous_text: str | None = None,
         timer: "TurnTimer | None" = None,
     ) -> Iterator[bytes]:
-        if self.fallback is not None and time.monotonic() < self._primary_down_until:
-            _mark_timing(
-                timer, "tts_provider", provider="openai", cooldown=True, chars=len(text)
-            )
-            yield from self.fallback.stream_text_to_speech(
-                text, chunk_size=chunk_size, timer=timer
-            )
-            return
+        last_exc: Exception | None = None
 
-        _mark_timing(
-            timer, "tts_provider", provider=self.provider, cooldown=False, chars=len(text)
-        )
-        chunks = self.primary.stream_text_to_speech(
-            text, chunk_size=chunk_size, previous_text=previous_text, timer=timer
-        )
-        try:
-            first = next(chunks, None)
-        except Exception as exc:
-            if self.fallback is None:
-                raise
-            self._primary_down_until = time.monotonic() + PRIMARY_COOLDOWN_SECONDS
-            print(
-                f"{self.provider} TTS failed; using OpenAI for the next "
-                f"{PRIMARY_COOLDOWN_SECONDS // 60} minutes: {exc}"
-            )
+        for index, link in enumerate(self.chain):
+            now = time.monotonic()
+            if link.down_until > now:
+                _mark_timing(
+                    timer,
+                    "tts_provider_skipped",
+                    provider=link.name,
+                    cooldown=True,
+                    chars=len(text),
+                )
+                continue
+
             _mark_timing(
                 timer,
-                "tts_fallback_switch",
-                from_provider=self.provider,
-                reason=str(exc)[:80],
+                "tts_provider",
+                provider=link.name,
+                cooldown=False,
+                chars=len(text),
+                attempt=index,
             )
-            yield from self.fallback.stream_text_to_speech(
-                text, chunk_size=chunk_size, timer=timer
+            chunks = link.service.stream_text_to_speech(
+                text, chunk_size=chunk_size, previous_text=previous_text, timer=timer
             )
+            try:
+                first = next(chunks, None)
+            except Exception as exc:
+                link.down_until = time.monotonic() + link.cooldown_seconds
+                print(
+                    f"{link.name} TTS failed; using the next provider for the "
+                    f"next {link.cooldown_seconds / 3600:.1f} hours: {exc}"
+                )
+                _mark_timing(
+                    timer,
+                    "tts_fallback_switch",
+                    from_provider=link.name,
+                    reason=str(exc)[:80],
+                )
+                last_exc = exc
+                continue
+
+            # Reached a provider that answered: stream it. A failure from
+            # here on (mid-clip) is raised, not caught — splicing a second
+            # voice into a half-spoken sentence is worse than stopping.
+            if first is not None:
+                yield first
+            yield from chunks
             return
 
-        if first is not None:
-            yield first
-        yield from chunks
+        # Every provider in the chain is either in cooldown or just failed.
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("No TTS provider in the chain is currently available.")
 
     def text_to_speech(self, text: str) -> tuple[bytes, str]:
         audio_bytes = b"".join(self.stream_text_to_speech(text))
         return audio_bytes, self.output_mime_type()
 
     def output_mime_type(self) -> str:
-        return self.primary.output_mime_type()
+        return self.chain[0].service.output_mime_type()

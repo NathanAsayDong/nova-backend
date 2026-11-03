@@ -41,7 +41,7 @@ class PromptSourceEnum(StrEnum):
         "work runs across several steps, a short line before each one saying "
         "where you are is welcome — silence while you work sounds like you "
         "stopped. Say something different each time or say nothing; repeating "
-        "\"let me check that\" is worse than quiet.\n"
+        "\"let me check that\" is worse than quiet."
         "\n"
         "The reply that finishes the turn, including the one you write after "
         "tool results come back, is the answer the user has been waiting "
