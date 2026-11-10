@@ -20,11 +20,12 @@ never fails on import, and constructing TTSService() at app startup never
 pays the (multi-second, multi-GB) model load cost before it is needed. See
 README / docs/QWEN_TTS.md for install steps.
 
-Known-unverified: this environment has no CUDA GPU, so the actual qwen_tts
-streaming call shape in `_generate_pcm_chunks` below was written against the
-Qwen3-TTS repo's documented API rather than exercised against real hardware.
-See docs/QWEN_TTS.md and the PR description for exactly what to check on the
-tower.
+API: `qwen_tts.Qwen3TTSModel.from_pretrained(...)` and
+`model.generate_custom_voice(text=, language=, speaker=)`, which returns the
+whole utterance as `(wavs, sample_rate)` — the documented Python API has no
+chunk-yielding streaming call, so a line is synthesized in full and then
+mp3-encoded and yielded in slices. Matches the qwen-tts README (PyPI 0.1.1);
+not yet exercised on the tower's GPU — see docs/QWEN_TTS.md.
 """
 
 import os
@@ -43,15 +44,17 @@ from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 # QWEN_TTS_MODEL (e.g. a 1.7B CustomVoice checkpoint) once more VRAM is free.
 DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 
-# A placeholder preset voice name; set QWEN_TTS_VOICE to whichever of
-# CustomVoice's preset voices Nova should actually use.
-DEFAULT_QWEN_TTS_VOICE = "default"
+# CustomVoice preset speaker. The checkpoint ships nine (Vivian, Serena,
+# Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee); Ryan and Aiden are the
+# native-English ones. Override with QWEN_TTS_VOICE.
+DEFAULT_QWEN_TTS_VOICE = "Ryan"
+# Passed as `language=`; "Auto" lets the model detect it per line.
+DEFAULT_QWEN_TTS_LANGUAGE = "English"
 DEFAULT_QWEN_TTS_DEVICE = "cuda"
-
-# Qwen3-TTS's documented native output rate for the 12Hz checkpoints. Override
-# with QWEN_TTS_SAMPLE_RATE if a different checkpoint family uses another one.
-DEFAULT_QWEN_TTS_SAMPLE_RATE = 24000
 DEFAULT_QWEN_TTS_MP3_BIT_RATE = 128
+
+# How much audio (in seconds) goes into each mp3 chunk yielded downstream.
+_MP3_SLICE_SECONDS = 0.5
 
 # Local inference, so a refusal almost always means "the model/GPU isn't
 # usable right now" (OOM, driver hiccup, still loading) rather than a
@@ -107,23 +110,54 @@ def _load_model(model_name: str, device: str, dtype_name: str) -> Any:
         )
 
     try:
-        from qwen_tts import Qwen3TTS  # type: ignore
+        from qwen_tts import Qwen3TTSModel  # type: ignore
     except ImportError as exc:
         raise RuntimeError(
-            "The `qwen-tts` package is not installed. Install the optional "
-            "`qwen` extra and the Qwen3-TTS package — see docs/QWEN_TTS.md."
+            "The `qwen-tts` package is not installed (`uv pip install qwen-tts`) "
+            "— see docs/QWEN_TTS.md."
         ) from exc
 
-    dtype = torch.bfloat16 if dtype_name == "bfloat16" else None
+    kwargs: dict[str, Any] = {"device_map": _device_map(device)}
+    if dtype_name == "bfloat16":
+        kwargs["dtype"] = torch.bfloat16
+    attn = _attn_implementation()
+    if attn:
+        kwargs["attn_implementation"] = attn
     try:
-        return Qwen3TTS.from_pretrained(model_name, device=device, torch_dtype=dtype)
+        return Qwen3TTSModel.from_pretrained(model_name, **kwargs)
     except Exception as exc:
+        if "attn_implementation" in kwargs and not os.getenv("QWEN_TTS_ATTN"):
+            # The model class may not accept the auto-picked attention
+            # backend; retry with whatever it defaults to.
+            kwargs.pop("attn_implementation")
+            try:
+                return Qwen3TTSModel.from_pretrained(model_name, **kwargs)
+            except Exception as retry_exc:
+                exc = retry_exc
         raise RuntimeError(
             f"Could not load Qwen3-TTS weights for {model_name!r}: {exc}. "
             "Confirm the checkpoint has been downloaded (see "
             "docs/QWEN_TTS.md) and that QWEN_TTS_MODEL names a valid "
             "Hugging Face repo id."
         ) from exc
+
+
+def _device_map(device: str) -> str:
+    # qwen-tts takes a transformers-style device_map; "cuda" alone means the
+    # first GPU. "cuda:1", "cpu", etc. pass through unchanged.
+    return "cuda:0" if device == "cuda" else device
+
+
+def _attn_implementation() -> str | None:
+    """FlashAttention 2 when flash-attn is installed (the README's
+    recommendation, lower VRAM), else PyTorch's built-in SDPA. QWEN_TTS_ATTN
+    overrides; set it to "default" to pass nothing and let the model pick."""
+    override = (os.getenv("QWEN_TTS_ATTN") or "").strip()
+    if override:
+        return None if override.lower() == "default" else override
+    import importlib.util
+
+    return "flash_attention_2" if importlib.util.find_spec("flash_attn") else "sdpa"
 
 
 def _get_model(model_name: str, device: str, dtype_name: str) -> Any:
@@ -176,28 +210,27 @@ def _mp3_encoder(sample_rate: int, bit_rate: int) -> Any:
     return encoder
 
 
-def _generate_pcm_chunks(model: Any, text: str, voice: str, sample_rate: int) -> Iterator[bytes]:
+def _synthesize(model: Any, text: str, speaker: str, language: str) -> tuple[bytes, int]:
     """
-    Adapter over qwen_tts's streaming generation call.
+    Run one CustomVoice generation and return (mono int16 PCM bytes, sample rate).
 
-    Assumed shape: `model.stream_generate(text=..., voice=..., sample_rate=...)`
-    yields successive mono frames, each either raw int16 PCM bytes or an
-    array-like of floats in [-1, 1] / int16 samples. This was written against
-    the Qwen3-TTS repo's documented "dual-track streaming" API, not verified
-    against real hardware (no CUDA GPU in this environment) — see
-    docs/QWEN_TTS.md. If the installed qwen-tts version's API differs, this
-    is the only function that needs to change.
+    `generate_custom_voice` returns `(wavs, sr)` where `wavs[0]` is the
+    waveform for our single input — a float array (numpy or torch) in
+    [-1, 1], or int16 samples. The sample rate comes from the model rather
+    than being assumed.
     """
     import numpy as np
 
-    for piece in model.stream_generate(text=text, voice=voice, sample_rate=sample_rate):
-        if isinstance(piece, (bytes, bytearray)):
-            yield bytes(piece)
-            continue
-        arr = np.asarray(piece)
-        if arr.dtype != np.int16:
-            arr = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)
-        yield arr.tobytes()
+    wavs, sample_rate = model.generate_custom_voice(
+        text=text, language=language, speaker=speaker
+    )
+    wav = wavs[0]
+    if hasattr(wav, "detach"):  # torch tensor
+        wav = wav.detach().float().cpu().numpy()
+    arr = np.asarray(wav).reshape(-1)
+    if arr.dtype != np.int16:
+        arr = (np.clip(arr.astype(np.float32), -1.0, 1.0) * 32767.0).astype(np.int16)
+    return arr.tobytes(), int(sample_rate)
 
 
 class QwenTTSService:
@@ -216,8 +249,8 @@ class QwenTTSService:
     def __init__(self) -> None:
         self.model_name = os.getenv("QWEN_TTS_MODEL") or DEFAULT_QWEN_TTS_MODEL
         self.voice = os.getenv("QWEN_TTS_VOICE") or DEFAULT_QWEN_TTS_VOICE
+        self.language = os.getenv("QWEN_TTS_LANGUAGE") or DEFAULT_QWEN_TTS_LANGUAGE
         self.device = (os.getenv("QWEN_TTS_DEVICE") or DEFAULT_QWEN_TTS_DEVICE).strip().lower()
-        self.sample_rate = int(os.getenv("QWEN_TTS_SAMPLE_RATE") or DEFAULT_QWEN_TTS_SAMPLE_RATE)
         self.bit_rate = int(
             os.getenv("QWEN_TTS_MP3_BIT_RATE") or DEFAULT_QWEN_TTS_MP3_BIT_RATE
         )
@@ -247,7 +280,7 @@ class QwenTTSService:
 
         print(
             f"Qwen3-TTS: model {self.model_name}, voice {self.voice}, "
-            f"device {self.device}"
+            f"language {self.language}, device {self.device}"
         )
 
     def stream_text_to_speech(
@@ -263,9 +296,9 @@ class QwenTTSService:
         `previous_text` is accepted for interface parity with the other
         providers but unused: Qwen3-TTS's per-line API has no equivalent of
         ElevenLabs' `previous_text` continuity field. `chunk_size` is also
-        unused — chunks here are whatever the model/encoder produce as they
-        are generated, the same streaming-as-you-go behavior as the other
-        providers, just not sliced to a fixed byte size.
+        unused. qwen-tts's Python API returns a whole line at once, so the
+        line is synthesized first, then mp3-encoded and yielded in
+        half-second slices; first-byte latency is the full generation time.
         """
         _mark_timing(
             timer,
@@ -276,29 +309,32 @@ class QwenTTSService:
         )
         request_started_at = time.monotonic()
         model = _get_model(self.model_name, self.device, "bfloat16")
-        encoder = _mp3_encoder(self.sample_rate, self.bit_rate)
+
+        with _model_lock:
+            pcm, sample_rate = _synthesize(model, text, self.voice, self.language)
+        encoder = _mp3_encoder(sample_rate, self.bit_rate)
 
         total_bytes = 0
         n_chunks = 0
         first_byte_marked = False
+        slice_bytes = max(2, int(sample_rate * _MP3_SLICE_SECONDS) * 2)  # int16 mono
 
-        with _model_lock:
-            for pcm_chunk in _generate_pcm_chunks(model, text, self.voice, self.sample_rate):
-                mp3_bytes = bytes(encoder.encode(pcm_chunk))
-                if not mp3_bytes:
-                    continue
-                total_bytes += len(mp3_bytes)
-                n_chunks += 1
-                if not first_byte_marked:
-                    first_byte_marked = True
-                    _mark_timing(
-                        timer,
-                        "first_tts_byte",
-                        provider="qwen",
-                        wait_ms=round((time.monotonic() - request_started_at) * 1000),
-                    )
-                yield mp3_bytes
-            tail = bytes(encoder.flush())
+        for start in range(0, len(pcm), slice_bytes):
+            mp3_bytes = bytes(encoder.encode(pcm[start : start + slice_bytes]))
+            if not mp3_bytes:
+                continue
+            total_bytes += len(mp3_bytes)
+            n_chunks += 1
+            if not first_byte_marked:
+                first_byte_marked = True
+                _mark_timing(
+                    timer,
+                    "first_tts_byte",
+                    provider="qwen",
+                    wait_ms=round((time.monotonic() - request_started_at) * 1000),
+                )
+            yield mp3_bytes
+        tail = bytes(encoder.flush())
 
         if tail:
             total_bytes += len(tail)

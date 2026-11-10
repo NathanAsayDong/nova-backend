@@ -34,7 +34,7 @@ tower when you're ready to turn this on.
    first, then:
    ```powershell
    nvidia-smi
-   uv sync
+   uv sync --extra qwen
    python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
    ```
    Expect `2.11.0+cu128 True NVIDIA GeForce RTX 3080`. Don't use the old
@@ -43,23 +43,23 @@ tower when you're ready to turn this on.
    changing the index; cu126 is the fallback if you can't (change the index
    URL in `pyproject.toml` and run `uv lock`).
 
-2. **The optional `qwen` extra** (mp3 encoding via `lameenc`):
+2. **The `qwen` extra** — `qwen-tts` (on PyPI since 0.1.x), the matching
+   CUDA `torchaudio`, and `lameenc` for mp3 encoding, all installed by the
+   `uv sync --extra qwen` in step 1. Check it:
    ```powershell
-   uv pip install -e ".[qwen]"
+   python -c "import qwen_tts; print('qwen-tts ok')"
    ```
+   **Always pass `--extra qwen` on the tower from now on** — a plain
+   `uv sync` removes the extra's packages again. Import-time warnings about
+   SoX not being found or flash-attn not being installed are harmless.
 
-3. **The `qwen-tts` package itself.** As of writing it is not published on
-   PyPI; install it from the Qwen3-TTS repo:
+3. **Check the voice and language names** once weights are downloaded
+   (step 5 happens automatically here):
    ```powershell
-   git clone https://github.com/QwenLM/Qwen3-TTS.git
-   cd Qwen3-TTS
-   pip install -e .
+   python -c "from qwen_tts import Qwen3TTSModel; m = Qwen3TTSModel.from_pretrained('Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice', device_map='cuda:0'); print(m.get_supported_speakers()); print(m.get_supported_languages())"
    ```
-   **Not verified in this change** (no CUDA GPU was available to test
-   against) — confirm the package name, the installed module's import path
-   (`import qwen_tts`), and the exact shape of its streaming generation call
-   against whatever version you install; `qwen_tts_service._generate_pcm_chunks`
-   documents the assumed API and is the one place to adjust if it differs.
+   The default voice is `Ryan` (English); `Aiden` is the other English
+   preset.
 
 4. **Optional: `flash-attn`.** Qwen3-TTS, like most recent Qwen models, can
    use FlashAttention for faster inference if it's installed. It is **not**
@@ -69,7 +69,7 @@ tower when you're ready to turn this on.
    [flash-attention releases](https://github.com/Dao-AILab/flash-attention/releases)
    before building from source).
 
-5. **Weights.** `Qwen3TTS.from_pretrained(...)` downloads the checkpoint from
+5. **Weights.** `Qwen3TTSModel.from_pretrained(...)` downloads the checkpoint from
    Hugging Face on first use (the lazy load in `qwen_tts_service._load_model`)
    to the default Hugging Face cache, normally
    `C:\Users\natha\.cache\huggingface\hub` on the tower. Set `HF_HOME` to
@@ -91,9 +91,10 @@ selects a preset voice name on the CustomVoice checkpoint.
 | Var | Default | Meaning |
 |---|---|---|
 | `QWEN_TTS_MODEL` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face repo id. Set to a larger (e.g. 1.7B) **CustomVoice** checkpoint once more VRAM is free — see "CustomVoice, not Base" above for why this isn't a `-Base` checkpoint. |
-| `QWEN_TTS_VOICE` | `default` | CustomVoice preset voice name. |
+| `QWEN_TTS_VOICE` | `Ryan` | CustomVoice preset speaker: Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna or Sohee (Ryan and Aiden are native English). Case-insensitive. |
+| `QWEN_TTS_LANGUAGE` | `English` | Passed as `language=`; `Auto` lets the model detect it per line. |
+| `QWEN_TTS_ATTN` | auto | Attention backend: `flash_attention_2` when flash-attn is installed, else `sdpa` (retried with the model's own default if it rejects that). Set explicitly to force one, or `default` to pass nothing. |
 | `QWEN_TTS_DEVICE` | `cuda` | `cuda` or `cpu`. `cpu` works but is slow — only useful for testing without a GPU. |
-| `QWEN_TTS_SAMPLE_RATE` | `24000` | PCM sample rate the model is assumed to produce; only change this if a different checkpoint family documents a different native rate. |
 | `QWEN_TTS_MP3_BIT_RATE` | `128` | mp3 encode bit rate (kbps), matching the other providers' ~128kbps mp3 output. |
 | `QWEN_TTS_COOLDOWN_SECONDS` | `60` | How long a failed Qwen3-TTS call is skipped before being retried, independent of `TTS_PROVIDER_COOLDOWN_SECONDS` (which only governs the paid providers). |
 | `QWEN_TTS_WARMUP` | unset (off) | Set to `1` to load the model once at app startup (as a background task, so it never delays the app accepting traffic) instead of waiting for the first real request. |
@@ -114,20 +115,23 @@ This should produce a `smoke.mp3` you can play; if it raises instead, the
 error message says what's missing (no CUDA, no `qwen-tts` package, or the
 weights/checkpoint name).
 
+## How generation works (and its latency)
+
+`qwen-tts`'s Python API (`Qwen3TTSModel.generate_custom_voice`) returns a
+whole line as `(wavs, sample_rate)`; it has no chunk-yielding streaming
+call (its `non_streaming_mode=False` flag only simulates streaming *text
+input*). So the provider synthesizes each line in full, then mp3-encodes
+and yields it in half-second slices. Time to first audio byte is the full
+generation time for that line, which is fine for a fallback that only
+speaks when ElevenLabs and Cartesia are both down, but slower than they are.
+
 ## What wasn't verified
 
-This change was written and tested with the model entirely mocked out (see
-`tests/test_tts_service.py`'s `Qwen*` test classes) — there is no CUDA GPU in
-the environment it was developed in. Specifically unverified against real
-hardware:
+The API calls were checked against the installed `qwen-tts` 0.1.1 package
+(class, `from_pretrained`, and `generate_custom_voice` signatures), and the
+unit tests mock the model. Not yet measured on the tower's GPU:
 
-- The exact Python call shape of `qwen_tts`'s streaming API
-  (`qwen_tts_service._generate_pcm_chunks`).
-- Real first-packet / end-to-end latency on the 3080 with ~4.5GB free VRAM,
-  and whether the 0.6B checkpoint in bfloat16 actually fits alongside
-  whatever else is using the GPU at the time.
-- Actual mp3 encode throughput via `lameenc` keeping up with real-time audio
-  generation (should be trivial — mp3 encoding is far cheaper than TTS
-  inference — but not measured here).
-- Whether `qwen-tts`'s package/import name matches what's assumed here; see
-  the install steps above.
+- Real generation time per line on the 3080, and whether the 0.6B
+  checkpoint in bfloat16 fits in the free VRAM alongside everything else.
+- Whether the model accepts `sdpa` attention or falls back to its default
+  (either works; the load retries automatically).

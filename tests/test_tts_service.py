@@ -523,7 +523,7 @@ def _install_fake_modules(cuda_available: bool = True, qwen_tts_present: bool = 
     modules["torch"] = _FakeTorch(cuda_available)
     if qwen_tts_present:
         fake_qwen_tts = types.ModuleType("qwen_tts")
-        fake_qwen_tts.Qwen3TTS = MagicMock()
+        fake_qwen_tts.Qwen3TTSModel = MagicMock()
         modules["qwen_tts"] = fake_qwen_tts
     elif "qwen_tts" in modules:
         del modules["qwen_tts"]
@@ -697,28 +697,95 @@ class QwenTTSGenerationTests(unittest.TestCase):
     def test_stream_text_to_speech_yields_encoded_mp3_chunks(self):
         service = self._service()
 
-        fake_model = object()
         fake_encoder = MagicMock()
         fake_encoder.encode.side_effect = lambda chunk: b"mp3-" + chunk
         fake_encoder.flush.return_value = b"mp3-tail"
+        # 4 samples/s -> half-second slices of 2 samples (4 bytes) each.
+        pcm = b"aabbccdd"
 
         with (
-            patch.object(qwen_tts_service, "_get_model", return_value=fake_model),
-            patch.object(qwen_tts_service, "_mp3_encoder", return_value=fake_encoder),
+            patch.object(qwen_tts_service, "_get_model", return_value=object()),
+            patch.object(qwen_tts_service, "_synthesize", return_value=(pcm, 4)),
             patch.object(
-                qwen_tts_service,
-                "_generate_pcm_chunks",
-                return_value=iter([b"pcm1", b"pcm2"]),
-            ),
+                qwen_tts_service, "_mp3_encoder", return_value=fake_encoder
+            ) as make_encoder,
         ):
             chunks = list(service.stream_text_to_speech("Hello there."))
 
-        self.assertEqual(chunks, [b"mp3-pcm1", b"mp3-pcm2", b"mp3-tail"])
+        self.assertEqual(chunks, [b"mp3-aabb", b"mp3-ccdd", b"mp3-tail"])
+        # The encoder runs at the sample rate the model reported.
+        make_encoder.assert_called_once_with(4, service.bit_rate)
+
+    def test_synthesize_calls_generate_custom_voice_and_converts_to_int16(self):
+        import numpy as np
+
+        model = MagicMock()
+        model.generate_custom_voice.return_value = (
+            [np.array([0.0, 0.5, -1.0, 2.0], dtype=np.float32)],
+            24000,
+        )
+        pcm, sample_rate = qwen_tts_service._synthesize(model, "Hi.", "Ryan", "English")
+
+        model.generate_custom_voice.assert_called_once_with(
+            text="Hi.", language="English", speaker="Ryan"
+        )
+        self.assertEqual(sample_rate, 24000)
+        self.assertEqual(
+            np.frombuffer(pcm, dtype=np.int16).tolist(), [0, 16383, -32767, 32767]
+        )
+
+    def test_synthesize_accepts_torch_style_tensors(self):
+        import numpy as np
+
+        tensor = MagicMock()
+        tensor.detach.return_value.float.return_value.cpu.return_value.numpy.return_value = (
+            np.array([[0.25, -0.25]], dtype=np.float32)
+        )
+        model = MagicMock()
+        model.generate_custom_voice.return_value = ([tensor], 16000)
+        pcm, sample_rate = qwen_tts_service._synthesize(model, "Hi.", "Ryan", "English")
+        self.assertEqual(sample_rate, 16000)
+        self.assertEqual(np.frombuffer(pcm, dtype=np.int16).tolist(), [8191, -8191])
+
+    def test_default_voice_is_a_real_english_preset(self):
+        with _env(QWEN_TTS_VOICE="", QWEN_TTS_LANGUAGE=""):
+            service = self._service()
+        self.assertEqual(service.voice, "Ryan")
+        self.assertEqual(service.language, "English")
+
+    def test_load_model_uses_qwen3ttsmodel_with_device_map_and_dtype(self):
+        with (
+            _install_fake_modules(cuda_available=True, qwen_tts_present=True),
+            _env(QWEN_TTS_ATTN="sdpa"),
+        ):
+            import qwen_tts
+
+            qwen_tts_service._load_model("Qwen/x", "cuda", "bfloat16")
+            qwen_tts.Qwen3TTSModel.from_pretrained.assert_called_once_with(
+                "Qwen/x",
+                device_map="cuda:0",
+                dtype="bfloat16-sentinel",
+                attn_implementation="sdpa",
+            )
+
+    def test_load_model_retries_without_auto_picked_attention(self):
+        with (
+            _install_fake_modules(cuda_available=True, qwen_tts_present=True),
+            _env(QWEN_TTS_ATTN=""),
+        ):
+            import qwen_tts
+
+            loaded = object()
+            qwen_tts.Qwen3TTSModel.from_pretrained.side_effect = [ValueError("no sdpa"), loaded]
+            self.assertIs(qwen_tts_service._load_model("Qwen/x", "cuda", "bfloat16"), loaded)
+            second_call = qwen_tts.Qwen3TTSModel.from_pretrained.call_args_list[1]
+            self.assertNotIn("attn_implementation", second_call.kwargs)
 
     def test_missing_lameenc_raises_clean_error(self):
         service = self._service()
         with (
             patch.object(qwen_tts_service, "_get_model", return_value=object()),
+            patch.object(qwen_tts_service, "_synthesize", return_value=(b"\x00\x00", 24000)),
             patch.dict(sys.modules, {"lameenc": None}),
         ):
             with self.assertRaisesRegex(RuntimeError, "lameenc"):
