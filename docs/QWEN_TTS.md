@@ -70,12 +70,20 @@ tower when you're ready to turn this on.
    comfortably in the ~4.5GB of VRAM typically free on the tower's 3080
    alongside everything else already using it).
 
+## CustomVoice, not Base
+
+Nova uses the **CustomVoice** checkpoint (preset voices), not **Base**
+(voice cloning) — a deliberate choice, not a placeholder: CustomVoice's
+preset-voice API is simpler to wire and is all Nova needs. This provider
+does not implement any voice-cloning plumbing; `QWEN_TTS_VOICE` only ever
+selects a preset voice name on the CustomVoice checkpoint.
+
 ## Env vars
 
 | Var | Default | Meaning |
 |---|---|---|
-| `QWEN_TTS_MODEL` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face repo id. Set to a 1.7B checkpoint once more VRAM is free, or to a `-Base` checkpoint if voice cloning turns out simpler to wire than CustomVoice's preset-voice API. |
-| `QWEN_TTS_VOICE` | `default` | Preset voice name (CustomVoice) or cloned speaker id (Base). |
+| `QWEN_TTS_MODEL` | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | Hugging Face repo id. Set to a larger (e.g. 1.7B) **CustomVoice** checkpoint once more VRAM is free — see "CustomVoice, not Base" above for why this isn't a `-Base` checkpoint. |
+| `QWEN_TTS_VOICE` | `default` | CustomVoice preset voice name. |
 | `QWEN_TTS_DEVICE` | `cuda` | `cuda` or `cpu`. `cpu` works but is slow — only useful for testing without a GPU. |
 | `QWEN_TTS_SAMPLE_RATE` | `24000` | PCM sample rate the model is assumed to produce; only change this if a different checkpoint family documents a different native rate. |
 | `QWEN_TTS_MP3_BIT_RATE` | `128` | mp3 encode bit rate (kbps), matching the other providers' ~128kbps mp3 output. |

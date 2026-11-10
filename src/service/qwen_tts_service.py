@@ -35,16 +35,16 @@ from typing import Any
 
 from src.harness.turn_timer import TurnTimer, mark as _mark_timing
 
-# CustomVoice is the smallest/fastest checkpoint in the Qwen3-TTS family and
-# the one that fits comfortably in the ~4.5GB of VRAM free on the tower
-# alongside everything else already using the 3080. Override with
-# QWEN_TTS_MODEL (e.g. a 1.7B checkpoint) once more VRAM is free, or the Base
-# checkpoint if voice cloning turns out simpler to wire than CustomVoice's
-# preset-voice API.
+# CustomVoice (preset voices, no cloning) is the decided checkpoint: the
+# smallest/fastest in the Qwen3-TTS family, fits comfortably in the ~4.5GB of
+# VRAM free on the tower alongside everything else already using the 3080,
+# and its preset-voice API is simpler to wire than the Base checkpoint's
+# voice-cloning flow, which this provider does not implement. Override with
+# QWEN_TTS_MODEL (e.g. a 1.7B CustomVoice checkpoint) once more VRAM is free.
 DEFAULT_QWEN_TTS_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 
-# A placeholder preset voice name; set QWEN_TTS_VOICE to whichever preset (or
-# cloned speaker id, if using the Base checkpoint) Nova should actually use.
+# A placeholder preset voice name; set QWEN_TTS_VOICE to whichever of
+# CustomVoice's preset voices Nova should actually use.
 DEFAULT_QWEN_TTS_VOICE = "default"
 DEFAULT_QWEN_TTS_DEVICE = "cuda"
 
