@@ -91,6 +91,20 @@ dependencies = [
     "pillow>=11",
 ]
 
+[project.optional-dependencies]
+# Local Qwen3-TTS fallback provider (src/service/qwen_tts_service.py), on the
+# Windows tower only — see docs/QWEN_TTS.md for the full install (including
+# the CUDA torch build, already a base dependency above, and where to get
+# `qwen-tts` itself, which is not on PyPI as of writing). torch is already a
+# required dependency (see above); this extra adds just the pieces specific
+# to running Qwen3-TTS locally. Not needed, and never imported, unless
+# TTS_PROVIDER selects a chain that includes Qwen and it is actually used.
+qwen = [
+    # mp3-encodes Qwen3-TTS's raw PCM output so it matches the mp3 container
+    # ElevenLabs/Cartesia/OpenAI already hand the rest of the pipeline.
+    "lameenc>=1.7",
+]
+
 [tool.uv]
 # faster-whisper depends on the CPU onnxruntime, which installs the same
 # `onnxruntime` module as onnxruntime-gpu; with both present whichever wins

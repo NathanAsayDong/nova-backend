@@ -61,6 +61,18 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         print(f"Could not purge expired sessions: {exc}")
 
+    # Optional: load Qwen3-TTS (the local TTS fallback) onto the GPU ahead of
+    # the first spoken line, so that line doesn't pay the multi-second model
+    # load. Off by default (loading it eagerly would be wasted VRAM/time on
+    # any box that never reaches that link in the chain); set
+    # QWEN_TTS_WARMUP=1 on boxes that use it, e.g. the tower. Fire-and-forget
+    # as a background task, not awaited here, so a slow or failing load never
+    # delays the app accepting traffic.
+    if (os.getenv("QWEN_TTS_WARMUP") or "").strip().lower() in ("1", "true", "yes"):
+        from src.service.qwen_tts_service import warmup as _qwen_warmup
+
+        asyncio.create_task(asyncio.to_thread(_qwen_warmup))
+
     yield
 
 
