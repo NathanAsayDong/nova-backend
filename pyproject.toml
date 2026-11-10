@@ -111,3 +111,17 @@ qwen = [
 # the file race decides whether Parakeet sees a GPU. On Windows only the GPU
 # build is installed (it carries the CPU provider too, for faster-whisper's VAD).
 override-dependencies = ["onnxruntime ; sys_platform != 'win32'"]
+
+# PyPI's Windows torch wheels are CPU-only, so on the tower (RTX 3080) take
+# torch from the PyTorch CUDA 12.8 index instead; macOS/Linux keep PyPI.
+# cu128 needs NVIDIA driver >= 570 (nvidia-smi shows "CUDA Version: 12.8"+).
+# `explicit` keeps every other package resolving from PyPI.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+]

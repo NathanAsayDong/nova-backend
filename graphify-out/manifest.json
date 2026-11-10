@@ -90,9 +90,9 @@
     "semantic_hash": "6b251239aee14dd95394258928c1a18d"
   },
   "main.py": {
-    "mtime": 1792249585.3420947,
-    "seen": 1792249890.315949,
-    "ast_hash": "bda82e8b2b5d933635c67fc6932a1d91",
+    "mtime": 1794352234.7684655,
+    "seen": 1794353652.180918,
+    "ast_hash": "bbd67b6f17b29df6ca12df4cf7734c63",
     "semantic_hash": ""
   },
   "prompting/host_environment_prompt.py": {
@@ -108,15 +108,15 @@
     "semantic_hash": "5e4a139145e242f49e24c9139ab0543f"
   },
   "prompting/prompt_source_prompt.py": {
-    "mtime": 1792596139.322506,
-    "seen": 1793382230.351937,
-    "ast_hash": "b5662dcd6ce72b9001d44bbab46cadf3",
+    "mtime": 1793721236.8786087,
+    "seen": 1794353652.180951,
+    "ast_hash": "402c39204cfcb8ca0a1831cfdf5915fa",
     "semantic_hash": ""
   },
   "pyproject.toml": {
-    "mtime": 1792092283.540071,
-    "seen": 1792092839.223304,
-    "ast_hash": "aeff7c408c965676fcdfb68d50911dd5",
+    "mtime": 1794353635.7060885,
+    "seen": 1794353652.180951,
+    "ast_hash": "8086112db82bdd6eae8197e5c920fd98",
     "semantic_hash": ""
   },
   "scripts/check_asr_env.py": {
@@ -648,9 +648,9 @@
     "semantic_hash": "239c19144eba16cc0abcede46cbdf4e4"
   },
   "src/service/tts_service.py": {
-    "mtime": 1793316542.3538728,
-    "seen": 1793382230.353076,
-    "ast_hash": "5c772f0a5ffb4b34be57dd8b371deb78",
+    "mtime": 1794352234.769423,
+    "seen": 1794353652.1822588,
+    "ast_hash": "ab057d6bca65cfec5e2b890b38432d3d",
     "semantic_hash": ""
   },
   "src/service/twilio_service.py": {
@@ -930,10 +930,10 @@
     "semantic_hash": "c2b764388bd367ad6c3a059818d12faa"
   },
   "tests/test_tts_service.py": {
-    "mtime": 1791732679.2201464,
-    "seen": 1791902973.260236,
-    "ast_hash": "bfe37f7acdca83b55bb2ea607f2d7cf1",
-    "semantic_hash": "bfe37f7acdca83b55bb2ea607f2d7cf1"
+    "mtime": 1794352234.7697372,
+    "seen": 1794353652.18271,
+    "ast_hash": "9bc73f41108d9f551b20e9034b5f998a",
+    "semantic_hash": ""
   },
   "tests/test_asr_filters.py": {
     "mtime": 1791841369.5556467,
@@ -1419,6 +1419,24 @@
     "mtime": 1793244266.5341997,
     "seen": 1793382230.353494,
     "ast_hash": "6857ef62e3b7289e0b6c27fb0ebc0bab",
+    "semantic_hash": ""
+  },
+  "src/service/cartesia_service.py": {
+    "mtime": 1793721236.8789034,
+    "seen": 1794353652.181893,
+    "ast_hash": "fd54e25e04c0305809fde8c2f5c5adde",
+    "semantic_hash": ""
+  },
+  "src/service/qwen_tts_service.py": {
+    "mtime": 1794352234.7690384,
+    "seen": 1794353652.182168,
+    "ast_hash": "a4243fc2b27c0cc10a82a297df668d38",
+    "semantic_hash": ""
+  },
+  "docs/QWEN_TTS.md": {
+    "mtime": 1794353648.6088254,
+    "seen": 1794353652.182813,
+    "ast_hash": "48cf5bdaaebdd139d7fcbd4b6d4082f1",
     "semantic_hash": ""
   }
 }

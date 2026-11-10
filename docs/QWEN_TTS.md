@@ -26,14 +26,22 @@ OpenAI if the GPU/model isn't usable.
 These are **not** run automatically by this change — run them by hand on the
 tower when you're ready to turn this on.
 
-1. **CUDA build of torch.** torch is already a base dependency of this repo
-   (see `pyproject.toml`), but confirm it's the CUDA build, not CPU-only:
+1. **CUDA build of torch.** torch is already a base dependency of this repo,
+   and `pyproject.toml` (`[tool.uv.sources]`) pulls it from the PyTorch
+   CUDA 12.8 index on Windows, so a normal sync installs the CUDA build
+   (`2.11.0+cu128`). It needs NVIDIA driver 570 or newer; `nvidia-smi`
+   should show `CUDA Version: 12.8` or higher. Stop the API's uvicorn
+   first, then:
    ```powershell
-   uv pip install torch --index-url https://download.pytorch.org/whl/cu121 --force-reinstall
-   python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+   nvidia-smi
+   uv sync
+   python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
    ```
-   Pick the CUDA tag (`cu121`, `cu124`, ...) matching the driver already
-   installed for the 3080; check with `nvidia-smi`.
+   Expect `2.11.0+cu128 True NVIDIA GeForce RTX 3080`. Don't use the old
+   `cu121` index: it stops at torch 2.5.1 and has no Python 3.13 wheels.
+   If the driver is too old for cu128, update the driver rather than
+   changing the index; cu126 is the fallback if you can't (change the index
+   URL in `pyproject.toml` and run `uv lock`).
 
 2. **The optional `qwen` extra** (mp3 encoding via `lameenc`):
    ```powershell
