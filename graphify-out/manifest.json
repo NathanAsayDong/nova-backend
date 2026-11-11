@@ -90,9 +90,9 @@
     "semantic_hash": "6b251239aee14dd95394258928c1a18d"
   },
   "main.py": {
-    "mtime": 1794352234.7684655,
-    "seen": 1794353652.180918,
-    "ast_hash": "bbd67b6f17b29df6ca12df4cf7734c63",
+    "mtime": 1794412474.2273755,
+    "seen": 1794412484.7258382,
+    "ast_hash": "bda82e8b2b5d933635c67fc6932a1d91",
     "semantic_hash": ""
   },
   "prompting/host_environment_prompt.py": {
@@ -114,9 +114,9 @@
     "semantic_hash": ""
   },
   "pyproject.toml": {
-    "mtime": 1794353855.2910266,
-    "seen": 1794354024.92853,
-    "ast_hash": "680be0bee5fa99392392f5ddb41c47b7",
+    "mtime": 1794412474.2277203,
+    "seen": 1794412484.725872,
+    "ast_hash": "aeff7c408c965676fcdfb68d50911dd5",
     "semantic_hash": ""
   },
   "scripts/check_asr_env.py": {
@@ -648,9 +648,9 @@
     "semantic_hash": "239c19144eba16cc0abcede46cbdf4e4"
   },
   "src/service/tts_service.py": {
-    "mtime": 1794352234.769423,
-    "seen": 1794353652.1822588,
-    "ast_hash": "ab057d6bca65cfec5e2b890b38432d3d",
+    "mtime": 1794412474.2281475,
+    "seen": 1794412484.7271,
+    "ast_hash": "6cf80e39776010110f67b370c7ac7e92",
     "semantic_hash": ""
   },
   "src/service/twilio_service.py": {
@@ -930,9 +930,9 @@
     "semantic_hash": "c2b764388bd367ad6c3a059818d12faa"
   },
   "tests/test_tts_service.py": {
-    "mtime": 1794353820.6900325,
-    "seen": 1794354024.930193,
-    "ast_hash": "18eaca4d03cd5c792364acd5f9843abf",
+    "mtime": 1794412474.228826,
+    "seen": 1794412484.727509,
+    "ast_hash": "831407e897a1efefeb2b56c0280c5757",
     "semantic_hash": ""
   },
   "tests/test_asr_filters.py": {
@@ -1425,18 +1425,6 @@
     "mtime": 1793721236.8789034,
     "seen": 1794353652.181893,
     "ast_hash": "fd54e25e04c0305809fde8c2f5c5adde",
-    "semantic_hash": ""
-  },
-  "src/service/qwen_tts_service.py": {
-    "mtime": 1794353785.377395,
-    "seen": 1794354024.929614,
-    "ast_hash": "337ce9141fa6c0560083ab056b388f3e",
-    "semantic_hash": ""
-  },
-  "docs/QWEN_TTS.md": {
-    "mtime": 1794354014.2188268,
-    "seen": 1794354024.930309,
-    "ast_hash": "c051062a6f20d561f2f793c2f94d9804",
     "semantic_hash": ""
   }
 }
