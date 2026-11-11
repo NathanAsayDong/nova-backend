@@ -1,16 +1,12 @@
 """
 Which voice Nova speaks with, and what happens when that voice refuses a line.
 
-The chain is ElevenLabs -> Cartesia -> Qwen3-TTS (local) -> OpenAI: each one
-is tried in order, and a provider that refuses a clip before any audio goes
-out is skipped for its own cooldown window while the others are tried on
-their own schedule. Qwen3-TTS additionally requires CUDA, torch and the
-qwen-tts package; this suite mocks all of that so it never touches a GPU.
+The chain is ElevenLabs -> Cartesia -> OpenAI: each one is tried in order,
+and a provider that refuses a clip before any audio goes out is skipped for
+its own cooldown window while the others are tried on their own schedule.
 """
 
 import os
-import sys
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +14,6 @@ from src.service import tts_service
 from src.service.eleven_labs_service import ElevenLabsService, _describe_failure
 from src.service.cartesia_service import CartesiaService
 from src.service.cartesia_service import _describe_failure as _cartesia_describe_failure
-from src.service import qwen_tts_service
 
 ELEVEN_ENV = {
     "ELEVEN_LABS_API_KEY": "test-eleven-key",
@@ -44,7 +39,6 @@ def _env(**overrides):
         "CARTESIA_API_KEY",
         "CARTESIA_VOICE_ID",
         "TTS_PROVIDER_COOLDOWN_SECONDS",
-        "QWEN_TTS_COOLDOWN_SECONDS",
     ):
         env.setdefault(key, "")
     return patch.dict(os.environ, env, clear=False)
@@ -59,7 +53,6 @@ def _full_chain_env(**overrides):
         "ELEVEN_LABS_MODEL_ID",
         "ELEVEN_LABS_API",
         "TTS_PROVIDER_COOLDOWN_SECONDS",
-        "QWEN_TTS_COOLDOWN_SECONDS",
     ):
         env.setdefault(key, "")
     return patch.dict(os.environ, env, clear=False)
@@ -500,296 +493,6 @@ class CartesiaRequestTests(unittest.TestCase):
         response = MagicMock(status_code=429, text="rate limited")
         message = _cartesia_describe_failure(response, "voice-123")
         self.assertIn("rate limit", message.lower())
-
-
-class _FakeTorch(types.ModuleType):
-    """Minimal stand-in for `torch`, with a controllable `cuda.is_available()`."""
-
-    def __init__(self, cuda_available: bool):
-        super().__init__("torch")
-        cuda_ns = types.SimpleNamespace(is_available=lambda: cuda_available)
-        self.cuda = cuda_ns
-        self.bfloat16 = "bfloat16-sentinel"
-
-
-def _install_fake_modules(cuda_available: bool = True, qwen_tts_present: bool = True):
-    """
-    Patch sys.modules so qwen_tts_service's lazy imports succeed (or fail)
-    without needing a real torch/CUDA/qwen-tts install. Returns the patcher;
-    caller is responsible for stop()ing it (use as a context manager via
-    `with _install_fake_modules(...):`).
-    """
-    modules = dict(sys.modules)
-    modules["torch"] = _FakeTorch(cuda_available)
-    if qwen_tts_present:
-        fake_qwen_tts = types.ModuleType("qwen_tts")
-        fake_qwen_tts.Qwen3TTSModel = MagicMock()
-        modules["qwen_tts"] = fake_qwen_tts
-    elif "qwen_tts" in modules:
-        del modules["qwen_tts"]
-    return patch.dict(sys.modules, modules, clear=True)
-
-
-class QwenTTSProviderSelectionTests(unittest.TestCase):
-    """Chain ordering and the missing-dependency path, with torch/CUDA/qwen_tts
-    faked out — nothing here touches a real GPU or downloads anything."""
-
-    def test_qwen_slots_between_cartesia_and_openai_when_available(self):
-        with _full_chain_env(), _install_fake_modules(cuda_available=True, qwen_tts_present=True):
-            service = tts_service.TTSService()
-        self.assertEqual(
-            [p.name for p in service.chain], ["elevenlabs", "cartesia", "qwen", "openai"]
-        )
-        self.assertIsInstance(service.chain[2].service, qwen_tts_service.QwenTTSService)
-
-    def test_missing_cuda_skips_qwen_without_breaking_the_chain(self):
-        with _full_chain_env(), _install_fake_modules(cuda_available=False, qwen_tts_present=True):
-            service = tts_service.TTSService()
-        self.assertEqual([p.name for p in service.chain], ["elevenlabs", "cartesia", "openai"])
-
-    def test_missing_qwen_tts_package_skips_qwen_without_breaking_the_chain(self):
-        with _full_chain_env(), _install_fake_modules(cuda_available=True, qwen_tts_present=False):
-            service = tts_service.TTSService()
-        self.assertEqual([p.name for p in service.chain], ["elevenlabs", "cartesia", "openai"])
-
-    def test_missing_torch_skips_qwen_without_breaking_the_chain(self):
-        modules = dict(sys.modules)
-        modules.pop("torch", None)
-        with _full_chain_env(), patch.dict(sys.modules, modules, clear=True):
-            with patch("builtins.__import__", side_effect=_raise_for_torch):
-                service = tts_service.TTSService()
-        self.assertEqual([p.name for p in service.chain], ["elevenlabs", "cartesia", "openai"])
-
-    def test_qwen_opt_out_still_works_via_openai(self):
-        """TTS_PROVIDER=openai is a full opt-out: Qwen (like ElevenLabs and
-        Cartesia) is skipped even when its dependencies are fully available."""
-        with _env(TTS_PROVIDER="openai"), _install_fake_modules():
-            service = tts_service.TTSService()
-        self.assertEqual([p.name for p in service.chain], ["openai"])
-
-
-def _raise_for_torch(name, *args, **kwargs):
-    if name == "torch":
-        raise ImportError("No module named 'torch'")
-    return _REAL_IMPORT(name, *args, **kwargs)
-
-
-_REAL_IMPORT = __import__
-
-
-class QwenTTSCooldownTests(unittest.TestCase):
-    def test_default_cooldown_is_sixty_seconds(self):
-        self.assertEqual(qwen_tts_service.DEFAULT_QWEN_TTS_COOLDOWN_SECONDS, 60)
-        with patch.dict(os.environ, {"QWEN_TTS_COOLDOWN_SECONDS": ""}, clear=False):
-            self.assertEqual(qwen_tts_service._qwen_cooldown_seconds(), 60)
-
-    def test_cooldown_is_configurable_via_env_var(self):
-        with patch.dict(os.environ, {"QWEN_TTS_COOLDOWN_SECONDS": "15"}, clear=False):
-            self.assertEqual(qwen_tts_service._qwen_cooldown_seconds(), 15)
-
-    def test_invalid_cooldown_env_var_falls_back_to_the_default(self):
-        with patch.dict(os.environ, {"QWEN_TTS_COOLDOWN_SECONDS": "nope"}, clear=False):
-            self.assertEqual(qwen_tts_service._qwen_cooldown_seconds(), 60)
-
-    def test_negative_cooldown_env_var_falls_back_to_the_default(self):
-        with patch.dict(os.environ, {"QWEN_TTS_COOLDOWN_SECONDS": "-1"}, clear=False):
-            self.assertEqual(qwen_tts_service._qwen_cooldown_seconds(), 60)
-
-    def test_qwen_link_uses_its_own_cooldown_not_the_shared_one(self):
-        """Qwen's cooldown (60s default) is independent of
-        TTS_PROVIDER_COOLDOWN_SECONDS, which only governs the paid providers."""
-        with (
-            _full_chain_env(TTS_PROVIDER_COOLDOWN_SECONDS="10800"),
-            _install_fake_modules(cuda_available=True, qwen_tts_present=True),
-        ):
-            service = tts_service.TTSService()
-        by_name = {p.name: p for p in service.chain}
-        self.assertEqual(by_name["elevenlabs"].cooldown_seconds, 10800)
-        self.assertEqual(by_name["cartesia"].cooldown_seconds, 10800)
-        self.assertEqual(by_name["qwen"].cooldown_seconds, 60)
-
-    def test_qwen_cooldown_is_independently_overridable(self):
-        with (
-            _full_chain_env(
-                TTS_PROVIDER_COOLDOWN_SECONDS="10800", QWEN_TTS_COOLDOWN_SECONDS="5"
-            ),
-            _install_fake_modules(cuda_available=True, qwen_tts_present=True),
-        ):
-            service = tts_service.TTSService()
-        by_name = {p.name: p for p in service.chain}
-        self.assertEqual(by_name["qwen"].cooldown_seconds, 5)
-        self.assertEqual(by_name["elevenlabs"].cooldown_seconds, 10800)
-
-
-class QwenTTSFallthroughTests(unittest.TestCase):
-    """Qwen's place in the fallback chain: Cartesia falling through reaches
-    Qwen before OpenAI, and Qwen failing falls through to OpenAI in turn."""
-
-    def _service(self, *names: str) -> tts_service.TTSService:
-        with _full_chain_env(), _install_fake_modules(cuda_available=True, qwen_tts_present=True):
-            service = tts_service.TTSService()
-        _mock_chain(service, *names)
-        return service
-
-    def _refuses(self, message: str):
-        def refused():
-            raise RuntimeError(message)
-            yield b""  # pragma: no cover
-
-        return refused
-
-    def test_cartesia_failure_falls_through_to_qwen_not_openai(self):
-        service = self._service("elevenlabs", "cartesia", "qwen", "openai")
-        service.chain[0].service.stream_text_to_speech.side_effect = (
-            lambda *a, **k: self._refuses("ElevenLabs TTS failed (401)")()
-        )
-        service.chain[1].service.stream_text_to_speech.side_effect = (
-            lambda *a, **k: self._refuses("Cartesia TTS failed (429)")()
-        )
-        service.chain[2].service.stream_text_to_speech.side_effect = (
-            lambda *a, **k: iter([b"qwen-audio"])
-        )
-        audio = list(service.stream_text_to_speech("Hello."))
-        self.assertEqual(audio, [b"qwen-audio"])
-        service.chain[3].service.stream_text_to_speech.assert_not_called()
-
-    def test_qwen_failure_falls_through_to_openai(self):
-        service = self._service("elevenlabs", "cartesia", "qwen", "openai")
-        for link in service.chain[:3]:
-            link.service.stream_text_to_speech.side_effect = (
-                lambda *a, **k: self._refuses("refused")()
-            )
-        service.chain[3].service.stream_text_to_speech.side_effect = (
-            lambda *a, **k: iter([b"openai-audio"])
-        )
-        audio = list(service.stream_text_to_speech("Hello."))
-        self.assertEqual(audio, [b"openai-audio"])
-
-    def test_qwen_in_cooldown_is_skipped_without_being_called(self):
-        service = self._service("elevenlabs", "cartesia", "qwen", "openai")
-        service.chain[0].service.stream_text_to_speech.side_effect = (
-            lambda *a, **k: self._refuses("ElevenLabs TTS failed (401)")()
-        )
-        service.chain[1].service.stream_text_to_speech.side_effect = (
-            lambda *a, **k: self._refuses("Cartesia TTS failed (429)")()
-        )
-        service.chain[2].down_until = float("inf")
-        service.chain[3].service.stream_text_to_speech.side_effect = (
-            lambda *a, **k: iter([b"openai-audio"])
-        )
-        audio = list(service.stream_text_to_speech("Hello."))
-        self.assertEqual(audio, [b"openai-audio"])
-        service.chain[2].service.stream_text_to_speech.assert_not_called()
-
-
-class QwenTTSGenerationTests(unittest.TestCase):
-    """QwenTTSService.stream_text_to_speech itself, with the model and mp3
-    encoder both mocked — no torch, no CUDA, no real audio."""
-
-    def _service(self) -> qwen_tts_service.QwenTTSService:
-        with _full_chain_env(), _install_fake_modules(cuda_available=True, qwen_tts_present=True):
-            return qwen_tts_service.QwenTTSService()
-
-    def test_output_mime_type_is_mp3_like_the_other_providers(self):
-        service = self._service()
-        self.assertEqual(service.output_mime_type(), "audio/mpeg")
-
-    def test_stream_text_to_speech_yields_encoded_mp3_chunks(self):
-        service = self._service()
-
-        fake_encoder = MagicMock()
-        fake_encoder.encode.side_effect = lambda chunk: b"mp3-" + chunk
-        fake_encoder.flush.return_value = b"mp3-tail"
-        # 4 samples/s -> half-second slices of 2 samples (4 bytes) each.
-        pcm = b"aabbccdd"
-
-        with (
-            patch.object(qwen_tts_service, "_get_model", return_value=object()),
-            patch.object(qwen_tts_service, "_synthesize", return_value=(pcm, 4)),
-            patch.object(
-                qwen_tts_service, "_mp3_encoder", return_value=fake_encoder
-            ) as make_encoder,
-        ):
-            chunks = list(service.stream_text_to_speech("Hello there."))
-
-        self.assertEqual(chunks, [b"mp3-aabb", b"mp3-ccdd", b"mp3-tail"])
-        # The encoder runs at the sample rate the model reported.
-        make_encoder.assert_called_once_with(4, service.bit_rate)
-
-    def test_synthesize_calls_generate_custom_voice_and_converts_to_int16(self):
-        import numpy as np
-
-        model = MagicMock()
-        model.generate_custom_voice.return_value = (
-            [np.array([0.0, 0.5, -1.0, 2.0], dtype=np.float32)],
-            24000,
-        )
-        pcm, sample_rate = qwen_tts_service._synthesize(model, "Hi.", "Ryan", "English")
-
-        model.generate_custom_voice.assert_called_once_with(
-            text="Hi.", language="English", speaker="Ryan"
-        )
-        self.assertEqual(sample_rate, 24000)
-        self.assertEqual(
-            np.frombuffer(pcm, dtype=np.int16).tolist(), [0, 16383, -32767, 32767]
-        )
-
-    def test_synthesize_accepts_torch_style_tensors(self):
-        import numpy as np
-
-        tensor = MagicMock()
-        tensor.detach.return_value.float.return_value.cpu.return_value.numpy.return_value = (
-            np.array([[0.25, -0.25]], dtype=np.float32)
-        )
-        model = MagicMock()
-        model.generate_custom_voice.return_value = ([tensor], 16000)
-        pcm, sample_rate = qwen_tts_service._synthesize(model, "Hi.", "Ryan", "English")
-        self.assertEqual(sample_rate, 16000)
-        self.assertEqual(np.frombuffer(pcm, dtype=np.int16).tolist(), [8191, -8191])
-
-    def test_default_voice_is_a_real_english_preset(self):
-        with _env(QWEN_TTS_VOICE="", QWEN_TTS_LANGUAGE=""):
-            service = self._service()
-        self.assertEqual(service.voice, "Ryan")
-        self.assertEqual(service.language, "English")
-
-    def test_load_model_uses_qwen3ttsmodel_with_device_map_and_dtype(self):
-        with (
-            _install_fake_modules(cuda_available=True, qwen_tts_present=True),
-            _env(QWEN_TTS_ATTN="sdpa"),
-        ):
-            import qwen_tts
-
-            qwen_tts_service._load_model("Qwen/x", "cuda", "bfloat16")
-            qwen_tts.Qwen3TTSModel.from_pretrained.assert_called_once_with(
-                "Qwen/x",
-                device_map="cuda:0",
-                dtype="bfloat16-sentinel",
-                attn_implementation="sdpa",
-            )
-
-    def test_load_model_retries_without_auto_picked_attention(self):
-        with (
-            _install_fake_modules(cuda_available=True, qwen_tts_present=True),
-            _env(QWEN_TTS_ATTN=""),
-        ):
-            import qwen_tts
-
-            loaded = object()
-            qwen_tts.Qwen3TTSModel.from_pretrained.side_effect = [ValueError("no sdpa"), loaded]
-            self.assertIs(qwen_tts_service._load_model("Qwen/x", "cuda", "bfloat16"), loaded)
-            second_call = qwen_tts.Qwen3TTSModel.from_pretrained.call_args_list[1]
-            self.assertNotIn("attn_implementation", second_call.kwargs)
-
-    def test_missing_lameenc_raises_clean_error(self):
-        service = self._service()
-        with (
-            patch.object(qwen_tts_service, "_get_model", return_value=object()),
-            patch.object(qwen_tts_service, "_synthesize", return_value=(b"\x00\x00", 24000)),
-            patch.dict(sys.modules, {"lameenc": None}),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "lameenc"):
-                list(service.stream_text_to_speech("Hello."))
 
 
 if __name__ == "__main__":

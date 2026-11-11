@@ -170,21 +170,6 @@ class _ChainedProvider:
         self.down_until = 0.0
 
 
-def _cooldown_seconds_for(name: str, default_cooldown: float) -> float:
-    """
-    Qwen3-TTS, being local, gets its own (short, independently configured)
-    cooldown instead of the paid providers' TTS_PROVIDER_COOLDOWN_SECONDS —
-    see qwen_tts_service.DEFAULT_QWEN_TTS_COOLDOWN_SECONDS. Importing
-    qwen_tts_service here is cheap: it only touches torch/qwen_tts inside
-    functions, never at module import time.
-    """
-    if name == "qwen":
-        from src.service.qwen_tts_service import _qwen_cooldown_seconds
-
-        return _qwen_cooldown_seconds()
-    return default_cooldown
-
-
 def _build_provider(name: str, factory) -> "object | None":
     """Construct a provider, or return None (with a console note) if it is
     not configured. A provider missing its API key is not an error — it is
@@ -198,26 +183,22 @@ def _build_provider(name: str, factory) -> "object | None":
 
 class TTSService:
     """
-    Nova's voice: ElevenLabs, then Cartesia, then Qwen3-TTS (local), then OpenAI.
+    Nova's voice: ElevenLabs, then Cartesia, then OpenAI.
 
     The fallback chain matters because the voice is the whole interface on a
     voice turn: if a provider refuses a clip (plan lapsed, quota spent,
-    network blip, GPU unavailable) before any audio has gone out, the same
-    line is spoken through the next provider in the chain rather than Nova
-    going silent. All four produce MP3, so the client never knows. Once a
-    provider has started streaming a clip, a failure is raised as before —
-    splicing a second voice into half a sentence is worse than stopping.
+    network blip) before any audio has gone out, the same line is spoken
+    through the next provider in the chain rather than Nova going silent. All
+    three produce MP3, so the client never knows. Once a provider has started
+    streaming a clip, a failure is raised as before — splicing a second voice
+    into half a sentence is worse than stopping.
 
     Each provider in the chain keeps its own cooldown: after ElevenLabs
     refuses a clip, lines go straight to Cartesia (skipping a doomed retry)
     for TTS_PROVIDER_COOLDOWN_SECONDS (default three hours), but Cartesia is
     tried fresh on every line unless Cartesia has *also* failed recently. A
     dead Cartesia account therefore never adds a failed-request's worth of
-    latency to a turn that only needed to fall through to it once. Qwen3-TTS
-    is the one exception to the three-hour default: being local, a refusal is
-    almost always "the GPU/model isn't usable right now" rather than a
-    quota/plan problem, so it gets its own short cooldown — see
-    QWEN_TTS_COOLDOWN_SECONDS in qwen_tts_service.py.
+    latency to a turn that only needed to fall through to it once.
     """
 
     def __init__(self) -> None:
@@ -225,9 +206,9 @@ class TTSService:
         cooldown_seconds = _provider_cooldown_seconds()
 
         if requested == "openai":
-            # Explicit opt-out: skip ElevenLabs, Cartesia and Qwen3-TTS
-            # entirely, and if OpenAI itself is not configured, let that
-            # error propagate — the user asked for exactly one provider.
+            # Explicit opt-out: skip ElevenLabs and Cartesia entirely, and if
+            # OpenAI itself is not configured, let that error propagate — the
+            # user asked for exactly one provider.
             self.chain = [
                 _ChainedProvider("openai", OpenAITTS(), cooldown_seconds)
             ]
@@ -244,15 +225,9 @@ class TTSService:
 
                 return CartesiaService()
 
-            def _qwen():
-                from src.service.qwen_tts_service import QwenTTSService
-
-                return QwenTTSService()
-
             for name, display_name, factory in (
                 ("elevenlabs", "ElevenLabs", _eleven_labs),
                 ("cartesia", "Cartesia", _cartesia),
-                ("qwen", "Qwen3-TTS", _qwen),
                 ("openai", "OpenAI", OpenAITTS),
             ):
                 service = _build_provider(display_name, factory)
@@ -261,12 +236,11 @@ class TTSService:
 
             if not built:
                 raise RuntimeError(
-                    "No TTS provider is configured (checked ElevenLabs, Cartesia, "
-                    "Qwen3-TTS, OpenAI)."
+                    "No TTS provider is configured (checked ElevenLabs, Cartesia, OpenAI)."
                 )
 
             self.chain = [
-                _ChainedProvider(name, service, _cooldown_seconds_for(name, cooldown_seconds))
+                _ChainedProvider(name, service, cooldown_seconds)
                 for name, service in built
             ]
 
