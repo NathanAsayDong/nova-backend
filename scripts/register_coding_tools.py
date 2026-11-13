@@ -30,11 +30,15 @@ CODING_TOOLS: list[dict] = [
             "Hand a real coding task to Claude Code running on Nate's Mac. Use this "
             "for work that means reading and changing a codebase — building a "
             "feature, fixing a bug, refactoring — not for answering questions about "
-            "code, which you should just answer. The task runs in the repo's REAL "
-            "working tree on whatever branch is checked out, so edits appear live in "
-            "Nate's editor; it never switches branches or commits on its own. One "
-            "running task per repo at a time; finished tasks do not block it, and "
-            "pass isolate=true to work in a separate worktree instead. If the work continues something he has "
+            "code, which you should just answer. By default the task runs in its "
+            "own git worktree on its own branch, so any number of tasks can run "
+            "against the same repo at once without fighting over the same files; "
+            "it never switches branches or commits on its own, and the branch is "
+            "there to review or merge when it's done. Pass isolate=false to instead "
+            "run in the repo's REAL working tree on whatever branch is checked out, "
+            "so edits appear live in Nate's editor — only one task at a time can use "
+            "the real tree, and a second one is refused until the first stops. If "
+            "the work continues something he has "
             "already discussed with Claude, use continue_claude_thread instead so "
             "the context carries over. It runs for minutes to "
             "an hour: say you have started it and move on, then use check_coding_task "
@@ -66,7 +70,7 @@ CODING_TOOLS: list[dict] = [
                     },
                     "isolate": {
                         "type": "boolean",
-                        "description": "Work in its own git worktree instead of the repo's real working tree. Defaults to false.",
+                        "description": "Work in its own git worktree and branch instead of the repo's real working tree. Defaults to true; pass false to use the real working tree instead (only one such task per repo at a time).",
                     },
                 },
                 "required": ["repo", "instructions"],
@@ -78,9 +82,11 @@ CODING_TOOLS: list[dict] = [
         "name": "check_coding_task",
         "description": (
             "What the coding agent is doing. With no session_id it reports every "
-            "task still open, which is what 'how's that going?' usually means. This "
-            "reads Nova's own record rather than the Mac, so it answers instantly "
-            "and works even when the laptop is asleep."
+            "task still open — across every repo and worktree, since several can "
+            "run at once — with each one's repo and branch, which is what 'how's "
+            "that going?' usually means. This reads Nova's own record rather than "
+            "the Mac, so it answers instantly and works even when the laptop is "
+            "asleep."
         ),
         "config": {
             "type": "service_method",
@@ -193,8 +199,10 @@ CODING_TOOLS: list[dict] = [
             "it on — the agent resumes with all of that thread's context instead "
             "of starting cold. Prefer this over start_coding_task whenever the "
             "work continues something already discussed. It runs in the repo's "
-            "real working tree, so edits appear live in his editor. Pass "
-            "'instructions' to give it the next task, or leave it out just to "
+            "real working tree, so edits appear live in his editor — if another "
+            "task already has that real working tree open, this is refused rather "
+            "than running two agents on the same files; stop that task first. "
+            "Pass 'instructions' to give it the next task, or leave it out just to "
             "open the thread."
         ),
         "config": {

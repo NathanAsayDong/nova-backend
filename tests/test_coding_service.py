@@ -16,6 +16,11 @@ from uuid import uuid4
 
 from src.service.coding_service import CodingService
 
+# Pure stdlib + git subprocess, no claude_agent_sdk — unlike sessions.py, this
+# imports fine in the tower's own venv, so these tests are not gated behind
+# the skipIf below.
+from mac_agent.novacode import worktree as _worktree
+
 
 class FakeLink:
     connected = True
@@ -110,11 +115,13 @@ if __name__ == "__main__":
 
 class WorkingTreeTests(unittest.TestCase):
     """
-    Sessions run in the repo Nate actually has open, not a hidden worktree.
+    Sessions default to their own worktree, so several can run against one
+    repo at once; isolate=false opts into the repo's real working tree,
+    which still takes one task at a time.
 
     The tool description is part of the behaviour here: it is the only thing
-    telling Nova that a repo takes one task at a time and that continuing an
-    existing thread is usually better than starting cold.
+    telling Nova that isolated tasks run in parallel by default and that
+    continuing an existing thread is usually better than starting cold.
     """
 
     @classmethod
@@ -134,12 +141,15 @@ class WorkingTreeTests(unittest.TestCase):
         os.environ.clear()
         os.environ.update(cls._env)
 
-    def test_start_describes_the_real_working_tree(self):
+    def test_start_describes_isolate_by_default_with_a_real_tree_escape_hatch(self):
         start = next(t for t in self.tools if t["name"] == "start_coding_task")
 
+        self.assertIn("own git worktree", start["description"])
         self.assertIn("REAL working tree", start["description"])
         self.assertIn("never switches branches", start["description"])
-        self.assertNotIn("nova/<slug>", start["description"])
+
+        isolate_prop = start["config"]["input_schema"]["properties"]["isolate"]
+        self.assertIn("Defaults to true", isolate_prop["description"])
 
     def test_the_history_tools_are_registered_and_wired(self):
         by_name = {t["name"]: t for t in self.tools}
@@ -298,7 +308,7 @@ class FinishedSessionTowerTests(unittest.TestCase):
 
         self.assertIs(seen["isolate"], True)
 
-    def test_isolate_defaults_to_false(self):
+    def test_isolate_defaults_to_true(self):
         import asyncio
 
         seen = {}
@@ -313,7 +323,7 @@ class FinishedSessionTowerTests(unittest.TestCase):
         service = self._service(SpyLink())
         asyncio.run(service.start(repo="r", instructions="i"))
 
-        self.assertIs(seen["isolate"], False)
+        self.assertIs(seen["isolate"], True)
 
     def test_stale_starting_rows_are_reconciled_and_fresh_ones_are_not(self):
         from datetime import timedelta
@@ -459,6 +469,7 @@ class CompletionNotificationTests(unittest.TestCase):
 try:
     from mac_agent.novacode import protocol as _mac_protocol
     from mac_agent.novacode import sessions as _mac_sessions
+    from mac_agent.novacode import worktree as _mac_worktree
 except ImportError:  # the Claude SDK lives in mac_agent's own venv
     _mac_sessions = None
 
@@ -557,3 +568,199 @@ class MacSessionLifecycleTests(unittest.TestCase):
 
         self.assertEqual(session.status, "working")
         self.assertIn(session.id, manager.sessions)
+
+
+class WorktreeCollisionTests(unittest.TestCase):
+    """
+    Several tasks now run against one repo at once, each in its own worktree
+    — so two tasks that happen to share a title (or collide with a leftover
+    branch from a previous run) must get distinct names, not a WorktreeError.
+    """
+
+    def setUp(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name) / "repo"
+        self.repo.mkdir()
+        self.worktree_root = Path(self._tmp.name) / "worktrees"
+
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "nova@example.com"],
+            ["config", "user.name", "Nova"],
+        ):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
+        (self.repo / "README.md").write_text("hi")
+        subprocess.run(["git", "-C", str(self.repo), "add", "README.md"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "commit", "-q", "-m", "initial"],
+            check=True, capture_output=True,
+        )
+
+    def _branches(self):
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "-C", str(self.repo), "branch", "--list"],
+            check=True, capture_output=True, text=True,
+        )
+        return out.stdout
+
+    def test_two_concurrent_tasks_with_the_same_title_get_separate_worktrees_and_branches(self):
+        first = _worktree.create(self.repo, self.worktree_root, "fix the thing")
+        second = _worktree.create(self.repo, self.worktree_root, "fix the thing")
+
+        self.assertNotEqual(first.path, second.path)
+        self.assertNotEqual(first.branch, second.branch)
+        self.assertTrue(first.path.is_dir())
+        self.assertTrue(second.path.is_dir())
+        self.assertTrue(first.branch.startswith("nova/fix-the-thing"))
+        self.assertTrue(second.branch.startswith("nova/fix-the-thing"))
+
+    def test_a_leftover_branch_with_the_same_slug_gets_a_suffix_instead_of_raising(self):
+        import subprocess
+
+        # A stale branch from a previous run, with no worktree checked out.
+        subprocess.run(
+            ["git", "-C", str(self.repo), "branch", "nova/retry-the-deploy"],
+            check=True, capture_output=True,
+        )
+
+        workspace = _worktree.create(self.repo, self.worktree_root, "retry the deploy")
+
+        self.assertNotEqual(workspace.branch, "nova/retry-the-deploy")
+        self.assertTrue(workspace.branch.startswith("nova/retry-the-deploy-"))
+        self.assertIn(workspace.branch, self._branches())
+
+    def test_remove_drops_the_worktree_but_keeps_the_branch(self):
+        workspace = _worktree.create(self.repo, self.worktree_root, "cleanup me")
+        self.assertTrue(workspace.path.exists())
+
+        _worktree.remove(workspace)
+
+        self.assertFalse(workspace.path.exists())
+        self.assertIn(workspace.branch, self._branches())
+
+
+@unittest.skipIf(_mac_sessions is None, "claude_agent_sdk not installed here")
+class MacConcurrentSessionTests(unittest.TestCase):
+    """
+    The actual point of this change: several isolated sessions run against
+    one repo in parallel, a non-isolated one still refuses to share a real
+    tree with another live session, and stopping an isolated session cleans
+    up after itself.
+    """
+
+    def setUp(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.repo_name = "myrepo"
+        repo = root / self.repo_name
+        repo.mkdir()
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "nova@example.com"],
+            ["config", "user.name", "Nova"],
+        ):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+        (repo / "README.md").write_text("hi")
+        subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "initial"],
+            check=True, capture_output=True,
+        )
+
+        self.config = SimpleNamespace(
+            repos_root=root,
+            worktree_root=root / "worktrees",
+            idle_close_seconds=0,
+            sandbox=False,
+            permission_mode="acceptEdits",
+            model=None,
+            max_budget_usd=None,
+            child_env=lambda: {},
+        )
+
+        class FakeClient:
+            def __init__(self, options):
+                self.options = options
+
+            async def connect(self):
+                pass
+
+            async def query(self, text):
+                pass
+
+            async def receive_messages(self):
+                return
+                yield  # pragma: no cover - makes this an async generator
+
+            async def disconnect(self):
+                pass
+
+        patcher = patch.object(_mac_sessions, "ClaudeSDKClient", FakeClient)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        async def sink(_event):
+            pass
+
+        self.manager = _mac_sessions.SessionManager(self.config, sink)
+
+    def test_two_concurrent_isolated_tasks_on_one_repo_get_separate_worktrees_and_branches(self):
+        import asyncio
+
+        async def scenario():
+            first = await self.manager.start(
+                "s1", self.repo_name, "do thing one", title="same title", isolate=True
+            )
+            second = await self.manager.start(
+                "s2", self.repo_name, "do thing two", title="same title", isolate=True
+            )
+            return first, second
+
+        first, second = asyncio.run(scenario())
+
+        self.assertNotEqual(first["cwd"], second["cwd"])
+        self.assertNotEqual(first["branch"], second["branch"])
+
+    def test_isolate_false_still_refuses_while_the_real_tree_is_occupied(self):
+        import asyncio
+
+        async def scenario():
+            await self.manager.start("s1", self.repo_name, "do it", isolate=False)
+            await self.manager.start("s2", self.repo_name, "do it again", isolate=False)
+
+        with self.assertRaises(ValueError) as caught:
+            asyncio.run(scenario())
+
+        self.assertIn("already working", str(caught.exception))
+
+    def test_stopping_an_isolated_session_removes_its_worktree_but_keeps_the_branch(self):
+        import asyncio
+        import subprocess
+
+        async def scenario():
+            await self.manager.start("s1", self.repo_name, "do it", isolate=True)
+            workspace = self.manager.sessions["s1"].workspace
+            await self.manager.stop("s1")
+            return workspace
+
+        workspace = asyncio.run(scenario())
+
+        self.assertFalse(workspace.path.exists())
+        out = subprocess.run(
+            ["git", "-C", str(self.config.repos_root / self.repo_name), "branch", "--list", workspace.branch],
+            check=True, capture_output=True, text=True,
+        )
+        self.assertIn(workspace.branch, out.stdout)
