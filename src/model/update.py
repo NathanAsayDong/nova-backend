@@ -28,6 +28,15 @@ class Update(SQLModel, table=True):
     # callback uses it to find its way back to this row.
     call_sid: str | None = Field(default=None)
 
+    # Notification-queue fields (see migration 010). Both null for a plain
+    # badge-only update; set together by the three completion paths that
+    # feed the in-conversation notification queue (background agent, coding
+    # task, scheduled task). "Delivered" for these is is_viewed, not
+    # delivered_at above — see the migration for why those stay separate.
+    kind: str | None = Field(default=None)
+    status: str | None = Field(default=None)
+    link: str | None = Field(default=None)
+
     def to_payload(self) -> dict:
         return self.model_dump(
             exclude={"id"},

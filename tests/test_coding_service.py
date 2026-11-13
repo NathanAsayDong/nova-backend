@@ -353,6 +353,109 @@ class FinishedSessionTowerTests(unittest.TestCase):
         self.assertNotIn("isolate", tool["config"]["input_schema"]["required"])
 
 
+class CompletionNotificationTests(unittest.TestCase):
+    """
+    record_event feeds the notification queue the agent loop checks at the
+    start of Nate's next turn (see AgentLoop._conversation_turn): a 'result'
+    or 'error' event -- but nothing else -- should file a kind='coding_task'
+    Update, tagged success or failed, carrying the same rollup line Nova
+    would say for 'how's it going'.
+    """
+
+    def _session(self, **overrides):
+        from src.model.coding_session import CodingSession
+
+        fields = dict(
+            session_id=uuid4(),
+            title="Fix the thing",
+            repo="nova-backend",
+            instructions="fix it",
+            project_id=5,
+            last_seq=0,
+        )
+        fields.update(overrides)
+        return CodingSession(**fields)
+
+    def _service(self, session):
+        from unittest.mock import MagicMock
+
+        with patch("src.service.coding_service.CodingSessionDao") as dao_cls:
+            dao_cls.return_value = MagicMock()
+            service = CodingService()
+        service.dao.get.return_value = session
+        service.update_service = MagicMock()
+        return service
+
+    def test_a_successful_result_files_a_success_notification(self):
+        session = self._session()
+        service = self._service(session)
+
+        service.record_event(
+            {"session_id": str(session.session_id), "seq": 1, "type": "result",
+             "result": "All tests pass.", "is_error": False}
+        )
+
+        service.update_service.create_update.assert_called_once()
+        kwargs = service.update_service.create_update.call_args.kwargs
+        self.assertEqual(kwargs["kind"], "coding_task")
+        self.assertEqual(kwargs["status"], "success")
+        self.assertEqual(kwargs["project_id"], 5)
+        self.assertIn("Fix the thing", kwargs["update_message"])
+        self.assertIn("All tests pass.", kwargs["update_message"])
+
+    def test_a_failed_result_files_a_failed_notification(self):
+        session = self._session()
+        service = self._service(session)
+
+        service.record_event(
+            {"session_id": str(session.session_id), "seq": 1, "type": "result",
+             "result": "Could not finish.", "is_error": True}
+        )
+
+        kwargs = service.update_service.create_update.call_args.kwargs
+        self.assertEqual(kwargs["kind"], "coding_task")
+        self.assertEqual(kwargs["status"], "failed")
+
+    def test_an_error_event_files_a_failed_notification(self):
+        session = self._session()
+        service = self._service(session)
+
+        service.record_event(
+            {"session_id": str(session.session_id), "seq": 1, "type": "error",
+             "detail": "the Mac went to sleep"}
+        )
+
+        kwargs = service.update_service.create_update.call_args.kwargs
+        self.assertEqual(kwargs["kind"], "coding_task")
+        self.assertEqual(kwargs["status"], "failed")
+
+    def test_ordinary_progress_events_file_no_notification(self):
+        session = self._session()
+        service = self._service(session)
+
+        for event_type in ("started", "tool", "text"):
+            service.record_event(
+                {"session_id": str(session.session_id), "seq": 1, "type": event_type}
+            )
+
+        service.update_service.create_update.assert_not_called()
+
+    def test_a_failure_filing_the_notification_does_not_lose_the_event(self):
+        """record_event's own outer try/except must not swallow this as a
+        reason to skip persisting the event -- the dao.update above already
+        ran by the time the notification create_update is attempted."""
+        session = self._session()
+        service = self._service(session)
+        service.update_service.create_update.side_effect = RuntimeError("db down")
+
+        service.record_event(
+            {"session_id": str(session.session_id), "seq": 1, "type": "result",
+             "result": "done", "is_error": False}
+        )
+
+        service.dao.update.assert_called_once()
+
+
 try:
     from mac_agent.novacode import protocol as _mac_protocol
     from mac_agent.novacode import sessions as _mac_sessions

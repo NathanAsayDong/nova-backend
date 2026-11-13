@@ -19,6 +19,7 @@ from uuid import UUID
 
 from src.dao.coding_session_dao import CodingSessionDao
 from src.model.coding_session import CodingEvent, CodingSession, CodingStatus
+from src.service.update_service import UpdateService
 
 # Event types that say the session moved on rather than just chattered.
 _MILESTONE_TYPES = {"started", "result", "error", "closed"}
@@ -39,6 +40,11 @@ class CodingService:
 
     def __init__(self) -> None:
         self.dao = CodingSessionDao()
+        # Lazy, not eager: ToolService builds a fresh CodingService per call
+        # (see the class-attribute note above), and several existing tests
+        # construct one with only CodingSessionDao mocked out. Constructing
+        # UpdateService (and the DAOs it owns) here unconditionally would
+        # require real Supabase credentials in every one of those tests.
         self.update_service: Any = None
 
     @classmethod
@@ -389,6 +395,12 @@ class CodingService:
             fields: dict[str, Any] = {"last_seq": max(seq, session.last_seq)}
             fields["rollup"] = self._rollup(session_id, session, event)
 
+            # Set only when this event is a completion (success or failure) —
+            # "started" and ordinary progress events are neither. Checked
+            # after the dao.update below so the notification's summary is the
+            # same one-sentence rollup Nova would say for "how's it going".
+            notification_status: str | None = None
+
             if kind == "started":
                 fields.update(
                     status=CodingStatus.WORKING,
@@ -396,12 +408,15 @@ class CodingService:
                     cwd=event.get("cwd"),
                 )
             elif kind == "result":
+                is_error = bool(event.get("is_error"))
                 fields.update(
-                    status=CodingStatus.ERROR if event.get("is_error") else CodingStatus.IDLE,
+                    status=CodingStatus.ERROR if is_error else CodingStatus.IDLE,
                     last_result=(event.get("result") or "")[:4000],
                 )
+                notification_status = "failed" if is_error else "success"
             elif kind == "error":
                 fields["status"] = CodingStatus.ERROR
+                notification_status = "failed"
             elif kind == "closed":
                 fields.update(
                     status=CodingStatus.CLOSED,
@@ -412,6 +427,24 @@ class CodingService:
 
             if kind in _MILESTONE_TYPES:
                 self.dao.prune_events(session_id)
+
+            # Feeds the notification queue the agent loop checks at the start
+            # of Nate's next turn (see AgentLoop._conversation_turn). Best
+            # effort, like every other update-filing call in the codebase: the
+            # event itself is already recorded above, so a failure here must
+            # not look like the event was lost.
+            if notification_status is not None:
+                if self.update_service is None:
+                    self.update_service = UpdateService()
+                try:
+                    self.update_service.create_update(
+                        update_message=f"Coding task '{session.title}': {fields['rollup']}",
+                        project_id=session.project_id,
+                        kind="coding_task",
+                        status=notification_status,
+                    )
+                except Exception as exc:
+                    print(f"Could not record coding task notification: {exc}")
         except Exception as exc:
             print(f"Could not record coding event: {exc}")
 

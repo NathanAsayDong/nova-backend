@@ -50,12 +50,18 @@ class FakeUpdateService:
         project_id=None,
         conversation_uuid=None,
         report_type=None,
+        kind=None,
+        status=None,
+        link=None,
     ):
         record = {
             "update_message": update_message,
             "project_id": project_id,
             "conversation_uuid": conversation_uuid,
             "report_type": report_type,
+            "kind": kind,
+            "status": status,
+            "link": link,
         }
         self.created.append(record)
         return record
@@ -129,6 +135,11 @@ class BackgroundAgentTests(unittest.TestCase):
         self.assertEqual(update["update_message"], "All done: two files fixed.")
         self.assertEqual(update["conversation_uuid"], str(self.conversation_uuid))
         self.assertEqual(update["project_id"], 3)
+        # Tags this as a notification-queue entry: AgentLoop._conversation_turn
+        # picks up kind-tagged, unviewed updates at the start of Nate's next
+        # turn in any conversation.
+        self.assertEqual(update["kind"], "background_agent")
+        self.assertEqual(update["status"], "success")
 
     def test_background_uses_background_prompt_and_project_context(self):
         self.agent_loop.run_agent(
@@ -161,9 +172,31 @@ class BackgroundAgentTests(unittest.TestCase):
         self._join_background()
 
         # The loop converts API errors into a reply rather than raising, so
-        # the failure surfaces as the update message either way.
+        # the failure surfaces as the update message either way. Nothing
+        # actually propagated out of _run_agent_loop here, so from
+        # _run_background_agent's own point of view the run completed --
+        # see test_background_crash_before_completion_records_failed_status
+        # below for the genuine-crash path that does get tagged "failed".
         self.assertEqual(len(self.update_service.created), 1)
         self.assertIn("fail", self.update_service.created[0]["update_message"].lower())
+        self.assertEqual(self.update_service.created[0]["kind"], "background_agent")
+        self.assertEqual(self.update_service.created[0]["status"], "success")
+
+    def test_background_crash_before_completion_records_failed_status(self):
+        """
+        A genuine crash -- as opposed to _run_agent_loop's own internal
+        recovery, which always returns a described-failure string rather
+        than raising (see the test above) -- is the one path that reaches
+        _run_background_agent's except clause and should be tagged "failed".
+        """
+        self.agent_loop._run_agent_loop = mock.Mock(side_effect=RuntimeError("crashed"))
+        self.agent_loop.run_agent(prompt="do the thing", background=True)
+        self._join_background()
+
+        update = self.update_service.created[0]
+        self.assertIn("crashed", update["update_message"])
+        self.assertEqual(update["kind"], "background_agent")
+        self.assertEqual(update["status"], "failed")
 
     def test_background_with_no_prompt_raises_before_spawning(self):
         with self.assertRaises(ValueError):
