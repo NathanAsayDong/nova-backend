@@ -5,6 +5,7 @@ relevance gate on retrieval, and how the block reaches the prompt.
 
 import unittest
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from prompting.prompt_source_prompt import PromptSourceEnum
@@ -180,13 +181,25 @@ class FakeUpdateService:
         return self._unviewed.get(update_id)
 
 
-def notification(id, kind="coding_task", status="success", message="PR opened.", link=None):
+def notification(
+    id,
+    kind="coding_task",
+    status="success",
+    message="PR opened.",
+    link=None,
+    conversation_uuid=None,
+    project_id=None,
+    created_at=None,
+):
     return {
         "id": id,
         "kind": kind,
         "status": status,
         "update_message": message,
         "link": link,
+        "conversation_uuid": str(conversation_uuid) if conversation_uuid else None,
+        "project": {"id": project_id} if project_id is not None else None,
+        "created_at": created_at.isoformat() if created_at else None,
     }
 
 
@@ -409,6 +422,200 @@ class PendingNotificationsInjectionTests(MemoryInjectionTests):
         self.assertLess(
             content.index("<pending_notifications>"), content.index("<recalled_memory>")
         )
+
+    def test_injection_requires_no_explicit_trigger(self):
+        """
+        There is no flag, header, or special first word that turns this
+        check on -- every call to run_turn here uses a plain prompt with no
+        trigger of any kind, and the notification still surfaces. This test
+        exists to make that property explicit rather than merely implicit
+        in every other test in this class.
+        """
+        self.update_service._unviewed[7] = notification(7, message="PR #42 merged.")
+        self.run_turn(prompt="hey")
+        self.assertIn("<pending_notifications>", self.first_user_message())
+
+
+class NotificationScopingTests(PendingNotificationsInjectionTests):
+    """
+    An update is relevant to this turn's conversation when it matches this
+    conversation_uuid, matches this conversation's project, or carries no
+    scope at all -- and irrelevant (held for whatever turn it belongs to)
+    otherwise. See AgentLoop._notification_scope_matches.
+    """
+
+    def test_matching_conversation_uuid_is_included(self):
+        self.update_service._unviewed[1] = notification(
+            1, message="Spawned from here.", conversation_uuid=self.conversation_id
+        )
+        self.run_turn()
+        self.assertIn("Spawned from here.", self.first_user_message())
+
+    def test_matching_project_is_included(self):
+        self.conversation_service.project_id = 9
+        self.update_service._unviewed[2] = notification(
+            2, message="Same project coding task.", project_id=9
+        )
+        self.run_turn()
+        self.assertIn("Same project coding task.", self.first_user_message())
+
+    def test_scope_less_update_is_included(self):
+        self.update_service._unviewed[3] = notification(
+            3, message="Global responsibility follow-up."
+        )
+        self.run_turn()
+        self.assertIn("Global responsibility follow-up.", self.first_user_message())
+
+    def test_other_conversation_and_other_project_is_excluded(self):
+        self.conversation_service.project_id = 9
+        self.update_service._unviewed[4] = notification(
+            4,
+            message="Someone else's thread.",
+            conversation_uuid=uuid4(),
+            project_id=123,
+        )
+        self.run_turn()
+        content = self.first_user_message()
+        self.assertNotIn("Someone else's thread.", content)
+        self.assertNotIn("<pending_notifications>", content)
+        # Left unviewed for whichever turn it actually belongs to.
+        self.assertEqual(self.update_service.marked_viewed, [])
+
+    def test_different_users_update_is_excluded_via_scope(self):
+        # This fixture has no per-user id on Update (Nova is single-tenant
+        # today), so "a different user's update" is modeled the same way as
+        # any other out-of-scope row: a conversation_uuid and project that
+        # belong to someone else's thread. Scoping excludes it exactly like
+        # the cross-conversation/cross-project case above.
+        self.update_service._unviewed[5] = notification(
+            5,
+            message="Not for this conversation.",
+            conversation_uuid=uuid4(),
+            project_id=999,
+        )
+        self.run_turn()
+        self.assertNotIn("Not for this conversation.", self.first_user_message())
+
+
+class NotificationRecencyTests(PendingNotificationsInjectionTests):
+    """
+    The 24h-or-this-conversation rule: a project-scoped or scope-less update
+    older than 24h is stale backlog and held back, but one tied to THIS
+    still-open conversation surfaces no matter its age. See
+    AgentLoop._notification_is_eligible.
+    """
+
+    def test_old_update_scoped_to_this_conversation_still_surfaces(self):
+        ancient = datetime.now(timezone.utc) - timedelta(days=30)
+        self.update_service._unviewed[1] = notification(
+            1,
+            message="Ancient but still this thread.",
+            conversation_uuid=self.conversation_id,
+            created_at=ancient,
+        )
+        self.run_turn()
+        self.assertIn("Ancient but still this thread.", self.first_user_message())
+
+    def test_old_project_scoped_update_is_held_back(self):
+        self.conversation_service.project_id = 9
+        stale = datetime.now(timezone.utc) - timedelta(hours=25)
+        self.update_service._unviewed[2] = notification(
+            2, message="Stale project backlog.", project_id=9, created_at=stale
+        )
+        self.run_turn()
+        content = self.first_user_message()
+        self.assertNotIn("Stale project backlog.", content)
+        self.assertEqual(self.update_service.marked_viewed, [])
+
+    def test_recent_project_scoped_update_surfaces(self):
+        self.conversation_service.project_id = 9
+        fresh = datetime.now(timezone.utc) - timedelta(hours=1)
+        self.update_service._unviewed[3] = notification(
+            3, message="Fresh project update.", project_id=9, created_at=fresh
+        )
+        self.run_turn()
+        self.assertIn("Fresh project update.", self.first_user_message())
+
+    def test_old_scope_less_update_is_held_back(self):
+        stale = datetime.now(timezone.utc) - timedelta(hours=48)
+        self.update_service._unviewed[4] = notification(
+            4, message="Old global update.", created_at=stale
+        )
+        self.run_turn()
+        self.assertNotIn("Old global update.", self.first_user_message())
+
+
+class NotificationCapTests(PendingNotificationsInjectionTests):
+    """Per-turn cap at 5 items, with a trailing "+N more" count. See
+    AgentLoop._select_notifications / _build_notifications_block."""
+
+    def _fill(self, count):
+        for i in range(count):
+            self.update_service._unviewed[i] = notification(i, message=f"Item {i} done.")
+
+    def test_exactly_five_shows_all_five_with_no_overflow_note(self):
+        self._fill(5)
+        self.run_turn()
+        content = self.first_user_message()
+        for i in range(5):
+            self.assertIn(f"Item {i} done.", content)
+        self.assertNotIn("more update", content)
+        self.assertEqual(sorted(self.update_service.marked_viewed), list(range(5)))
+
+    def test_more_than_five_caps_at_five_and_reports_the_remainder(self):
+        self._fill(8)
+        self.run_turn()
+        content = self.first_user_message()
+        for i in range(5):
+            self.assertIn(f"Item {i} done.", content)
+        for i in range(5, 8):
+            self.assertNotIn(f"Item {i} done.", content)
+        self.assertIn("+3 more update", content)
+        # Only the injected five are marked delivered -- the other three
+        # stay unviewed to be picked up (and re-counted) on a later turn.
+        self.assertEqual(sorted(self.update_service.marked_viewed), list(range(5)))
+
+    def test_summary_is_truncated_to_600_characters(self):
+        self.update_service._unviewed[1] = notification(1, message="x" * 900)
+        self.run_turn()
+        content = self.first_user_message()
+        # 600 chars of summary plus the single truncation marker character.
+        self.assertIn("x" * 599 + "…", content)
+        self.assertNotIn("x" * 601, content)
+
+
+class NotificationCrossMediumTests(PendingNotificationsInjectionTests):
+    """
+    The voice (SPEECH_PROMPT) and glasses (GLASSES_PROMPT) paths run the
+    exact same `_conversation_turn` as chat -- there is no separate
+    injection path per medium -- so one test per medium here is enough to
+    confirm that, not a full redundant suite.
+    """
+
+    def run_turn(self, prompt="when do I deploy", prompt_source=None):
+        from prompting.prompt_source_prompt import PromptSourceEnum
+
+        return list(
+            self.agent_loop.conversation_loop_events(
+                prompt,
+                self.conversation_id,
+                prompt_source=prompt_source or PromptSourceEnum.CHAT_PROMPT,
+            )
+        )
+
+    def test_voice_path_also_gets_the_notification(self):
+        from prompting.prompt_source_prompt import PromptSourceEnum
+
+        self.update_service._unviewed[7] = notification(7, message="PR #42 merged.")
+        self.run_turn(prompt_source=PromptSourceEnum.SPEECH_PROMPT)
+        self.assertIn("PR #42 merged.", self.first_user_message())
+
+    def test_glasses_path_also_gets_the_notification(self):
+        from prompting.prompt_source_prompt import PromptSourceEnum
+
+        self.update_service._unviewed[7] = notification(7, message="PR #42 merged.")
+        self.run_turn(prompt_source=PromptSourceEnum.GLASSES_PROMPT)
+        self.assertIn("PR #42 merged.", self.first_user_message())
 
 
 if __name__ == "__main__":
