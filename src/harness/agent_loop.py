@@ -3,6 +3,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any
@@ -122,6 +123,26 @@ _MEMORY_CLOSE_TAG = "</recalled_memory>"
 # kinds of "things the model is being told that the user didn't say."
 _NOTIFICATIONS_OPEN_TAG = "<pending_notifications>"
 _NOTIFICATIONS_CLOSE_TAG = "</pending_notifications>"
+
+# How many notification-queue items one turn will inject at once. A turn
+# that came back from a long absence can have a dozen finished runs waiting;
+# saying all of them at once is not "telling Nate what happened", it's a
+# wall of text. The rest stay unviewed and queue for later turns, with a
+# trailing count so nothing is silently dropped.
+_MAX_NOTIFICATIONS_PER_TURN = 5
+
+# How long a project-scoped or global (scope-less) notification stays
+# eligible to surface before it's considered stale backlog. An item scoped
+# to the conversation Nate is actually in is exempt from this -- see
+# AgentLoop._notification_is_eligible -- because the conversation being
+# still open is itself evidence it's still relevant, however old.
+_NOTIFICATION_RECENCY = timedelta(hours=24)
+
+# Per-item cap on how much of an update's stored result text rides into the
+# prompt. update_message is already a real summary (a one-sentence rollup
+# for a coding task, the agent's own closing summary for a background run)
+# rather than a bare status flag, but nothing stops it from being long.
+_NOTIFICATION_SUMMARY_MAX_CHARS = 600
 
 # What a photo becomes once it is no longer sent: in the transcript, and in
 # history once a newer photo has replaced it.
@@ -414,6 +435,160 @@ class AgentLoop:
             block = ""
         _mark_timing(timer, "memory_late", result="block" if block else "empty")
         return block, True
+
+    # ---------- pending notifications ----------
+    #
+    # Finished background agent / coding task / scheduled task work the user
+    # hasn't been told about yet. Checked on every turn in every
+    # conversation, unconditionally -- there is no "trigger" that has to
+    # fire first, because the whole point is to tell Nate at the start of
+    # whichever conversation he happens to be in next, not to wait for him
+    # to ask. See UpdateService.create_update's kind/status params for how a
+    # row becomes eligible at all, and _conversation_turn for where this
+    # plugs into the turn.
+
+    @staticmethod
+    def _notification_scope_matches(
+        entry: dict[str, Any], conversation_uuid: UUID, project_id: int | None
+    ) -> bool:
+        """
+        Whether `entry` is in scope for the conversation Nate is in right now.
+
+        Three ways in: filed against this exact conversation (a background
+        agent spawned from here), filed against this conversation's project
+        (a coding task / scheduled task tied to the same project), or
+        carrying no scope at all (a global, user-level update, e.g. a
+        responsibility or meeting follow-up with no project). Anything
+        scoped to a DIFFERENT conversation or project is left for whichever
+        turn it actually belongs to.
+        """
+        entry_conversation = entry.get("conversation_uuid")
+        entry_project = (entry.get("project") or {}).get("id")
+        if entry_conversation and entry_conversation == str(conversation_uuid):
+            return True
+        if (
+            entry_project is not None
+            and project_id is not None
+            and entry_project == project_id
+        ):
+            return True
+        return entry_conversation is None and entry_project is None
+
+    @staticmethod
+    def _notification_created_at(entry: dict[str, Any]) -> datetime | None:
+        """`entry`'s created_at as an aware datetime, or None if unparseable/absent."""
+        raw = entry.get("created_at")
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @classmethod
+    def _notification_is_eligible(
+        cls,
+        entry: dict[str, Any],
+        conversation_uuid: UUID,
+        project_id: int | None,
+        now: datetime,
+    ) -> bool:
+        """
+        Whether `entry` should ever surface in THIS conversation's turn.
+
+        Scope first (see `_notification_scope_matches`): out-of-scope items
+        never surface here, regardless of age. Within scope, an item tied to
+        THIS exact conversation surfaces no matter how old it is -- the
+        conversation being still open is itself the reason it's still
+        relevant. A project-scoped or scope-less item instead has to be
+        recent (see `_NOTIFICATION_RECENCY`), so a user who hasn't talked to
+        Nova in months doesn't get months of backlog dumped on the first
+        turn back. An item with no parseable created_at errs toward being
+        shown rather than silently dropped.
+        """
+        if not cls._notification_scope_matches(entry, conversation_uuid, project_id):
+            return False
+        if entry.get("conversation_uuid") == str(conversation_uuid):
+            return True
+        created_at = cls._notification_created_at(entry)
+        if created_at is None:
+            return True
+        return (now - created_at) <= _NOTIFICATION_RECENCY
+
+    @classmethod
+    def _select_notifications(
+        cls,
+        entries: list[dict[str, Any]],
+        conversation_uuid: UUID,
+        project_id: int | None,
+        now: datetime | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        Entries worth injecting this turn, oldest first, and how many more
+        eligible entries are left waiting beyond the per-turn cap.
+
+        `entries` is every unviewed update that already carries a
+        notification `kind` -- see the caller in _conversation_turn for why
+        a plain badge-only update (no kind) never reaches this filter at all.
+        """
+        now = now or datetime.now(timezone.utc)
+        eligible = [
+            entry
+            for entry in entries
+            if cls._notification_is_eligible(entry, conversation_uuid, project_id, now)
+        ]
+        selected = eligible[:_MAX_NOTIFICATIONS_PER_TURN]
+        overflow = len(eligible) - len(selected)
+        return selected, overflow
+
+    @staticmethod
+    def _notification_outcome(entry: dict[str, Any]) -> str:
+        status = entry.get("status")
+        if status == "success":
+            return "succeeded"
+        if status == "failed":
+            return "failed"
+        return "finished"
+
+    @classmethod
+    def _notification_line(cls, entry: dict[str, Any]) -> str:
+        """
+        One line for the injected block: outcome plus a real, truncated
+        summary of what happened -- not just the outcome by itself.
+        """
+        summary = (entry.get("update_message") or "").strip()
+        if len(summary) > _NOTIFICATION_SUMMARY_MAX_CHARS:
+            summary = summary[: _NOTIFICATION_SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+        line = f"- ({entry.get('kind')}) {cls._notification_outcome(entry)}: {summary}"
+        if entry.get("link"):
+            line += f" ({entry['link']})"
+        return line
+
+    @classmethod
+    def _build_notifications_block(
+        cls, entries: list[dict[str, Any]], overflow: int
+    ) -> str:
+        """
+        The text that rides in `<pending_notifications>` for a non-empty
+        selection, instructing the model to actually say something real
+        about each item rather than just announcing it's done.
+        """
+        if not entries:
+            return ""
+        lines = [cls._notification_line(entry) for entry in entries]
+        if overflow > 0:
+            plural = "s" if overflow != 1 else ""
+            lines.append(f"(+{overflow} more update{plural} waiting.)")
+        return (
+            "Background work finished since you last spoke with Nate. Lead "
+            "your reply with one short, spoken sentence per item below -- "
+            "state whether it succeeded or failed AND name one concrete "
+            "detail from its result summary (not just \"it's done\") -- "
+            "before addressing anything else:\n" + "\n".join(lines)
+        )
 
     @staticmethod
     def _augment(prompt: str, memory_block: str, notifications_block: str = "") -> str:
@@ -1432,34 +1607,29 @@ class AgentLoop:
         try:
             if self.update_service is None:
                 self.update_service = UpdateService()
-            pending_notifications = [
+            candidate_notifications = [
                 entry
                 for entry in self.update_service.get_unviewed_updates()
                 if entry.get("kind")
             ]
         except Exception as exc:
-            pending_notifications = []
+            candidate_notifications = []
             print(f"Could not check pending notifications (continuing without them): {exc}")
-        if pending_notifications:
-            lines = []
-            for entry in pending_notifications:
-                if entry.get("status") == "success":
-                    outcome = "succeeded"
-                elif entry.get("status") == "failed":
-                    outcome = "failed"
-                else:
-                    outcome = "finished"
-                line = f"- ({entry.get('kind')}) {outcome}: {entry.get('update_message')}"
-                if entry.get("link"):
-                    line += f" ({entry['link']})"
-                lines.append(line)
-            notifications_block = (
-                "Background work finished since you last spoke with Nate. "
-                "Lead your reply with one short, spoken sentence per item "
-                "below, each stating whether it succeeded or failed, before "
-                "addressing anything else:\n" + "\n".join(lines)
+        selected_notifications, notification_overflow = self._select_notifications(
+            candidate_notifications, conversation_uuid, conversation.project_id
+        )
+        if selected_notifications:
+            notifications_block = self._build_notifications_block(
+                selected_notifications, notification_overflow
             )
-            for entry in pending_notifications:
+            # Marked delivered only now that the block text above is fully
+            # built, not before -- a crash between fetching these rows and
+            # getting here leaves them unviewed for the next turn instead of
+            # losing them. mark_update_viewed only flips a row still
+            # unviewed (see UpdateDao.mark_viewed's compare-and-swap), so two
+            # turns racing on the same scope-less/project-scoped row can't
+            # both inject it.
+            for entry in selected_notifications:
                 update_id = entry.get("id")
                 if update_id is None:
                     continue

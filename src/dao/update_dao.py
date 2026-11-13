@@ -50,10 +50,21 @@ class UpdateDao(BaseDao):
         return self._to_model(self._model_class, response.data[0])
 
     def mark_viewed(self, id: int) -> Update | None:
+        """
+        Mark one update viewed, or no-op (returns None) if it already was.
+
+        The `is_viewed=False` in the WHERE clause makes this a
+        compare-and-swap, the same trick `claim_for_delivery` uses: two
+        turns racing to inject the same scope-less or project-scoped
+        notification both call this, but only the one that gets there while
+        the row is still unviewed gets a row back, so the item is delivered
+        exactly once even without a cross-call transaction.
+        """
         response = (
             self.client.table(self._table)
             .update({"is_viewed": True})
             .eq("id", id)
+            .eq("is_viewed", False)
             .execute()
         )
         if not response.data:
