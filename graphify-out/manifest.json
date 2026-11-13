@@ -90,8 +90,8 @@
     "semantic_hash": "6b251239aee14dd95394258928c1a18d"
   },
   "main.py": {
-    "mtime": 1794412474.2273755,
-    "seen": 1794412484.7258382,
+    "mtime": 1794412545.8162396,
+    "seen": 1794583925.26229,
     "ast_hash": "bda82e8b2b5d933635c67fc6932a1d91",
     "semantic_hash": ""
   },
@@ -114,8 +114,8 @@
     "semantic_hash": ""
   },
   "pyproject.toml": {
-    "mtime": 1794412474.2277203,
-    "seen": 1794412484.725872,
+    "mtime": 1794412545.8166356,
+    "seen": 1794583925.262322,
     "ast_hash": "aeff7c408c965676fcdfb68d50911dd5",
     "semantic_hash": ""
   },
@@ -648,8 +648,8 @@
     "semantic_hash": "239c19144eba16cc0abcede46cbdf4e4"
   },
   "src/service/tts_service.py": {
-    "mtime": 1794412474.2281475,
-    "seen": 1794412484.7271,
+    "mtime": 1794412545.8170824,
+    "seen": 1794583925.263446,
     "ast_hash": "6cf80e39776010110f67b370c7ac7e92",
     "semantic_hash": ""
   },
@@ -930,8 +930,8 @@
     "semantic_hash": "c2b764388bd367ad6c3a059818d12faa"
   },
   "tests/test_tts_service.py": {
-    "mtime": 1794412474.228826,
-    "seen": 1794412484.727509,
+    "mtime": 1794412545.8174515,
+    "seen": 1794583925.26384,
     "ast_hash": "831407e897a1efefeb2b56c0280c5757",
     "semantic_hash": ""
   },
@@ -1425,6 +1425,42 @@
     "mtime": 1793721236.8789034,
     "seen": 1794353652.181893,
     "ast_hash": "fd54e25e04c0305809fde8c2f5c5adde",
+    "semantic_hash": ""
+  },
+  "scripts/deploy_main.py": {
+    "mtime": 1794583739.2811937,
+    "seen": 1794583925.262346,
+    "ast_hash": "54d0863c5f5e6237929c1e93143e99dd",
+    "semantic_hash": ""
+  },
+  "scripts/register_deploy_tools.py": {
+    "mtime": 1794583767.0032434,
+    "seen": 1794583925.262377,
+    "ast_hash": "8db4d1a530b697ac551d9fb76d25447d",
+    "semantic_hash": ""
+  },
+  "src/service/deploy_service.py": {
+    "mtime": 1794583752.3159156,
+    "seen": 1794583925.26322,
+    "ast_hash": "ef1caaa1a2560bc8799d1256598c0449",
+    "semantic_hash": ""
+  },
+  "tests/test_deploy_main.py": {
+    "mtime": 1794583797.311867,
+    "seen": 1794583925.263606,
+    "ast_hash": "934bbf8d523ace1e54eeff60c8354715",
+    "semantic_hash": ""
+  },
+  "tests/test_deploy_service.py": {
+    "mtime": 1794583906.2210414,
+    "seen": 1794583925.263607,
+    "ast_hash": "9b958a7bd6db69033b8629f1680ba91f",
+    "semantic_hash": ""
+  },
+  "scripts/protected_paths.txt": {
+    "mtime": 1794583771.2864294,
+    "seen": 1794583925.2640262,
+    "ast_hash": "ad009dcd4df63c35984b919fdccd8bcf",
     "semantic_hash": ""
   }
 }

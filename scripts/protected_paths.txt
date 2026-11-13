@@ -1,0 +1,16 @@
+# Paths future self-improvement runs are forbidden to modify.
+#
+# Nova's nightly self-improvement system branches, builds a capability
+# improvement, and opens a PR for Nate to review. That process must not be
+# able to touch the things that keep it honest and safe: its own personality,
+# and the deploy path that lets an approved PR actually reach production.
+# Modifying any of these from a self-improvement run should be treated as a
+# hard failure of that run, not a change to review normally.
+#
+# One path per line, relative to the repo root. Comments start with '#'.
+
+prompting/nova_persona_prompt.md
+scripts/deploy_main.py
+scripts/register_deploy_tools.py
+src/service/deploy_service.py
+scripts/protected_paths.txt
