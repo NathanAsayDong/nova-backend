@@ -31,6 +31,7 @@ from src.controller import nova_controller
 from src.controller.audio_ws import audio_file_bytes, transcribe_serialized
 from src.harness.streaming import iter_in_thread
 from src.service import sidekick_service as sidekick
+from src.service.interrupt_service import is_nova_interrupt_phrase
 from src.service.sidekick_service import (
     GateDecision,
     SidekickGate,
@@ -206,6 +207,13 @@ class SidekickConnection:
                 continue
             if not text or self.session is None:
                 continue
+            if is_nova_interrupt_phrase(text):
+                # "Nova stop" / "Nova pause": a command aimed at Nova, not
+                # content to overhear. Never echoed as `heard`, never added
+                # to the transcript, never reaches the gate or the model -
+                # same treatment the stop-phrase path gives it elsewhere.
+                await self.interrupt_and_cancel()
+                continue
             await self.try_send({"type": "heard", "text": text})
             if has_be_quiet_phrase(text):
                 await self.end("be_quiet")
@@ -269,6 +277,29 @@ class SidekickConnection:
             self.interrupted = True
             if self.speaker is not None and not self.speaker.done():
                 self.speaker.cancel()
+
+    async def interrupt_and_cancel(self) -> bool:
+        """
+        "Nova stop" / "Nova pause": a hard stop, not just a mute.
+
+        Unlike `interrupt()` (used when "Hey Nova" wakes Nova up mid-remark,
+        which lets the turn finish unheard so it is still persisted as a
+        remark), this cancels the in-flight response generation too -
+        nothing from this turn is kept - and tells the client the session is
+        idle again, the same event end_session's follow-up uses for a direct
+        voice turn.
+
+        A no-op (returns False) when Nova was not speaking: saying the
+        phrase while Nova is already quiet has nothing to interrupt.
+        """
+        if self.interjection is None or self.interjection.done():
+            return False
+        self.interrupted = True
+        if self.speaker is not None and not self.speaker.done():
+            self.speaker.cancel()
+        self.interjection.cancel()
+        await self.try_send(nova_controller.idle_stopped_event())
+        return True
 
     async def _interject(self, session: SidekickSession, decision: GateDecision) -> None:
         conversation_uuid = session.conversation_uuid

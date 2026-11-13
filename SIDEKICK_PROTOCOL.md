@@ -52,6 +52,7 @@ This file records the protocol as built.
 - **Interrupted:** after `interrupted` the server cancels the audio in flight and sends no more `speech_text` or audio for that interjection. The turn finishes unheard on the server, so the remark is still persisted whole, and is then reported as `done` with `"message":"Interrupted."`.
   - An audio stream cut off this way may get a `_start` with no matching `_end`.
 - **Message text:** a normal finish has `"message":"Remark complete."`.
+- **"Nova stop" / "Nova pause" (server-detected barge-in):** said aloud while Nova is speaking, this is matched server-side on the overheard transcript (`src/service/interrupt_service.py::is_nova_interrupt_phrase`) — no client event needed. Unlike `interrupted`, this is a hard stop: the audio is cancelled *and* the in-flight interjection turn is cancelled outright (nothing from it is kept), and the client gets `{"type":"follow_up_stopped","message":"Stopped. Returning to idle."}` instead of `done`. The utterance itself is never echoed as `heard` and never reaches the gate. Matching requires the wake word immediately before "stop"/"pause" ("nova stop", "nova pause"), as the whole utterance or the leading words of a short (≤4 word) one, so Nova's own voice saying "stop" can never trip its own interrupt, and a sentence that merely mentions the words ("tell Nova stop words list") does not match.
 
 ## Server behaviour
 - **Transcription:**
@@ -121,7 +122,10 @@ It also runs `/ws/sidekick` end to end:
 - `silent`
 - `tool_call`
 - `interrupted`
+- "Nova stop" mid-remark: cancels the turn and goes idle, no `heard`/gate/model call; a no-op when Nova is already quiet
 - be quiet
 - `stop`
 - the 60-minute cap
 - the transcript is wiped on close
+
+`tests/test_interrupt_service.py` covers `is_nova_interrupt_phrase` on its own: the bare phrase, case and punctuation, leading words of a short utterance, and the negatives that keep it from over-matching (a longer sentence that merely contains the words, reversed word order, Nova's own voice saying "stop" alone).

@@ -416,6 +416,19 @@ def has_stop_phrase(value: str) -> bool:
     )
 
 
+def idle_stopped_event() -> dict:
+    """
+    The event that returns a voice session to idle after Nova goes silent.
+
+    One literal, several triggers: the stop-phrase fast path above, the
+    end_session tool's follow-up (ConversationService.pop_stop_request), and
+    — via sidekick_controller — the "Nova stop"/"Nova pause" mid-speech
+    barge-in. All three mean the same thing to the client, so they all send
+    the same event rather than each inventing their own.
+    """
+    return {"type": "follow_up_stopped", "message": "Stopped. Returning to idle."}
+
+
 async def send_assistant_text(
     websocket: WebSocket,
     text: str,
@@ -1091,12 +1104,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                         transcript = request
 
                     if has_stop_phrase(transcript):
-                        await websocket.send_json(
-                            {
-                                "type": "follow_up_stopped",
-                                "message": "Stopped. Returning to idle.",
-                            }
-                        )
+                        await websocket.send_json(idle_stopped_event())
                         recording_started = False
                         chunks.clear()
                         continue
@@ -1320,12 +1328,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     stop_reason = conversation_service.pop_stop_request(conversation_id)
                     if stop_reason is not None:
                         print(f"Nova ended the session: {stop_reason}")
-                        await websocket.send_json(
-                            {
-                                "type": "follow_up_stopped",
-                                "message": "Stopped. Returning to idle.",
-                            }
-                        )
+                        await websocket.send_json(idle_stopped_event())
                 except ConversationClosedError as exc:
                     # Should be prevented by the pre-turn check above; kept as
                     # a backstop for races. The code lets the client drop its

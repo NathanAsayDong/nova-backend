@@ -8,6 +8,7 @@ glasses, the direct-turn counter, and the /ws/sidekick socket end to end with
 a fake transcriber, gate, agent loop and TTS.
 """
 
+import asyncio
 import threading
 import time
 import unittest
@@ -717,6 +718,51 @@ class SidekickSocketTests(unittest.TestCase):
         self.assertEqual([m["type"] for m in rest], ["done"])
         self.assertEqual(rest[0]["message"], "Interrupted.")
 
+    def test_nova_stop_cancels_the_remark_and_returns_to_idle(self):
+        self.loop.release = threading.Event()
+        self.loop.events = [
+            {"type": "speech_text", "text": "First,", "role": "status"},
+            {"type": "speech_text", "text": "and second.", "role": "final"},
+            {"type": "text_final", "text": "First, and second."},
+        ]
+        ctx, ws, _ = self.open(TestClient(self.app))
+        try:
+            self.say(ws, "go on")
+            ws.receive_json()  # heard
+            first = self.drain(ws, "assistant_audio_stream_end")
+            self.assertEqual(first[0]["text"], "First,")
+
+            # Said mid-remark: no "heard" echo, no reply, straight to idle -
+            # and unlike plain "interrupted", the turn itself is killed too.
+            self.say(ws, "Nova stop")
+            stopped = ws.receive_json()
+            self.assertEqual(
+                stopped,
+                {"type": "follow_up_stopped", "message": "Stopped. Returning to idle."},
+            )
+        finally:
+            # Unblock the generator's worker thread so nothing is left
+            # dangling for the next test.
+            self.loop.release.set()
+            time.sleep(0.1)
+            ctx.__exit__(None, None, None)
+
+        # Never reached the gate or the model - only "go on" did.
+        self.assertEqual(len(self.gate.calls), 1)
+        self.assertEqual(self.gate.calls[0][0], "go on")
+
+    def test_nova_stop_while_nova_is_quiet_does_nothing(self):
+        ctx, ws, conversation_id = self.open(TestClient(self.app))
+        try:
+            self.say(ws, "Nova stop")
+            ws.send_json({"event": "ping"})
+            self.assertEqual(ws.receive_json(), {"type": "pong"})
+        finally:
+            ctx.__exit__(None, None, None)
+        # Not echoed, not gated - a command with nothing to interrupt is
+        # simply dropped rather than treated as idle chatter.
+        self.assertEqual(self.gate.calls, [])
+
     def test_be_quiet_ends_the_session_and_wipes_the_transcript(self):
         ctx, ws, conversation_id = self.open(TestClient(self.app))
         try:
@@ -800,6 +846,116 @@ class TranscribeUtteranceTests(unittest.TestCase):
             text = sidekick_controller.transcribe_utterance(b"\x01\x00" * 100)
         self.assertEqual(text, "hello")
         self.assertEqual(seen, {"rate": 16000, "frames": b"\x01\x00" * 100, "background": True})
+
+
+class FakeSendWebSocket:
+    """Just enough of a websocket for `interrupt_and_cancel` to talk to."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent.append(payload)
+
+
+class InterruptAndCancelWiringTests(unittest.TestCase):
+    """
+    `SidekickConnection.interrupt_and_cancel` - the cancel-to-idle wiring
+    behind "Nova stop" / "Nova pause" - exercised directly, with no audio,
+    no transcriber and no agent loop. `test_nova_stop_cancels_the_remark_and_
+    returns_to_idle` above covers the same wiring through the real socket.
+    """
+
+    def test_a_no_op_when_nova_is_not_speaking(self):
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+
+        result = asyncio.run(connection.interrupt_and_cancel())
+
+        self.assertFalse(result)
+        self.assertEqual(websocket.sent, [])
+        self.assertFalse(connection.interrupted)
+
+    def test_a_finished_interjection_is_also_a_no_op(self):
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+
+        async def scenario():
+            async def already_done():
+                return None
+
+            connection.interjection = asyncio.create_task(already_done())
+            await connection.interjection  # let it finish before we check
+            return await connection.interrupt_and_cancel()
+
+        result = asyncio.run(scenario())
+
+        self.assertFalse(result)
+        self.assertEqual(websocket.sent, [])
+
+    def test_cancels_the_speaker_and_the_turn_and_sends_the_idle_event(self):
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+
+        async def scenario():
+            async def never_finishes():
+                await asyncio.sleep(100)
+
+            connection.interjection = asyncio.create_task(never_finishes())
+            connection.speaker = asyncio.create_task(never_finishes())
+            # Let both tasks actually start running before we interrupt them.
+            await asyncio.sleep(0)
+
+            result = await connection.interrupt_and_cancel()
+
+            # Both tasks are cancelled, but cancellation only lands on their
+            # next scheduling tick - wait for that so we can assert on it.
+            await asyncio.gather(
+                connection.interjection, connection.speaker, return_exceptions=True
+            )
+            return result
+
+        result = asyncio.run(scenario())
+
+        self.assertTrue(result)
+        self.assertTrue(connection.interrupted)
+        self.assertTrue(connection.interjection.cancelled())
+        self.assertTrue(connection.speaker.cancelled())
+        self.assertEqual(
+            websocket.sent,
+            [{"type": "follow_up_stopped", "message": "Stopped. Returning to idle."}],
+        )
+        # The exact same event end_session's follow-up sends for a direct
+        # voice turn - one idle state, one literal.
+        self.assertEqual(websocket.sent[0], nova_controller.idle_stopped_event())
+
+    def test_an_already_finished_speaker_is_left_alone(self):
+        # Only the interjection needs to be alive for this to fire; a
+        # speaker that already finished speaking its last queued line
+        # should not raise when `done()` is checked.
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+
+        async def scenario():
+            async def never_finishes():
+                await asyncio.sleep(100)
+
+            async def already_done():
+                return None
+
+            connection.interjection = asyncio.create_task(never_finishes())
+            connection.speaker = asyncio.create_task(already_done())
+            await connection.speaker
+            await asyncio.sleep(0)
+
+            result = await connection.interrupt_and_cancel()
+            await asyncio.gather(connection.interjection, return_exceptions=True)
+            return result
+
+        result = asyncio.run(scenario())
+
+        self.assertTrue(result)
+        self.assertTrue(connection.interjection.cancelled())
 
 
 if __name__ == "__main__":
