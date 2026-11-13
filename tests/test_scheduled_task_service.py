@@ -71,12 +71,22 @@ class FakeUpdateService:
         self.created = []
 
     def create_update(
-        self, update_message, project_id=None, conversation_uuid=None, report_type=None
+        self,
+        update_message,
+        project_id=None,
+        conversation_uuid=None,
+        report_type=None,
+        kind=None,
+        status=None,
+        link=None,
     ):
         record = {
             "update_message": update_message,
             "project_id": project_id,
             "report_type": report_type,
+            "kind": kind,
+            "status": status,
+            "link": link,
         }
         self.created.append(record)
         return record
@@ -220,6 +230,8 @@ class RunTests(unittest.TestCase):
         self.assertEqual(update["update_message"], "all done")
         self.assertEqual(update["report_type"], "email")
         self.assertEqual(update["project_id"], 7)
+        self.assertEqual(update["kind"], "scheduled_task")
+        self.assertEqual(update["status"], "success")
 
     def test_failure_marks_failed_and_is_not_retried(self):
         self._patch_agent(side_effect=RuntimeError("boom"))
@@ -230,6 +242,8 @@ class RunTests(unittest.TestCase):
         # A failed run is reported quietly: never a surprise phone call.
         self.assertIsNone(service.update_service.created[0]["report_type"])
         self.assertIn("boom", service.update_service.created[0]["update_message"])
+        self.assertEqual(service.update_service.created[0]["kind"], "scheduled_task")
+        self.assertEqual(service.update_service.created[0]["status"], "failed")
 
         # Nothing pending is left for a later pass to pick up.
         self.assertEqual(service.run_due_tasks()["due"], 0)
@@ -304,6 +318,8 @@ class RecoverStuckTests(unittest.TestCase):
         agent.assert_not_called()
         # Quiet update: no phone call for an interruption.
         self.assertIsNone(service.update_service.created[0]["report_type"])
+        self.assertEqual(service.update_service.created[0]["kind"], "scheduled_task")
+        self.assertEqual(service.update_service.created[0]["status"], "failed")
 
     def test_nothing_stuck_is_a_noop(self):
         service = build_service([pending(id=1)])

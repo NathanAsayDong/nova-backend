@@ -122,6 +122,52 @@ class CreateUpdateTests(unittest.TestCase):
         self.assertEqual(result["conversation_uuid"], str(uuid))
 
 
+class NotificationQueueFieldsTests(unittest.TestCase):
+    """
+    kind/status/link: the notification-queue tags a finished background
+    agent/coding task/scheduled task run stamps onto its Update row (see
+    migration 010 and AgentLoop._conversation_turn).
+    """
+
+    def test_kind_status_and_link_round_trip(self):
+        service = build_service()
+        result = service.create_update(
+            "PR #42 opened.",
+            kind="coding_task",
+            status="success",
+            link="https://example.com/pr/42",
+        )
+        self.assertEqual(result["kind"], "coding_task")
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["link"], "https://example.com/pr/42")
+
+    def test_defaults_to_no_notification_tags(self):
+        service = build_service()
+        result = service.create_update("Deploy finished.")
+        self.assertIsNone(result["kind"])
+        self.assertIsNone(result["status"])
+        self.assertIsNone(result["link"])
+
+    def test_unknown_kind_rejected(self):
+        service = build_service()
+        with self.assertRaises(ValueError):
+            service.create_update("hello", kind="carrier_pigeon", status="success")
+
+    def test_unknown_status_rejected(self):
+        service = build_service()
+        with self.assertRaises(ValueError):
+            service.create_update("hello", kind="coding_task", status="pending")
+
+    def test_every_valid_kind_and_status_is_accepted(self):
+        for kind in ("background_agent", "coding_task", "scheduled_task"):
+            for status in ("success", "failed"):
+                with self.subTest(kind=kind, status=status):
+                    service = build_service()
+                    result = service.create_update("x", kind=kind, status=status)
+                    self.assertEqual(result["kind"], kind)
+                    self.assertEqual(result["status"], status)
+
+
 class ReportTypeTests(unittest.TestCase):
     def test_no_report_type_is_badge_only(self):
         service = build_service()

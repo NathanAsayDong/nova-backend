@@ -157,6 +157,39 @@ class RetrieveContextTests(unittest.TestCase):
         self.assertIsNotNone(service.retrieve_context("q", min_similarity=0.3))
 
 
+class FakeUpdateService:
+    """
+    Stands in for UpdateService in the notification-queue path of
+    _conversation_turn: a fixed list of unviewed updates, and a record of
+    which ones got marked delivered (mark_update_viewed).
+    """
+
+    def __init__(self, unviewed=()):
+        self._unviewed = {entry["id"]: dict(entry) for entry in unviewed}
+        self.marked_viewed: list[int] = []
+
+    def get_unviewed_updates(self):
+        return [
+            entry
+            for entry in self._unviewed.values()
+            if entry["id"] not in self.marked_viewed
+        ]
+
+    def mark_update_viewed(self, update_id):
+        self.marked_viewed.append(update_id)
+        return self._unviewed.get(update_id)
+
+
+def notification(id, kind="coding_task", status="success", message="PR opened.", link=None):
+    return {
+        "id": id,
+        "kind": kind,
+        "status": status,
+        "update_message": message,
+        "link": link,
+    }
+
+
 class MemoryInjectionTests(unittest.TestCase):
     def setUp(self):
         self.agent_loop = AgentLoop()
@@ -168,6 +201,12 @@ class MemoryInjectionTests(unittest.TestCase):
         self.agent_loop.conversation_service = self.conversation_service
         self.agent_loop.mcp_server_service = None
         self.agent_loop._load_mcp_servers = lambda: []
+        # Empty by default: most of this file's tests are about memory, not
+        # notifications, and must see an untouched prompt either way --
+        # see PendingNotificationsInjectionTests below for "empty queue adds
+        # nothing to context" and the rest of the notification coverage.
+        self.update_service = FakeUpdateService()
+        self.agent_loop.update_service = self.update_service
         self.sent_messages = []
 
         def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
@@ -256,6 +295,120 @@ class MemoryInjectionTests(unittest.TestCase):
         self.agent_loop._retrieve_memory = lambda prompt, project_id: calls.append(prompt)
         self.run_turn()
         self.assertEqual(calls, [])
+
+
+class PendingNotificationsInjectionTests(MemoryInjectionTests):
+    """
+    The notification queue: finished background-agent / coding-task /
+    scheduled-task work injected into the start of the next turn, in any
+    conversation, then marked delivered so it is never repeated.
+
+    Subclasses MemoryInjectionTests purely to reuse its setUp/run_turn/
+    first_user_message plumbing — this is the same injection point
+    (_conversation_turn -> _augment), just the other block.
+    """
+
+    def test_empty_queue_adds_nothing_to_context(self):
+        # setUp's FakeUpdateService starts empty; this is the explicit case.
+        self.run_turn()
+        content = self.first_user_message()
+        self.assertNotIn("<pending_notifications>", content)
+        self.assertEqual(content, "when do I deploy")
+
+    def test_undelivered_notification_is_injected_and_marked_delivered(self):
+        self.update_service._unviewed[7] = notification(
+            7, kind="coding_task", status="success", message="PR #42 merged."
+        )
+
+        self.run_turn()
+
+        content = self.first_user_message()
+        self.assertIn("<pending_notifications>", content)
+        self.assertIn("PR #42 merged.", content)
+        self.assertIn("succeeded", content)
+        # Delivered means marked viewed, immediately -- not on some later
+        # confirmation that the model actually said something about it.
+        self.assertEqual(self.update_service.marked_viewed, [7])
+
+    def test_failed_notification_is_worded_as_failed(self):
+        self.update_service._unviewed[9] = notification(
+            9, kind="scheduled_task", status="failed", message="Build check failed."
+        )
+        self.run_turn()
+        content = self.first_user_message()
+        self.assertIn("failed", content)
+        self.assertIn("Build check failed.", content)
+
+    def test_multiple_notifications_all_appear_once_each(self):
+        self.update_service._unviewed[1] = notification(1, message="Agent run A done.")
+        self.update_service._unviewed[2] = notification(2, message="Agent run B done.")
+
+        self.run_turn()
+
+        content = self.first_user_message()
+        self.assertIn("Agent run A done.", content)
+        self.assertIn("Agent run B done.", content)
+        self.assertEqual(sorted(self.update_service.marked_viewed), [1, 2])
+
+    def test_a_second_turn_does_not_repeat_an_already_delivered_notification(self):
+        self.update_service._unviewed[7] = notification(7, message="PR #42 merged.")
+
+        self.run_turn()
+        first_content = self.first_user_message()
+        self.sent_messages.clear()
+        self.run_turn(prompt="anything else going on?")
+        # History keeps growing across turns on the same agent_loop/
+        # conversation, so the second call's context carries both turns --
+        # its OWN new message is the last one, not the first.
+        second_content = self.sent_messages[0][-1]["content"]
+
+        self.assertIn("PR #42 merged.", first_content)
+        self.assertNotIn("<pending_notifications>", second_content)
+        self.assertNotIn("PR #42 merged.", second_content)
+
+    def test_updates_with_no_kind_are_not_treated_as_notifications(self):
+        """A plain badge-only update (no kind) is UpdateService's existing
+        territory -- get_unviewed_updates/mark_all_updates_viewed, read on
+        request. It must not be swept into the turn-injection path."""
+        self.update_service._unviewed[3] = {
+            "id": 3,
+            "kind": None,
+            "status": None,
+            "update_message": "Unrelated badge-only update.",
+            "link": None,
+        }
+        self.run_turn()
+        content = self.first_user_message()
+        self.assertNotIn("<pending_notifications>", content)
+        self.assertNotIn("Unrelated badge-only update.", content)
+        self.assertEqual(self.update_service.marked_viewed, [])
+
+    def test_a_failing_notification_check_does_not_take_the_turn_down(self):
+        def boom():
+            raise RuntimeError("db down")
+
+        self.agent_loop.update_service.get_unviewed_updates = boom
+        events = self.run_turn()
+        self.assertEqual(self.first_user_message(), "when do I deploy")
+        self.assertTrue(any(event["type"] == "text" for event in events))
+
+    def test_link_is_included_when_present(self):
+        self.update_service._unviewed[7] = notification(
+            7, message="PR opened.", link="https://example.com/pr/42"
+        )
+        self.run_turn()
+        self.assertIn("https://example.com/pr/42", self.first_user_message())
+
+    def test_notifications_come_before_memory_in_the_prompt(self):
+        self.update_service._unviewed[7] = notification(7, message="PR #42 merged.")
+        self.use_memory("- Nate deploys on Fridays.")
+
+        self.run_turn()
+
+        content = self.first_user_message()
+        self.assertLess(
+            content.index("<pending_notifications>"), content.index("<recalled_memory>")
+        )
 
 
 if __name__ == "__main__":

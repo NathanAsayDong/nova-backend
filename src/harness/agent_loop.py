@@ -115,6 +115,14 @@ def _memory_block_budget_seconds() -> float:
 _MEMORY_OPEN_TAG = "<recalled_memory>"
 _MEMORY_CLOSE_TAG = "</recalled_memory>"
 
+# Delimiters for the notification-queue block: finished background agent /
+# coding task / scheduled task work the user hasn't been told about yet (see
+# AgentLoop._conversation_turn and UpdateService.create_update's kind/status
+# params). Separate tags from recalled memory — these are two different
+# kinds of "things the model is being told that the user didn't say."
+_NOTIFICATIONS_OPEN_TAG = "<pending_notifications>"
+_NOTIFICATIONS_CLOSE_TAG = "</pending_notifications>"
+
 # What a photo becomes once it is no longer sent: in the transcript, and in
 # history once a newer photo has replaced it.
 _PHOTO_MARKER = "[photo]"
@@ -408,13 +416,27 @@ class AgentLoop:
         return block, True
 
     @staticmethod
-    def _augment(prompt: str, memory_block: str) -> str:
-        """The user's turn with any recalled memory in front of it."""
-        if not memory_block:
-            return prompt
-        return (
-            f"{_MEMORY_OPEN_TAG}\n{memory_block}\n{_MEMORY_CLOSE_TAG}\n\n{prompt}"
-        )
+    def _augment(prompt: str, memory_block: str, notifications_block: str = "") -> str:
+        """
+        The user's turn with any pending notifications and recalled memory in
+        front of it.
+
+        Notifications first: a finished background task is time-sensitive and
+        self-contained ("tell Nate this before anything else"), where recalled
+        memory is background context for answering whatever Nate is about to
+        say. Order otherwise follows the same reasoning as the memory block
+        alone — see the call site in _conversation_turn for why this rides on
+        the user message rather than a system block.
+        """
+        prefix = ""
+        if notifications_block:
+            prefix += (
+                f"{_NOTIFICATIONS_OPEN_TAG}\n{notifications_block}\n"
+                f"{_NOTIFICATIONS_CLOSE_TAG}\n\n"
+            )
+        if memory_block:
+            prefix += f"{_MEMORY_OPEN_TAG}\n{memory_block}\n{_MEMORY_CLOSE_TAG}\n\n"
+        return prefix + prompt if prefix else prompt
 
     @staticmethod
     def _tool_result_content(result: Any) -> str | list[dict[str, Any]]:
@@ -1395,7 +1417,58 @@ class AgentLoop:
             if memory_future is not None and not memory_block and not memory_future.done()
             else None
         )
-        user_text = self._augment(prompt, memory_block)
+
+        # Notification queue: finished background agent / coding task /
+        # scheduled task work Nate hasn't been told about yet (see
+        # UpdateService.create_update's kind/status params). Checked on every
+        # turn in every conversation — deliberately not scoped to this one,
+        # since the point is to tell Nate at the start of whichever
+        # conversation he happens to be in next. A cheap DB read, so unlike
+        # memory this is just done inline rather than overlapped on the setup
+        # pool. Marked delivered (is_viewed) immediately after being folded
+        # into this turn's prompt, so a notification is surfaced exactly
+        # once even if this turn never actually mentions it out loud.
+        notifications_block = ""
+        try:
+            if self.update_service is None:
+                self.update_service = UpdateService()
+            pending_notifications = [
+                entry
+                for entry in self.update_service.get_unviewed_updates()
+                if entry.get("kind")
+            ]
+        except Exception as exc:
+            pending_notifications = []
+            print(f"Could not check pending notifications (continuing without them): {exc}")
+        if pending_notifications:
+            lines = []
+            for entry in pending_notifications:
+                if entry.get("status") == "success":
+                    outcome = "succeeded"
+                elif entry.get("status") == "failed":
+                    outcome = "failed"
+                else:
+                    outcome = "finished"
+                line = f"- ({entry.get('kind')}) {outcome}: {entry.get('update_message')}"
+                if entry.get("link"):
+                    line += f" ({entry['link']})"
+                lines.append(line)
+            notifications_block = (
+                "Background work finished since you last spoke with Nate. "
+                "Lead your reply with one short, spoken sentence per item "
+                "below, each stating whether it succeeded or failed, before "
+                "addressing anything else:\n" + "\n".join(lines)
+            )
+            for entry in pending_notifications:
+                update_id = entry.get("id")
+                if update_id is None:
+                    continue
+                try:
+                    self.update_service.mark_update_viewed(update_id)
+                except Exception as exc:
+                    print(f"Could not mark notification {update_id} delivered: {exc}")
+
+        user_text = self._augment(prompt, memory_block, notifications_block)
         if images:
             # Images before the text, as Claude reads them best.
             history.append(
@@ -2097,8 +2170,10 @@ class AgentLoop:
                 system=PromptEnums.BACKGROUND_AGENT_PROMPT.load(),
                 restrict_management_tools=restrict_management_tools,
             )
+            notification_status = "success"
         except Exception as exc:
             summary = f"A background task failed before completing: {exc}"
+            notification_status = "failed"
 
         try:
             self.update_service.create_update(
@@ -2107,6 +2182,8 @@ class AgentLoop:
                 project_id=project_id,
                 conversation_uuid=linked_conversation_uuid,
                 report_type=str(report_type) if report_type else None,
+                kind="background_agent",
+                status=notification_status,
             )
         except Exception as exc:
             print(f"Background agent failed to record its update: {exc}")

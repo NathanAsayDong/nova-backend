@@ -19,6 +19,13 @@ from src.model.report_type import (
 )
 from src.model.update import Update
 
+# Notification-queue tags (see migration 010). Validated here rather than
+# with a new helper method/class, same enforcement the database constraints
+# in the migration also apply -- kind/status is extra metadata on an update,
+# not a reason to branch into a parallel abstraction.
+_VALID_NOTIFICATION_KINDS = frozenset({"background_agent", "coding_task", "scheduled_task"})
+_VALID_NOTIFICATION_STATUSES = frozenset({"success", "failed"})
+
 
 class UpdateService:
     def __init__(self) -> None:
@@ -55,6 +62,9 @@ class UpdateService:
             "delivery_status": str(update.delivery_status)
             if update.delivery_status
             else None,
+            "kind": update.kind,
+            "status": update.status,
+            "link": update.link,
         }
 
     @staticmethod
@@ -78,6 +88,9 @@ class UpdateService:
         project_id: int | None = None,
         conversation_uuid: str | None = None,
         report_type: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        link: str | None = None,
     ) -> dict:
         """
         Record a new update for the user to see.
@@ -93,10 +106,32 @@ class UpdateService:
         unsupported-but-known type (sms, chat) is recorded on the row and left
         undelivered rather than rejected, so flagging one never costs the user
         the update itself.
+
+        `kind` and `status` tag this as a notification-queue entry — set by
+        the three completion paths that feed it (background agent, coding
+        task, scheduled task) — so the agent loop can find exactly these rows
+        and mention them at the start of Nate's next turn, in any
+        conversation, before marking them delivered (see
+        AgentLoop._conversation_turn). Both are optional and independent of
+        report_type/delivery_status: a notification can also carry a
+        report_type if the work was separately flagged for email/call/sms,
+        and the two delivery paths don't interact. `link` is an optional
+        reference (e.g. a PR URL) carried alongside the message.
         """
         update_message = (update_message or "").strip()
         if not update_message:
             raise ValueError("An update message is required.")
+
+        if kind is not None and kind not in _VALID_NOTIFICATION_KINDS:
+            raise ValueError(
+                f"Unknown notification kind '{kind}'. Valid kinds are "
+                f"{sorted(_VALID_NOTIFICATION_KINDS)}."
+            )
+        if status is not None and status not in _VALID_NOTIFICATION_STATUSES:
+            raise ValueError(
+                f"Unknown notification status '{status}'. Valid statuses are "
+                f"{sorted(_VALID_NOTIFICATION_STATUSES)}."
+            )
 
         if project_id is not None:
             if self.project_dao.get(int(project_id)) is None:
@@ -121,6 +156,9 @@ class UpdateService:
                 delivery_status=(
                     DeliveryStatus.PENDING if deliverable else DeliveryStatus.NOT_REQUIRED
                 ),
+                kind=kind,
+                status=status,
+                link=link,
             )
         )
 

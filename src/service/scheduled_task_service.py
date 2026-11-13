@@ -220,6 +220,7 @@ class ScheduledTaskService:
                 task,
                 f"Scheduled task '{task.name}' failed and was not retried: {exc}",
                 report_type=None,
+                status="failed",
             )
             return TaskStatus.FAILED
 
@@ -227,7 +228,7 @@ class ScheduledTaskService:
         if not summary:
             summary = f"Scheduled task '{task.name}' ran but produced no summary."
         self._finish(task, TaskStatus.DONE, summary)
-        self._record_update(task, summary, report_type=report_type)
+        self._record_update(task, summary, report_type=report_type, status="success")
         return TaskStatus.DONE
 
     def _finish(self, task: ScheduledTask, status: TaskStatus, result: str) -> None:
@@ -239,19 +240,30 @@ class ScheduledTaskService:
             print(f"Scheduled task {task.id} could not record its outcome: {exc}")
 
     def _record_update(
-        self, task: ScheduledTask, message: str, report_type: str | None
+        self,
+        task: ScheduledTask,
+        message: str,
+        report_type: str | None,
+        status: str = "success",
     ) -> None:
         """
         File the outcome as an Update, queued for delivery if one was asked for.
 
         Best-effort: the work already happened, so failing to file the update
         must not turn into an error the worker logs as a failed run.
+
+        Tagged kind="scheduled_task" (plus status) so this also feeds the
+        notification queue the agent loop checks at the start of Nate's next
+        turn — independent of report_type/delivery, which is a separate,
+        optional email/call/sms channel for the same row.
         """
         try:
             self.update_service.create_update(
                 update_message=message,
                 project_id=task.project_id,
                 report_type=report_type,
+                kind="scheduled_task",
+                status=status,
             )
         except Exception as exc:
             print(f"Scheduled task {task.id} could not record its update: {exc}")
@@ -280,7 +292,7 @@ class ScheduledTaskService:
             )
             print(f"Recovering stuck scheduled task {task.id}: {task.name}")
             self._finish(task, TaskStatus.FAILED, message)
-            self._record_update(task, message, report_type=None)
+            self._record_update(task, message, report_type=None, status="failed")
 
         return {"recovered": len(stuck)}
 
