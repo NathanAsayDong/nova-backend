@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,12 +69,32 @@ def resolve_repo(repos_root: Path, repo: str) -> Path:
 def create(
     repo: Path, worktree_root: Path, name: str, base: str | None = None
 ) -> Workspace:
-    """Cut a new branch and a worktree for it."""
-    branch = f"nova/{slugify(name)}"
-    path = (worktree_root / repo.name / slugify(name)).resolve()
+    """
+    Cut a new branch and a worktree for it.
 
-    if path.exists():
-        raise WorktreeError(f"A worktree already exists at {path}.")
+    Multiple sessions run concurrently against the same repo now, each in its
+    own worktree, so two tasks titled the same (or titled the same as one
+    still running) must not collide. If the slug's path or branch is already
+    taken, a short unique suffix is appended instead of raising — the name is
+    cosmetic, the isolation is what matters.
+    """
+    slug = slugify(name)
+    branch = f"nova/{slug}"
+    path = (worktree_root / repo.name / slug).resolve()
+
+    while True:
+        branch_taken = True
+        try:
+            _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}")
+        except WorktreeError:
+            branch_taken = False
+        if not path.exists() and not branch_taken:
+            break
+        tag = uuid.uuid4().hex[:6]
+        slug = f"{slugify(name)}-{tag}"
+        branch = f"nova/{slug}"
+        path = (worktree_root / repo.name / slug).resolve()
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Branch from the repo's current HEAD unless told otherwise, so a session

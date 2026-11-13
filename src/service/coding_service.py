@@ -65,7 +65,7 @@ class CodingService:
         instructions: str,
         title: str | None = None,
         project_id: int | None = None,
-        isolate: bool = False,
+        isolate: bool = True,
     ) -> dict:
         session_id = uuid.uuid4()
         title = (title or instructions).strip()[:120]
@@ -514,7 +514,7 @@ class CodingService:
         instructions: str,
         title: str | None = None,
         project_id: int | None = None,
-        isolate: bool = False,
+        isolate: bool = True,
         conversation_uuid: str | None = None,
     ) -> dict:
         """Tool entry point: hand a coding task to the Mac."""

@@ -143,7 +143,7 @@ class Link:
                 instructions=command["instructions"],
                 title=command.get("title"),
                 base=command.get("base"),
-                isolate=bool(command.get("isolate")),
+                isolate=bool(command.get("isolate", True)),
             )
         if kind == protocol.CMD_FEEDBACK:
             return await manager.feedback(

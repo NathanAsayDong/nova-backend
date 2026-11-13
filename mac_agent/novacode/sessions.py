@@ -189,22 +189,23 @@ class SessionManager:
         instructions: str,
         title: str | None = None,
         base: str | None = None,
-        isolate: bool = False,
+        isolate: bool = True,
     ) -> dict[str, Any]:
         """
         Open a new session against a repo.
 
-        By default the session works in the repo's ACTUAL working tree, which
-        is the point: Nate has that directory open in an editor, and work that
-        lands anywhere else is work he cannot see happening. A worktree would
-        be safer and was the original design, but "safer somewhere he isn't
-        looking" is not what this is for.
+        By default the session gets its own git worktree and branch, so any
+        number of sessions can run against the same repo at once without
+        fighting over the same files — each one commits to its own branch,
+        reviewable like anyone else's.
 
-        `isolate=True` still cuts a worktree, for the occasional change too
-        risky to make under a live editor.
-
-        The cost of sharing the tree is that two agents in it would fight, so
-        a repo admits one session at a time — see `_conflicting_session`.
+        `isolate=False` is the escape hatch: the session instead works in the
+        repo's ACTUAL working tree, which Nate may have open in an editor.
+        That is still sometimes the point — work that should land where he is
+        already looking — but sharing a tree means two agents in it would
+        fight, so only one session at a time is allowed in a given real
+        working tree; see `_conflicting_session`. Any number of isolated
+        sessions are allowed in parallel, since each gets its own worktree.
         """
         if session_id in self.sessions:
             raise ValueError(f"Session {session_id} is already running.")
@@ -265,6 +266,12 @@ class SessionManager:
         session id and a directory. Resuming it means Nova picks up a
         conversation already in progress, with all of its context, instead of
         being told about it second-hand.
+
+        This always attaches to the real working tree (there is no worktree
+        to cut for a conversation that already exists), so it is subject to
+        the same one-session-per-real-tree rule as a non-isolated `start`:
+        refuse rather than silently running two clients against the same
+        files.
         """
         if session_id in self.sessions:
             return self.sessions[session_id].snapshot()
@@ -275,6 +282,15 @@ class SessionManager:
             path = worktree.resolve_repo(self.config.repos_root, repo)
         else:
             raise ValueError("attach needs either a repo or a cwd.")
+
+        existing = self._conflicting_session(path)
+        if existing is not None:
+            raise ValueError(
+                f"'{existing.title}' is already working in {path}. "
+                f"Attaching here would run two agents in the same working "
+                f"tree — stop it first, or send feedback to it instead."
+            )
+
         client = ClaudeSDKClient(self._options(path, resume=session_id))
         await client.connect()
 
@@ -299,6 +315,16 @@ class SessionManager:
             await session.client.disconnect()
         except Exception:
             pass
+        if session.workspace.is_worktree:
+            # The worktree is scratch space; the branch and its commits are
+            # the deliverable. Drop the checkout so the isolated session
+            # stops holding a slot under the worktree root, but never let a
+            # cleanup failure (uncommitted changes, a missing dir) stop the
+            # session from closing.
+            try:
+                worktree.remove(session.workspace)
+            except Exception:
+                pass
         session.status = "closed"
         self.sessions.pop(session_id, None)
         await self._emit(session, {"type": protocol.EVT_CLOSED, **session.snapshot()})
