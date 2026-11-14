@@ -239,14 +239,28 @@ class RunTests(unittest.TestCase):
 
         self.assertEqual(service.run_task(1), TaskStatus.FAILED)
         self.assertEqual(service.task_dao.get(1).status, TaskStatus.FAILED)
-        # A failed run is reported quietly: never a surprise phone call.
-        self.assertIsNone(service.update_service.created[0]["report_type"])
+        # A failure is exactly what an explicit delivery ask (report_type set
+        # when the task was scheduled) was meant to cover -- it is preserved
+        # rather than cleared, so the call still goes out.
+        self.assertEqual(service.update_service.created[0]["report_type"], "call")
         self.assertIn("boom", service.update_service.created[0]["update_message"])
         self.assertEqual(service.update_service.created[0]["kind"], "scheduled_task")
         self.assertEqual(service.update_service.created[0]["status"], "failed")
 
         # Nothing pending is left for a later pass to pick up.
         self.assertEqual(service.run_due_tasks()["due"], 0)
+
+    def test_routine_failure_with_no_report_type_stays_badge_only(self):
+        # A task nobody asked to be called/texted/emailed about stays
+        # badge-only even when it fails -- there is no channel to deliver
+        # it through, explicit ask or not.
+        self._patch_agent(side_effect=RuntimeError("boom"))
+        service = build_service([pending(id=1)])
+
+        service.run_task(1)
+
+        self.assertIsNone(service.update_service.created[0]["report_type"])
+        self.assertEqual(service.update_service.created[0]["status"], "failed")
 
     def test_already_claimed_task_is_left_alone(self):
         agent = self._patch_agent()
@@ -316,8 +330,9 @@ class RecoverStuckTests(unittest.TestCase):
         self.assertEqual(service.task_dao.get(1).status, TaskStatus.FAILED)
         self.assertEqual(service.task_dao.get(2).status, TaskStatus.PENDING)
         agent.assert_not_called()
-        # Quiet update: no phone call for an interruption.
-        self.assertIsNone(service.update_service.created[0]["report_type"])
+        # The task had asked to be called about its result; an interruption
+        # is still worth that call, same as an outright failure.
+        self.assertEqual(service.update_service.created[0]["report_type"], "call")
         self.assertEqual(service.update_service.created[0]["kind"], "scheduled_task")
         self.assertEqual(service.update_service.created[0]["status"], "failed")
 

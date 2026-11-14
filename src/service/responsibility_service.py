@@ -298,6 +298,12 @@ class ResponsibilityService:
         last_run is stamped even when the agent reports a failure: the run did
         happen, and re-firing it every tick of the same window would spam the
         model. A genuinely failed run gets retried in the next window.
+
+        A failure still gets its own Update (and delivery, if one was asked
+        for) -- see the except branch below -- rather than disappearing the
+        moment run_agent raises, so an explicit report_type still reaches
+        Nate when the run never produced a result to hand to
+        _record_outcome.
         """
         responsibility = self.responsibility_dao.get(responsibility_id)
         if responsibility is None:
@@ -317,6 +323,14 @@ class ResponsibilityService:
                     else None
                 ),
             )
+        except Exception as exc:
+            self._record_outcome(
+                responsibility,
+                f"Responsibility '{responsibility.name}' failed and was not "
+                f"retried: {exc}",
+                failed=True,
+            )
+            raise
         finally:
             self.responsibility_dao.set_last_run(
                 responsibility_id, datetime.now(timezone.utc).isoformat()
@@ -325,19 +339,47 @@ class ResponsibilityService:
         self._record_outcome(responsibility, result)
         return result
 
-    def _record_outcome(self, responsibility: Responsibility, result: str) -> None:
+    # Marker the agent can lead its final reply with (see
+    # AgentLoop._RESPONSIBILITY_RUN_RESTRICTION) to flag that a routine-looking
+    # run actually needs Nate's attention right now. There is no dedicated
+    # column for this on Responsibility/Update -- adding one would be a schema
+    # change -- so this text convention is the least invasive hook: it is
+    # stripped from the stored message before filing, so the badge/email/call
+    # never shows the raw marker.
+    _NEEDS_ATTENTION_MARKER = "NEEDS ATTENTION:"
+
+    def _record_outcome(
+        self, responsibility: Responsibility, result: str, failed: bool = False
+    ) -> None:
         """
-        Turn a finished run into an Update, queued for delivery if one was asked for.
+        Turn a finished run into an Update, queued for delivery only when it's
+        earned one.
+
+        Delivery (email/call/sms) is reserved for a failed run or one that
+        explicitly flagged itself as needing attention (see
+        _NEEDS_ATTENTION_MARKER) -- a routine success is filed as an Update
+        the same as always, still visible via get_unviewed_updates and the
+        badge, but nothing is pushed for it. `failed` comes from
+        preform_responsibility's except branch; a routine completion never
+        sets it.
 
         Best-effort: the work already happened, so failing to file the update
         must not turn a successful run into a raised exception that the worker
         logs as a failure and retries.
         """
         summary = (result or "").strip()
+
+        needs_attention = False
+        if not failed and summary.upper().startswith(self._NEEDS_ATTENTION_MARKER):
+            needs_attention = True
+            summary = summary[len(self._NEEDS_ATTENTION_MARKER) :].strip()
+
         if not summary:
             summary = (
                 f"Responsibility '{responsibility.name}' ran but produced no summary."
             )
+
+        deliverable = failed or needs_attention
 
         try:
             self.update_service.create_update(
@@ -345,7 +387,7 @@ class ResponsibilityService:
                 project_id=responsibility.project_id,
                 report_type=(
                     str(responsibility.report_type)
-                    if responsibility.report_type
+                    if responsibility.report_type and deliverable
                     else None
                 ),
             )

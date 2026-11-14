@@ -76,8 +76,11 @@ DEFAULT_SILENCE_MS = _ms(1000)
 # Leaning unfinished: a particle, a comma, mid-number, a short fragment, or a
 # clause Whisper did not close with punctuation.
 PENDING_SILENCE_MS = _ms(1400)
-# Obviously unfinished: hold the line.
-MAX_SILENCE_MS = _ms(2200)
+# Obviously unfinished: hold the line. This is the window that actually
+# protects a speaker who pauses mid-thought ("send that to, uh...") — raised
+# from 2200 to 2800 (+~27%) because the old ceiling was still cutting Nate
+# off during a longer thinking pause before he resumed talking.
+MAX_SILENCE_MS = _ms(2800)
 
 
 class EndpointDecision(NamedTuple):
