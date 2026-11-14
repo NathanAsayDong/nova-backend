@@ -166,7 +166,12 @@ _RESPONSIBILITY_RESTRICTED_TOOLS = frozenset(
 
 _RESPONSIBILITY_RUN_RESTRICTION = (
     "Do the work described above. Do not create or modify responsibilities "
-    "or scheduled tasks — you will not have those tools available."
+    "or scheduled tasks — you will not have those tools available. A "
+    "routine result is filed quietly for Nate to read later and is not "
+    "pushed to him. If — and only if — this run found something that "
+    "genuinely needs his attention right now, start your final reply with "
+    "the exact words 'NEEDS ATTENTION:' followed by the summary, so it "
+    "gets delivered instead of just filed."
 )
 
 

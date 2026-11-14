@@ -254,6 +254,104 @@ class PerformTests(unittest.TestCase):
             self.service.preform_responsibility(999)
 
 
+class ResponsibilityDeliveryTests(unittest.TestCase):
+    """
+    A responsibility's report_type is an explicit delivery ask, but a routine
+    successful run should not actually push it by email/sms/call -- only a
+    failure or a run that flags itself with
+    ResponsibilityService._NEEDS_ATTENTION_MARKER earns that. The Update row
+    is filed every time either way (still visible via get_unviewed_updates /
+    the badge); only whether report_type rides along with it changes. See
+    ResponsibilityService._record_outcome.
+    """
+
+    def setUp(self):
+        self.responsibility = Responsibility(
+            id=7,
+            name="Check things",
+            description="Look at the thing.",
+            schedule=["morning"],
+            report_type=ResponsibilityReportType.EMAIL,
+        )
+        self.service = build_service([self.responsibility])
+
+    def _patch_agent(self, result="done", side_effect=None):
+        agent = mock.MagicMock()
+        agent.run_agent.side_effect = side_effect
+        if side_effect is None:
+            agent.run_agent.return_value = result
+        patcher = mock.patch(
+            "src.harness.agent_loop.AgentLoop", return_value=agent
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return agent
+
+    def test_routine_success_is_filed_but_not_queued_for_delivery(self):
+        self._patch_agent(result="Nothing unusual to report.")
+
+        self.service.preform_responsibility(7)
+
+        update = self.service.update_service.created[0]
+        self.assertEqual(update["update_message"], "Nothing unusual to report.")
+        self.assertIsNone(update["report_type"])
+
+    def test_failure_is_filed_and_still_queued_for_delivery(self):
+        self._patch_agent(side_effect=RuntimeError("boom"))
+
+        with self.assertRaises(RuntimeError):
+            self.service.preform_responsibility(7)
+
+        update = self.service.update_service.created[0]
+        self.assertIn("boom", update["update_message"])
+        self.assertEqual(update["report_type"], "email")
+
+    def test_explicit_attention_flag_is_queued_for_delivery_and_stripped(self):
+        self._patch_agent(
+            result="NEEDS ATTENTION: the deploy pipeline is red."
+        )
+
+        self.service.preform_responsibility(7)
+
+        update = self.service.update_service.created[0]
+        self.assertEqual(update["update_message"], "the deploy pipeline is red.")
+        self.assertEqual(update["report_type"], "email")
+
+    def test_attention_flag_is_case_insensitive(self):
+        self._patch_agent(result="needs attention: billing API is down.")
+
+        self.service.preform_responsibility(7)
+
+        update = self.service.update_service.created[0]
+        self.assertEqual(update["report_type"], "email")
+
+    def test_routine_success_with_no_report_type_stays_badge_only(self):
+        # A responsibility that never asked for delivery in the first place
+        # changes nothing -- still filed, never delivered, flag or not.
+        plain = Responsibility(
+            id=8, name="Plain check", description="Look.", schedule=["morning"]
+        )
+        service = build_service([plain])
+        agent = mock.MagicMock()
+        agent.run_agent.return_value = "All good."
+        with mock.patch("src.harness.agent_loop.AgentLoop", return_value=agent):
+            service.preform_responsibility(8)
+
+        update = service.update_service.created[0]
+        self.assertIsNone(update["report_type"])
+
+    def test_an_update_row_is_always_filed(self):
+        # Delivery is gated, but the badge/get_unviewed_updates path never is.
+        for outcome in ("done", "NEEDS ATTENTION: look at this"):
+            with self.subTest(outcome=outcome):
+                self._patch_agent(result=outcome)
+                before = len(self.service.update_service.created)
+                self.service.preform_responsibility(7)
+                self.assertEqual(
+                    len(self.service.update_service.created), before + 1
+                )
+
+
 class CheckForResponsibilitiesTests(unittest.TestCase):
     def test_runs_only_due_responsibilities(self):
         due = Responsibility(id=1, name="due", schedule=["morning"], last_run=None)

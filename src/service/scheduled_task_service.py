@@ -216,10 +216,14 @@ class ScheduledTaskService:
             )
         except Exception as exc:
             self._finish(task, TaskStatus.FAILED, str(exc))
+            # Preserve the task's own report_type rather than clearing it: a
+            # failure is exactly the kind of outcome an explicit delivery ask
+            # (email/call/sms) was meant to cover, and a routine task that
+            # never asked for one stays badge-only either way.
             self._record_update(
                 task,
                 f"Scheduled task '{task.name}' failed and was not retried: {exc}",
-                report_type=None,
+                report_type=report_type,
                 status="failed",
             )
             return TaskStatus.FAILED
@@ -292,7 +296,11 @@ class ScheduledTaskService:
             )
             print(f"Recovering stuck scheduled task {task.id}: {task.name}")
             self._finish(task, TaskStatus.FAILED, message)
-            self._record_update(task, message, report_type=None, status="failed")
+            # Same reasoning as run_task's failure path: an explicit delivery
+            # ask should still reach the user when the task never got to
+            # finish, not just a task that failed outright.
+            report_type = str(task.report_type) if task.report_type else None
+            self._record_update(task, message, report_type=report_type, status="failed")
 
         return {"recovered": len(stuck)}
 

@@ -157,8 +157,9 @@ class EndpointDecisionTests(unittest.TestCase):
 
     def test_max_hold_is_not_slower_than_it_needs_to_be(self):
         # The ceiling exists for genuine dangles; it must still feel like a
-        # conversation, not a timeout.
-        self.assertLessEqual(MAX_SILENCE_MS, 2500)
+        # conversation, not a timeout. Raised from 2200 to 2800ms so a
+        # mid-thought pause has more room before Nova jumps in.
+        self.assertLessEqual(MAX_SILENCE_MS, 3000)
 
     def test_silence_budget_ms_matches_the_decision(self):
         self.assertEqual(
