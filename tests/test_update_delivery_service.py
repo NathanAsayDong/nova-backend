@@ -585,7 +585,7 @@ class SpeakDeliveryTests(unittest.TestCase):
 
     @mock.patch("src.service.sidekick_service.SidekickService.speak_completion")
     @mock.patch.dict("os.environ", {"NOVA_MAX_DELIVERY_ATTEMPTS": "2"})
-    def test_gives_up_after_the_attempt_ceiling(self, speak_completion):
+    def test_falls_back_to_chat_after_the_attempt_ceiling(self, speak_completion):
         speak_completion.return_value = False
         service = build_service(
             [make_update(report_type=ReportType.SPEAK, attempts=2)]
@@ -593,10 +593,12 @@ class SpeakDeliveryTests(unittest.TestCase):
 
         result = service.deliver_pending(now=at(12))
 
-        self.assertEqual(result["failed"], 1)
+        # Falls back to chat: settled as a plain badge update, not failed.
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["delivered"], 1)
         update = service.update_service.updates[1]
-        self.assertEqual(update.delivery_status, DeliveryStatus.FAILED)
-        # Still a badge-only update — not lost, just no longer retried.
+        self.assertEqual(update.delivery_status, DeliveryStatus.NOT_REQUIRED)
+        # Still unviewed so the badge and notification injector surface it.
         self.assertFalse(update.is_viewed)
 
 

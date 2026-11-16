@@ -431,12 +431,17 @@ class UpdateDeliveryService:
             return "delivered"
 
         if attempts >= self.max_delivery_attempts():
-            self.update_service.mark_delivery_failed(
-                update.id,
-                "No idle Sidekick session was available to speak this update.",
+            # No idle Sidekick ever showed up, so fall back to chat: settle
+            # this as an ordinary badge update (unviewed, so the notification
+            # injector and the updates list still surface it) rather than
+            # marking the whole row failed.
+            self.update_service.update_dao.set_delivery_state(
+                int(update.id),
+                DeliveryStatus.NOT_REQUIRED,
+                error="No idle Sidekick session was available; fell back to chat.",
                 attempts=attempts,
             )
-            return "failed"
+            return "delivered"
         self.update_service.requeue_delivery(
             update.id, error="Waiting for an idle Sidekick session.", attempts=attempts
         )
