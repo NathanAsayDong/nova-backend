@@ -24,7 +24,11 @@ from src.controller.audio_ws import (
     transcribe_serialized,
 )
 from src.service.conversation_service import ConversationClosedError, ConversationService
-from src.service.endpointing_service import DEFAULT_SILENCE_MS, endpoint_decision
+from src.service.endpointing_service import (
+    DEFAULT_SILENCE_MS,
+    caption_endpoint_decision,
+    endpoint_decision,
+)
 from src.service.meeting_service import MeetingService
 from src.service.sidekick_service import SidekickService
 from src.service.tts_service import TTSService
@@ -687,6 +691,16 @@ async def transcribe_socket(websocket: WebSocket) -> None:
         before calling the turn over, given what has been said so far. The
         caption pass is where the transcript already exists, so the semantic
         half of turn detection rides along on it for free.
+
+        Scored with `caption_endpoint_decision`, not the plain scorer: this
+        pass decodes greedily (fast=True below) to stay cheap enough to run
+        every ~second, and a greedy mis-hearing of the last word or two is
+        enough to swing the window down to MIN_SILENCE_MS on a sentence that
+        was not actually finished. The floored scorer still lets a caption
+        lengthen the window on real evidence of a dangle; it just cannot be
+        the one that grants the sub-second floor — only the full-quality
+        pass run during the silence wait itself (`run_speculative_transcription`,
+        above) is trusted that far.
         """
         file_path: Path | None = None
         try:
@@ -706,7 +720,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
             partial_state["chunks_done"] = chunk_count
             if text:
                 partial_state["text"] = text
-                decision = endpoint_decision(text)
+                decision = caption_endpoint_decision(text)
                 partial_state["seq"] += 1
                 await websocket.send_json(
                     {

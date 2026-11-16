@@ -1,11 +1,13 @@
 import unittest
 
 from src.service.endpointing_service import (
+    CAPTION_SILENCE_FLOOR_MS,
     DEFAULT_SILENCE_MS,
     MAX_SILENCE_MS,
     MIN_SILENCE_MS,
     PENDING_SILENCE_MS,
     STATEMENT_SILENCE_MS,
+    caption_endpoint_decision,
     endpoint_decision,
     silence_budget_ms,
 )
@@ -165,6 +167,52 @@ class EndpointDecisionTests(unittest.TestCase):
         self.assertEqual(
             silence_budget_ms("Send Sophie the deploy notes."), STATEMENT_SILENCE_MS
         )
+
+
+class CaptionEndpointDecisionTests(unittest.TestCase):
+    """
+    A live caption is greedy-decoded (cheaper, less accurate) so it can be
+    redrawn about once a second while the user is still talking. A mis-heard
+    trailing word there must never be trusted down to MIN_SILENCE_MS — only
+    the full-quality pass that runs during the silence wait itself earns
+    that. These are the same inputs `EndpointDecisionTests` exercises above,
+    through the floored scorer instead.
+    """
+
+    def test_floor_is_the_statement_tier(self):
+        self.assertEqual(CAPTION_SILENCE_FLOOR_MS, STATEMENT_SILENCE_MS)
+
+    def test_obviously_finished_text_is_floored_not_trusted(self):
+        for transcript in ("What did we decide about the migration?", "Yes.", "Okay"):
+            decision = caption_endpoint_decision(transcript)
+            self.assertEqual(decision.silence_ms, CAPTION_SILENCE_FLOOR_MS)
+            self.assertLess(MIN_SILENCE_MS, decision.silence_ms)
+
+    def test_already_longer_windows_pass_through_unfloored(self):
+        # Real evidence of a dangle must still lengthen the window exactly as
+        # far as the plain scorer would; the floor only ever raises, never
+        # lowers or caps.
+        for transcript in (
+            "Can you send this to",  # hard_continuation -> MAX
+            "deploy the backend tonight",  # unpunctuated_clause -> PENDING
+        ):
+            self.assertEqual(
+                caption_endpoint_decision(transcript), endpoint_decision(transcript)
+            )
+
+    def test_statement_tier_is_unaffected(self):
+        # Already sits exactly at the floor.
+        self.assertEqual(
+            caption_endpoint_decision("Send Sophie the deploy notes.").silence_ms,
+            STATEMENT_SILENCE_MS,
+        )
+
+    def test_reason_is_preserved_even_when_floored(self):
+        # The window changes; the evidence that produced it is still worth
+        # logging/debugging as what the scorer actually saw.
+        decision = caption_endpoint_decision("Yes.")
+        self.assertEqual(decision.silence_ms, CAPTION_SILENCE_FLOOR_MS)
+        self.assertEqual(decision.reason, endpoint_decision("Yes.").reason)
 
 
 if __name__ == "__main__":
