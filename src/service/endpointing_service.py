@@ -83,6 +83,29 @@ PENDING_SILENCE_MS = _ms(1400)
 MAX_SILENCE_MS = _ms(2800)
 
 
+# Live captions are transcribed with greedy decoding (ASRService's `fast`
+# flag) so they can be redrawn roughly once a second while the user is still
+# talking, rather than every ~900ms costing a full beam-search pass. Greedy
+# decoding is measurably worse exactly where this scorer looks hardest: the
+# last word or two of the transcript. A greedy pass that mishears a dangling
+# "Sophie," as "Sophie." is enough to swing the window all the way down to
+# MIN_SILENCE_MS before the speaker has actually finished — and if an
+# ordinary mid-sentence breath happens to land inside that window, Nova cuts
+# in on an unfinished thought. The pass that actually runs during the
+# silence wait (`run_speculative_transcription`, full beam search) does not
+# have this problem, so only it is trusted with the sub-second floor.
+# Configurable because mic quality and ASR model affect greedy accuracy
+# differently machine to machine; NOVA_CAPTION_SILENCE_FLOOR_MS in .env.
+def _caption_floor() -> int:
+    try:
+        return _ms(int(os.getenv("NOVA_CAPTION_SILENCE_FLOOR_MS", "850")))
+    except ValueError:
+        return _ms(850)
+
+
+CAPTION_SILENCE_FLOOR_MS = _caption_floor()
+
+
 class EndpointDecision(NamedTuple):
     """How long to wait, and the evidence that picked that window."""
 
@@ -157,13 +180,16 @@ _WORD = re.compile(r"[A-Za-z']+|\d+")
 _PENDING_PUNCTUATION = ",:;-–—"
 
 
-def endpoint_decision(transcript: str | None) -> EndpointDecision:
+def _score_transcript(transcript: str | None) -> EndpointDecision:
     """
     Pick the silence window for a turn whose transcript so far is `transcript`.
 
     Called on every partial caption, so the window tracks the utterance as it
     develops: it widens when the speaker trails off and snaps back down the
     moment the sentence resolves.
+
+    Not called directly outside this module — see `endpoint_decision` and
+    `caption_endpoint_decision` below, which both wrap this.
     """
     text = (transcript or "").strip()
     if not text:
@@ -225,6 +251,48 @@ def endpoint_decision(transcript: str | None) -> EndpointDecision:
     # of the longer wait is a beat on the rarer finished command that Whisper
     # also left unpunctuated.
     return EndpointDecision(PENDING_SILENCE_MS, "unpunctuated_clause")
+
+
+def endpoint_decision(transcript: str | None) -> EndpointDecision:
+    """
+    `_score_transcript`, for a transcript trusted at face value.
+
+    Use this for the pass that actually runs during the silence wait
+    (full-quality decode, on audio the speaker has already stopped adding
+    to) — the one place a verdict of MIN_SILENCE_MS should be allowed to
+    stand. For a live caption transcribed with greedy decoding while the
+    speaker may still be talking, use `caption_endpoint_decision` instead.
+    """
+    return _score_transcript(transcript)
+
+
+def caption_endpoint_decision(transcript: str | None) -> EndpointDecision:
+    """
+    `_score_transcript`, floored for a live caption's lower accuracy.
+
+    Live captions (ASRService's `fast=True` path) use greedy decoding so
+    they can be redrawn roughly once a second while the user is still
+    talking, rather than paying a full beam-search pass that often. Greedy
+    decoding is measurably worse exactly where this scorer looks hardest:
+    the last word or two of the transcript. A greedy pass that mishears a
+    dangling "Sophie," as "Sophie." is enough to swing the window all the
+    way down to MIN_SILENCE_MS before the speaker has actually finished —
+    and if an ordinary mid-sentence breath happens to land inside that
+    window, Nova cuts in on an unfinished thought.
+
+    Flooring at CAPTION_SILENCE_FLOOR_MS keeps a caption's optimism in
+    check: it can still lengthen the window on real evidence of an
+    unfinished clause, just never shorten it past the floor on its own.
+    The full-quality pass that runs during the silence wait
+    (`run_speculative_transcription`, via plain `endpoint_decision`) is not
+    floored — once the speaker has actually stopped and a careful decode
+    says the sentence is done, that verdict is trusted all the way down to
+    MIN_SILENCE_MS.
+    """
+    decision = _score_transcript(transcript)
+    if decision.silence_ms >= CAPTION_SILENCE_FLOOR_MS:
+        return decision
+    return EndpointDecision(CAPTION_SILENCE_FLOOR_MS, decision.reason)
 
 
 def silence_budget_ms(transcript: str | None) -> int:

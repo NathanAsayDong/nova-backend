@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from src.controller import nova_controller
 from src.service.endpointing_service import (
+    CAPTION_SILENCE_FLOOR_MS,
     DEFAULT_SILENCE_MS,
     MAX_SILENCE_MS,
     MIN_SILENCE_MS,
@@ -145,6 +146,26 @@ class TranscribeSocketTests(unittest.TestCase):
 
         self.assertEqual(windows[0], ("Send that to", MAX_SILENCE_MS))
         self.assertEqual(windows[1], ("Send that to Sophie.", STATEMENT_SILENCE_MS))
+
+    def test_live_caption_window_is_floored_below_the_pause_pass(self):
+        # The live caption (greedy decode, "fast=True") must never grant the
+        # sub-second MIN_SILENCE_MS floor on its own: a mis-heard trailing
+        # word there would cut the user off on a sentence that was not
+        # actually finished. The exact same text, scored by the full-quality
+        # pass that runs once the user actually pauses, is trusted all the
+        # way down to MIN_SILENCE_MS (see the next test) — this is the
+        # contrast that proves only the confident pass earns the floor.
+        self.transcripts = {"ab": "What is on my calendar?"}
+        with TestClient(self.app).websocket_connect("/ws/transcribe") as ws:
+            self.start_turn(ws)
+            for filler in (b"a", b"b"):
+                ws.send_bytes(filler * 500)
+                ws.receive_json()  # chunk_received
+            caption = self.drain(ws, "partial_transcript")[-1]
+
+        self.assertEqual(caption["text"], "What is on my calendar?")
+        self.assertEqual(caption["endpointMs"], CAPTION_SILENCE_FLOOR_MS)
+        self.assertLess(MIN_SILENCE_MS, caption["endpointMs"])
 
     def test_pause_transcribes_before_stop_is_sent(self):
         # The point of the whole exercise: by the time the client says stop,
