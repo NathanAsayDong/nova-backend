@@ -276,7 +276,7 @@ class UpdateDeliveryService:
             self._settle_or_retry(update, attempts, "SMTP send failed.")
             return "deferred" if attempts < self.max_delivery_attempts() else "failed"
 
-        self.update_service.mark_delivered(update.id)
+        self.update_service.mark_delivered(update.id, consumed_by="delivery:email")
         return "delivered"
 
     @staticmethod
@@ -325,7 +325,7 @@ class UpdateDeliveryService:
             return "failed"
 
         if result.get("status") == "sent":
-            self.update_service.mark_delivered(update.id)
+            self.update_service.mark_delivered(update.id, consumed_by="delivery:sms")
             print(f"Update {update.id} delivered by SMS.")
             return "delivered"
 
@@ -427,16 +427,21 @@ class UpdateDeliveryService:
         from src.service.sidekick_service import SidekickService
 
         if SidekickService.speak_completion(update.update_message or ""):
-            self.update_service.mark_delivered(update.id)
+            self.update_service.mark_delivered(update.id, consumed_by="delivery:speak")
             return "delivered"
 
         if attempts >= self.max_delivery_attempts():
-            self.update_service.mark_delivery_failed(
-                update.id,
-                "No idle Sidekick session was available to speak this update.",
+            # No idle Sidekick ever showed up, so fall back to chat: settle
+            # this as an ordinary badge update (unviewed, so the notification
+            # injector and the updates list still surface it) rather than
+            # marking the whole row failed.
+            self.update_service.update_dao.set_delivery_state(
+                int(update.id),
+                DeliveryStatus.NOT_REQUIRED,
+                error="No idle Sidekick session was available; fell back to chat.",
                 attempts=attempts,
             )
-            return "failed"
+            return "delivered"
         self.update_service.requeue_delivery(
             update.id, error="Waiting for an idle Sidekick session.", attempts=attempts
         )

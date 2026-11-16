@@ -168,6 +168,8 @@ class FakeUpdateService:
     def __init__(self, unviewed=()):
         self._unviewed = {entry["id"]: dict(entry) for entry in unviewed}
         self.marked_viewed: list[int] = []
+        self.consumed_by: dict[int, str | None] = {}
+        self.unmarked_viewed: list[int] = []
 
     def get_unviewed_updates(self):
         return [
@@ -176,9 +178,21 @@ class FakeUpdateService:
             if entry["id"] not in self.marked_viewed
         ]
 
-    def mark_update_viewed(self, update_id):
+    def mark_update_viewed(self, update_id, *, consumed_by=None):
         self.marked_viewed.append(update_id)
+        self.consumed_by[update_id] = consumed_by
         return self._unviewed.get(update_id)
+
+    def unmark_update_viewed(self, update_id):
+        # Mirrors UpdateDao.unmark_viewed's compare-and-swap: only undoes a
+        # mark this fake actually made, same as "is_viewed=True" in the
+        # WHERE clause there.
+        if update_id in self.marked_viewed:
+            self.marked_viewed.remove(update_id)
+            self.unmarked_viewed.append(update_id)
+            self.consumed_by.pop(update_id, None)
+            return self._unviewed.get(update_id)
+        return None
 
 
 def notification(

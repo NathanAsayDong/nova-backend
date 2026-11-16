@@ -658,11 +658,16 @@ class AgentLoop:
             plural = "s" if overflow != 1 else ""
             lines.append(f"(+{overflow} more update{plural} waiting.)")
         return (
-            "Background work finished since you last spoke with Nate. Lead "
-            "your reply with one short, spoken sentence per item below -- "
-            "state whether it succeeded or failed AND name one concrete "
-            "detail from its result summary (not just \"it's done\") -- "
-            "before addressing anything else:\n" + "\n".join(lines)
+            "Background work finished since you last spoke with Nate. This "
+            "is a direct instruction, not background color, and it "
+            "overrides any instinct this turn might otherwise have to stay "
+            "quiet, pass, or wait for a better moment -- including a "
+            "Sidekick turn's default of saying nothing about ambient "
+            "chatter. Report every item below before anything else, even "
+            "an otherwise-silent turn: for each one, state whether it "
+            "succeeded or failed AND name one concrete detail from its "
+            "full result summary (not just \"it's done\"), then continue "
+            "with whatever else this turn is for:\n" + "\n".join(lines)
         )
 
     @staticmethod
@@ -1723,12 +1728,26 @@ class AgentLoop:
             # unviewed (see UpdateDao.mark_viewed's compare-and-swap), so two
             # turns racing on the same scope-less/project-scoped row can't
             # both inject it.
+            #
+            # This is still provisional for a sidekick turn: it can end in a
+            # silent "[[pass]]" that throws the whole turn away unspoken and
+            # unpersisted (see is_sidekick_pass below), in which case nobody
+            # actually heard this and the mark made here is wrong. That
+            # branch calls `self.update_service.unmark_update_viewed` on
+            # every id in `selected_notifications` to put it back -- see
+            # there for why this can't simply wait until the reply is known
+            # instead (the model has to see the block to have a chance of
+            # reporting it, and a crash between fetching these rows and
+            # marking them must not re-lose them either).
+            consumed_by = f"{prompt_source}:{conversation_uuid}"
             for entry in selected_notifications:
                 update_id = entry.get("id")
                 if update_id is None:
                     continue
                 try:
-                    self.update_service.mark_update_viewed(update_id)
+                    self.update_service.mark_update_viewed(
+                        update_id, consumed_by=consumed_by
+                    )
                 except Exception as exc:
                     print(f"Could not mark notification {update_id} delivered: {exc}")
 
@@ -1983,6 +2002,26 @@ class AgentLoop:
                     # Nothing worth saying. The held live events are dropped
                     # unsaid, the turn is taken back out of history, and none
                     # of its rows are written.
+                    #
+                    # Any notification marked viewed above (selected_notifications)
+                    # was provisional on that basis -- this turn never spoke it
+                    # and never persisted it, so "viewed" would be a lie. Put
+                    # each one back so the next eligible turn (a real reply,
+                    # another ambient interjection, the delivery dispatcher,
+                    # or the sidekick notify loop) gets a real shot at it
+                    # instead of it silently vanishing the way updates
+                    # 381-386 did.
+                    for entry in selected_notifications:
+                        update_id = entry.get("id")
+                        if update_id is None:
+                            continue
+                        try:
+                            self.update_service.unmark_update_viewed(update_id)
+                        except Exception as exc:
+                            print(
+                                f"Could not restore notification {update_id} "
+                                f"after a silent sidekick pass: {exc}"
+                            )
                     del history[history_start:]
                     deferred_rows.clear()
                     yield {"type": "silent"}

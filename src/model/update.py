@@ -42,6 +42,14 @@ class Update(SQLModel, table=True):
     status: str | None = Field(default=None)
     link: str | None = Field(default=None)
 
+    # Who actually consumed this notification -- set alongside is_viewed
+    # wherever it legitimately flips true (a turn's prompt_source and
+    # conversation, the sidekick notify loop, or a delivery channel),
+    # cleared by UpdateDao.unmark_viewed when a mark turns out to have been
+    # premature (e.g. a sidekick turn that silently passed). See migration
+    # 012: is_viewed alone can't answer "did anyone actually hear this."
+    consumed_by: str | None = Field(default=None)
+
     @property
     def channels(self) -> list[ReportType]:
         """report_type normalized to a list, whichever shape it was stored in."""
