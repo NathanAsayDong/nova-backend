@@ -1044,13 +1044,23 @@ _SCHEDULE_PROPERTY = {
         "with a window."
     ),
 }
+_REPORT_TYPE_VALUES = ["email", "sms", "call", "chat", "speak"]
+
 _REPORT_TYPE_PROPERTY = {
-    "type": "string",
-    "enum": ["email", "sms", "call", "chat"],
+    "anyOf": [
+        {"type": "string", "enum": _REPORT_TYPE_VALUES},
+        {"type": "array", "items": {"type": "string", "enum": _REPORT_TYPE_VALUES}},
+    ],
     "description": (
-        "How to report results: 'email' emails the summary, 'sms' texts it, "
-        "and 'call' phones the user and reads it out. 'chat' has no delivery "
-        "channel, so the run only posts an update. Omit for no report."
+        "How to report results — a single channel (e.g. 'email'), or a list "
+        "of several to use at once (e.g. ['chat', 'speak']). 'email' emails "
+        "the summary, 'sms' texts it, 'call' phones the user and reads it "
+        "out, and 'speak' has Nova say it immediately through Sidekick mode "
+        "if it's on and the user is free (falling back to the usual update "
+        "otherwise). 'chat' has no delivery channel of its own, so the run "
+        "only posts an update. Omit for no report. Combine channels whenever "
+        "the user asks for more than one, e.g. 'tell me when it's done and "
+        "also text me' -> ['speak', 'sms']."
     ),
 }
 
@@ -1254,7 +1264,9 @@ BACKGROUND_AGENT_TOOLS: list[dict] = [
             "the updates UI. The prompt is the agent's ONLY instruction and "
             "it cannot ask follow-up questions, so write a complete, "
             "standalone brief. Set report_type when the user wants the result "
-            "pushed to them rather than waiting in the updates list. After "
+            "pushed to them rather than waiting in the updates list — pass a "
+            "single channel or a list to use several at once, e.g. "
+            "['speak', 'sms']. After "
             "calling this, tell the user the task has started and how the "
             "result will reach them. Do "
             "not use this for quick work you could do inline, and if you are "
@@ -1275,25 +1287,39 @@ BACKGROUND_AGENT_TOOLS: list[dict] = [
                         ),
                     },
                     "report_type": {
-                        "type": "string",
-                        "enum": ["email", "call", "sms", "chat"],
+                        "anyOf": [
+                            {"type": "string", "enum": _REPORT_TYPE_VALUES},
+                            {
+                                "type": "array",
+                                "items": {"type": "string", "enum": _REPORT_TYPE_VALUES},
+                            },
+                        ],
                         "description": (
                             "How the user wants the result delivered when the "
-                            "agent finishes. Omit for the default, which is to "
-                            "post an update and let the user find it. Use "
-                            "'call' when the user asks to be called or told "
-                            "about it out loud, or when the result is time "
-                            "sensitive enough that they should not have to "
-                            "check for it — Nova phones them and can answer "
-                            "follow-up questions on the call. Use 'email' when "
-                            "they ask to be emailed, or for long or detailed "
-                            "results worth reading rather than hearing. Only "
-                            "set this when the user actually asked to be "
-                            "notified; do not add it on your own initiative, "
-                            "since a phone call interrupts them. Use 'sms' when "
-                            "they ask to be texted, for short results. 'chat' "
-                            "is accepted but not deliverable — the result will "
-                            "only appear as an update."
+                            "agent finishes — a single channel, or a list of "
+                            "several at once (e.g. ['speak', 'sms']). Omit for "
+                            "the default, which is to post an update and let "
+                            "the user find it. Use 'call' when the user asks "
+                            "to be called or told about it out loud, or when "
+                            "the result is time sensitive enough that they "
+                            "should not have to check for it — Nova phones "
+                            "them and can answer follow-up questions on the "
+                            "call. Use 'email' when they ask to be emailed, or "
+                            "for long or detailed results worth reading rather "
+                            "than hearing. Use 'speak' when the user is in a "
+                            "Sidekick session and asks to just be told out "
+                            "loud when it's done — Nova announces it right "
+                            "away if Sidekick is on and the user is free, "
+                            "otherwise it falls back to a normal update. Only "
+                            "set any of these when the user actually asked to "
+                            "be notified; do not add one on your own "
+                            "initiative, since a phone call or speech "
+                            "interrupts them. Use 'sms' when they ask to be "
+                            "texted, for short results. Combine channels when "
+                            "they ask for more than one, e.g. 'tell me when "
+                            "it's done and also text me' -> ['speak', 'sms']. "
+                            "'chat' is accepted but not deliverable on its own "
+                            "— the result will only appear as an update."
                         ),
                     },
                 },

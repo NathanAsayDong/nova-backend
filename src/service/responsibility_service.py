@@ -3,7 +3,12 @@ from typing import Optional
 
 from src.dao.project_dao import ProjectDao
 from src.dao.responsibility_dao import ResponsibilityDao
-from src.model.report_type import SUPPORTED_REPORT_TYPES, ReportType
+from src.model.report_type import (
+    SUPPORTED_REPORT_TYPES,
+    ReportType,
+    encode_report_types,
+    normalize_report_types,
+)
 from src.model.responsibility import Responsibility
 from src.service.update_service import UpdateService
 
@@ -33,18 +38,19 @@ class ResponsibilityService:
 
     @staticmethod
     def _to_dict(responsibility: Responsibility) -> dict:
-        """JSON-serializable view, including whether the report type works yet."""
-        report_type = responsibility.report_type
+        """JSON-serializable view, including whether each report channel works yet."""
+        channels = responsibility.channels
         return {
             "id": responsibility.id,
             "name": responsibility.name,
             "description": responsibility.description,
             "schedule": responsibility.schedule,
             "project_id": responsibility.project_id,
-            "report_type": str(report_type) if report_type else None,
-            "report_deliverable": report_type in SUPPORTED_REPORT_TYPES
-            if report_type
-            else None,
+            "report_type": str(responsibility.report_type) if responsibility.report_type else None,
+            "channels": [str(c) for c in channels],
+            "report_deliverable": (
+                all(c in SUPPORTED_REPORT_TYPES for c in channels) if channels else None
+            ),
             "last_run": (
                 responsibility.last_run.isoformat()
                 if hasattr(responsibility.last_run, "isoformat")
@@ -77,19 +83,9 @@ class ResponsibilityService:
         return normalized
 
     @staticmethod
-    def _validate_report_type(report_type: str | None) -> ReportType | None:
-        if report_type is None:
-            return None
-        candidate = str(report_type).strip().lower()
-        if not candidate:
-            return None
-        try:
-            return ReportType(candidate)
-        except ValueError:
-            raise ValueError(
-                f"Unknown report_type '{report_type}'. Valid types are "
-                f"{[str(t) for t in ReportType]}."
-            )
+    def _validate_report_type(report_type: "str | list[str] | None") -> list[ReportType]:
+        """Normalize a single channel or a list of them. See Update._validate_report_type."""
+        return normalize_report_types(report_type)
 
     def _validate_project(self, project_id: int | None) -> int | None:
         if project_id is None:
@@ -114,7 +110,7 @@ class ResponsibilityService:
         description: str,
         schedule: list[str] | None = None,
         project_id: int | None = None,
-        report_type: str | None = None,
+        report_type: "str | list[str] | None" = None,
     ) -> dict:
         """
         Create a scheduled responsibility.
@@ -142,24 +138,26 @@ class ResponsibilityService:
                 "create_scheduled_task instead."
             )
 
-        validated_type = self._validate_report_type(report_type)
+        channels = self._validate_report_type(report_type)
+        undeliverable = [c for c in channels if c not in SUPPORTED_REPORT_TYPES]
         created = self.responsibility_dao.create(
             Responsibility(
                 name=name,
                 description=description,
                 schedule=self._validate_schedule(schedule),
                 project_id=self._validate_project(project_id),
-                report_type=validated_type,
+                report_type=encode_report_types(channels),
             )
         )
 
         result = self._to_dict(created)
-        if validated_type is not None and validated_type not in SUPPORTED_REPORT_TYPES:
+        if undeliverable:
+            names = ", ".join(str(c) for c in undeliverable)
             result["warning"] = (
-                f"Reporting by {validated_type} is not deliverable yet — no "
-                "channel exists for it. The responsibility will still run and "
-                "post its outcome as an update. Only email and call can be "
-                "delivered today."
+                f"Reporting by {names} is not deliverable yet — no channel "
+                "exists for it. The responsibility will still run and post "
+                "its outcome as an update. Only email, sms, call, and speak "
+                "can be delivered today."
             )
         return result
 
@@ -170,7 +168,7 @@ class ResponsibilityService:
         description: str | None = None,
         schedule: list[str] | None = None,
         project_id: int | None = None,
-        report_type: str | None = None,
+        report_type: "str | list[str] | None" = None,
     ) -> dict:
         """Update a responsibility. Omitted fields are left unchanged."""
         responsibility = self.responsibility_dao.get(int(responsibility_id))
@@ -196,7 +194,9 @@ class ResponsibilityService:
             responsibility.project_id = self._validate_project(project_id)
 
         if report_type is not None:
-            responsibility.report_type = self._validate_report_type(report_type)
+            responsibility.report_type = encode_report_types(
+                self._validate_report_type(report_type)
+            )
 
         updated = self.responsibility_dao.update(responsibility.id, responsibility)
         if updated is None:
@@ -317,11 +317,7 @@ class ResponsibilityService:
             result = AgentLoop().run_agent(
                 prompt=prompt,
                 responsibility_id=responsibility_id,
-                report_type=(
-                    str(responsibility.report_type)
-                    if responsibility.report_type
-                    else None
-                ),
+                report_type=responsibility.report_type,
             )
         except Exception as exc:
             self._record_outcome(
@@ -386,7 +382,7 @@ class ResponsibilityService:
                 update_message=summary,
                 project_id=responsibility.project_id,
                 report_type=(
-                    str(responsibility.report_type)
+                    responsibility.report_type
                     if responsibility.report_type and deliverable
                     else None
                 ),

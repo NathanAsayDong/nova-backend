@@ -542,6 +542,110 @@ class SettleCallTests(unittest.TestCase):
         self.assertEqual(result["status"], "unknown_call")
 
 
+class SpeakDeliveryTests(unittest.TestCase):
+    """
+    The 'speak' channel: proactive sidekick speech on completion (see
+    src/service/sidekick_service.py). deliver_update's SPEAK branch is a
+    thin wrapper around SidekickService.speak_completion — this process may
+    not even own a live sidekick connection (see UpdateDeliveryService's
+    module docstring on the worker/API process split), so a True/False from
+    that classmethod is all `_deliver_speak` has to go on.
+    """
+
+    @mock.patch("src.service.sidekick_service.SidekickService.speak_completion")
+    def test_speaks_and_marks_delivered_when_a_session_is_idle(self, speak_completion):
+        speak_completion.return_value = True
+        service = build_service([make_update(report_type=ReportType.SPEAK)])
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["delivered"], 1)
+        speak_completion.assert_called_once_with("Deploy finished cleanly.")
+        update = service.update_service.updates[1]
+        self.assertEqual(update.delivery_status, DeliveryStatus.DELIVERED)
+        self.assertTrue(update.is_viewed)
+
+    @mock.patch("src.service.sidekick_service.SidekickService.speak_completion")
+    def test_defers_rather_than_fails_when_no_idle_session_is_reachable(
+        self, speak_completion
+    ):
+        # Sidekick off, Nate mid-conversation, or this pass simply running in
+        # the worker process with no live connection to speak through —
+        # every one of those looks identical from here: False.
+        speak_completion.return_value = False
+        service = build_service([make_update(report_type=ReportType.SPEAK, attempts=0)])
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["deferred"], 1)
+        update = service.update_service.updates[1]
+        self.assertEqual(update.delivery_status, DeliveryStatus.PENDING)
+        self.assertFalse(update.is_viewed)
+
+    @mock.patch("src.service.sidekick_service.SidekickService.speak_completion")
+    @mock.patch.dict("os.environ", {"NOVA_MAX_DELIVERY_ATTEMPTS": "2"})
+    def test_gives_up_after_the_attempt_ceiling(self, speak_completion):
+        speak_completion.return_value = False
+        service = build_service(
+            [make_update(report_type=ReportType.SPEAK, attempts=2)]
+        )
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["failed"], 1)
+        update = service.update_service.updates[1]
+        self.assertEqual(update.delivery_status, DeliveryStatus.FAILED)
+        # Still a badge-only update — not lost, just no longer retried.
+        self.assertFalse(update.is_viewed)
+
+
+class MultiChannelDeliveryTests(unittest.TestCase):
+    """
+    A single update can list several channels at once (e.g. ['sms',
+    'speak']) and deliver_update goes through each — see
+    UpdateDeliveryService.deliver_update's per-channel loop.
+    """
+
+    @mock.patch.dict("os.environ", {"TWILIO_TARGET_NUMBER": "+18016477824"})
+    @mock.patch("src.service.sidekick_service.SidekickService.speak_completion")
+    def test_delivers_through_every_listed_channel(self, speak_completion):
+        speak_completion.return_value = True
+        service = build_service([make_update(report_type=["sms", "speak"])])
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["delivered"], 1)
+        self.assertEqual(len(service.bip_service.texted), 1)
+        speak_completion.assert_called_once()
+        update = service.update_service.updates[1]
+        self.assertEqual(update.delivery_status, DeliveryStatus.DELIVERED)
+
+    @mock.patch.dict("os.environ", {"TWILIO_TARGET_NUMBER": "+18016477824"})
+    def test_a_list_with_only_undeliverable_channels_fails_like_a_single_one(self):
+        service = build_service([make_update(report_type=["chat"])])
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["failed"], 1)
+        update = service.update_service.updates[1]
+        self.assertEqual(update.delivery_status, DeliveryStatus.FAILED)
+        self.assertFalse(update.is_viewed)
+
+    @mock.patch.dict("os.environ", {"TWILIO_TARGET_NUMBER": "+18016477824"})
+    @mock.patch("src.service.sidekick_service.SidekickService.speak_completion")
+    def test_an_undeliverable_channel_in_a_list_does_not_block_the_rest(
+        self, speak_completion
+    ):
+        # 'chat' alongside 'sms' should not stop the sms leg from going out.
+        speak_completion.return_value = False
+        service = build_service([make_update(report_type=["chat", "sms"])])
+
+        result = service.deliver_pending(now=at(12))
+
+        self.assertEqual(result["delivered"], 1)
+        self.assertEqual(len(service.bip_service.texted), 1)
+
+
 class BadgeOnlyTests(unittest.TestCase):
     def test_updates_without_a_report_type_are_never_picked_up(self):
         service = build_service(

@@ -25,6 +25,7 @@ turns — are enforced by the controller using the helpers here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import threading
@@ -53,6 +54,19 @@ TRANSCRIPT_MAX_LINES = 60
 GATE_WINDOW_SECONDS = 2 * 60
 # Remarks the gate is shown so it does not suggest the same thing twice.
 REMARKS_KEPT = 5
+
+# How often an idle Sidekick connection checks for finished background work
+# (background agent / coding task / scheduled task completions) to announce
+# right away, instead of waiting for Nate's next turn. Short, because the
+# point is for the announcement to feel immediate; cheap, because it is one
+# already-indexed unviewed-updates read (see update_pending_notification_idx
+# in scripts/migrations/010_update_notification_fields.sql).
+COMPLETION_POLL_SECONDS = 5.0
+
+# How long speak_completion waits for the live connection's event loop to
+# actually speak before giving up and letting the caller treat it as
+# unreachable (deferred, not failed — see UpdateDeliveryService._deliver_speak).
+COMPLETION_SPEECH_TIMEOUT_SECONDS = 8.0
 
 GATE_MODEL = "claude-haiku-5-5"
 
@@ -294,6 +308,23 @@ class SidekickService:
     active_direct_turns: int = 0
     _lock = threading.Lock()
 
+    # The live /ws/sidekick connections in this process (see
+    # SidekickConnection in src/controller/sidekick_controller.py, which
+    # registers itself here on `start` and unregisters on `end`). Same
+    # pattern as VisionService.register_camera: a connection that owns a
+    # live websocket hands this process-wide registry a way to reach it,
+    # rather than this module importing the controller (which would be a
+    # cycle) or trying to hold the websocket itself.
+    _connections: list[Any] = []
+    # The API process's event loop, bound once at startup (see main.py's
+    # lifespan, same as CodingService.bind_loop / VisionService.bind_loop).
+    # UpdateDeliveryService.deliver_pending runs on a schedule that may be a
+    # different OS process (worker.py) with no such loop bound at all — in
+    # that case `loop` stays None and speak_completion below simply reports
+    # "nothing to speak through", which is the correct, honest answer from
+    # that process.
+    loop: Any = None
+
     @classmethod
     def begin_direct_turn(cls) -> None:
         with cls._lock:
@@ -317,3 +348,76 @@ class SidekickService:
     def direct_turn_active(cls) -> bool:
         with cls._lock:
             return cls.active_direct_turns > 0
+
+    @classmethod
+    def bind_loop(cls, loop: Any) -> None:
+        """Attach this process's event loop, so speak_completion can schedule onto it."""
+        cls.loop = loop
+
+    @classmethod
+    def register_connection(cls, connection: Any) -> None:
+        """A /ws/sidekick session just started: it can now be spoken through."""
+        with cls._lock:
+            if connection not in cls._connections:
+                cls._connections.append(connection)
+
+    @classmethod
+    def unregister_connection(cls, connection: Any) -> None:
+        with cls._lock:
+            if connection in cls._connections:
+                cls._connections.remove(connection)
+
+    @classmethod
+    def _idle_connection(cls) -> Any | None:
+        """
+        A live sidekick connection free to speak right now, or None.
+
+        "Sidekick on" is simply a connection with a session (the app has an
+        active /ws/sidekick session); "idle" is that session not currently
+        mid-interjection and no direct /ws/transcribe turn in progress
+        anywhere in the process — exactly the gate `_gate_after_lull` already
+        gives ambient remarks, reused rather than re-derived here.
+        """
+        if cls.active_direct_turns > 0:
+            return None
+        with cls._lock:
+            candidates = list(cls._connections)
+        for connection in candidates:
+            try:
+                if connection.is_idle():
+                    return connection
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def speak_completion(
+        cls, text: str, timeout: float = COMPLETION_SPEECH_TIMEOUT_SECONDS
+    ) -> bool:
+        """
+        Speak a finished-work report through a live, idle sidekick session,
+        bypassing the ordinary ambient-remark cooldown — a completion
+        announcement is not the chatty, rate-limited kind of remark
+        COOLDOWN_SECONDS exists to throttle, and holding it back 30 seconds
+        would make a "the agent is done" report arrive stale.
+
+        Returns whether it was actually spoken. False covers every reason it
+        couldn't be (sidekick off, mid-conversation, no loop bound in this
+        process, the speech itself failing) uniformly, on purpose: the
+        caller's job either way is the same — leave the update for the
+        existing next-turn injection or a later delivery pass, never raise.
+        """
+        text = (text or "").strip()
+        if not text:
+            return False
+        connection = cls._idle_connection()
+        if connection is None or cls.loop is None:
+            return False
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                connection.speak_now(text, bypass_cooldown=True), cls.loop
+            )
+            return bool(future.result(timeout=timeout))
+        except Exception as exc:
+            print(f"[sidekick] speak_completion failed: {exc}")
+            return False

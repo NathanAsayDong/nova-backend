@@ -3,9 +3,66 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
-from src.model.report_type import DeliveryStatus
+from src.model.report_type import (
+    DeliveryStatus,
+    ReportType,
+    encode_report_types,
+    normalize_report_types,
+)
 from src.model.update import Update
 from src.service.update_service import UpdateService
+
+
+class NormalizeAndEncodeReportTypesTests(unittest.TestCase):
+    """
+    The one place that understands both the legacy single-string shape and
+    the new list shape — every model (Update, Responsibility, ScheduledTask,
+    CodingSession) and service routes through these two functions instead
+    of re-deriving the logic.
+    """
+
+    def test_none_normalizes_to_an_empty_list(self):
+        self.assertEqual(normalize_report_types(None), [])
+        self.assertIsNone(encode_report_types(None))
+
+    def test_a_bare_string_normalizes_to_one_item(self):
+        self.assertEqual(normalize_report_types("email"), [ReportType.EMAIL])
+
+    def test_a_bare_string_is_case_and_whitespace_insensitive(self):
+        self.assertEqual(normalize_report_types("  Speak  "), [ReportType.SPEAK])
+
+    def test_a_json_encoded_list_decodes_back_out(self):
+        self.assertEqual(
+            normalize_report_types('["chat", "speak"]'),
+            [ReportType.CHAT, ReportType.SPEAK],
+        )
+
+    def test_a_python_list_normalizes_in_order_without_duplicates(self):
+        self.assertEqual(
+            normalize_report_types(["sms", "speak", "sms"]),
+            [ReportType.SMS, ReportType.SPEAK],
+        )
+
+    def test_an_unknown_channel_is_rejected(self):
+        with self.assertRaises(ValueError):
+            normalize_report_types("carrier-pigeon")
+
+    def test_encode_single_channel_stays_a_bare_string(self):
+        self.assertEqual(encode_report_types("email"), "email")
+        self.assertEqual(encode_report_types(["call"]), "call")
+
+    def test_encode_multiple_channels_as_a_json_array(self):
+        encoded = encode_report_types(["chat", "speak"])
+        self.assertEqual(normalize_report_types(encoded), [ReportType.CHAT, ReportType.SPEAK])
+        self.assertTrue(encoded.startswith("["))
+
+    def test_round_trip_is_stable(self):
+        for value in ("email", ["sms", "speak"], ["call"], None):
+            with self.subTest(value=value):
+                encoded = encode_report_types(value)
+                self.assertEqual(
+                    normalize_report_types(encoded), normalize_report_types(value)
+                )
 
 
 class FakeUpdateDao:
@@ -211,6 +268,80 @@ class ReportTypeTests(unittest.TestCase):
         service = build_service()
         result = service.create_update("hello", report_type="Call")
         self.assertEqual(result["report_type"], "call")
+
+
+class MultiChannelReportTypeTests(unittest.TestCase):
+    """
+    report_type can now carry several channels at once, including the new
+    'speak' channel — see src.model.report_type.normalize_report_types /
+    encode_report_types, which this (and every other) create_update caller
+    routes through.
+    """
+
+    def test_single_string_still_works(self):
+        """A bare string is still exactly what it was before multi-channel."""
+        service = build_service()
+        result = service.create_update("Deploy finished.", report_type="email")
+
+        self.assertEqual(result["report_type"], "email")
+        self.assertEqual(result["channels"], ["email"])
+        self.assertEqual(result["delivery_status"], DeliveryStatus.PENDING)
+
+    def test_a_list_of_channels_is_stored_and_normalized(self):
+        service = build_service()
+        result = service.create_update(
+            "Deploy finished.", report_type=["chat", "speak"]
+        )
+
+        self.assertEqual(result["channels"], ["chat", "speak"])
+        # Two or more channels are stored as a JSON array on the raw column.
+        self.assertTrue(result["report_type"].startswith("["))
+        # 'speak' is deliverable, so the row is still queued even though
+        # 'chat' alone would not be.
+        self.assertEqual(result["delivery_status"], DeliveryStatus.PENDING)
+
+    def test_speak_is_a_deliverable_channel(self):
+        service = build_service()
+        result = service.create_update("Deploy finished.", report_type="speak")
+
+        self.assertEqual(result["channels"], ["speak"])
+        self.assertEqual(result["delivery_status"], DeliveryStatus.PENDING)
+        self.assertNotIn("warning", result)
+
+    def test_a_list_with_one_undeliverable_channel_warns_for_that_channel_only(self):
+        service = build_service()
+        result = service.create_update(
+            "Deploy finished.", report_type=["speak", "chat"]
+        )
+
+        self.assertEqual(result["channels"], ["speak", "chat"])
+        # speak alone is enough to queue the update for delivery...
+        self.assertEqual(result["delivery_status"], DeliveryStatus.PENDING)
+        # ...but the warning still calls out the channel with no delivery path.
+        self.assertIn("Reporting by chat", result["warning"])
+
+    def test_duplicate_channels_collapse_to_one(self):
+        service = build_service()
+        result = service.create_update(
+            "Deploy finished.", report_type=["email", "email"]
+        )
+        self.assertEqual(result["channels"], ["email"])
+        self.assertEqual(result["report_type"], "email")
+
+    def test_an_update_read_back_decodes_json_encoded_channels(self):
+        """
+        A row written with several channels round-trips through
+        get_unviewed_updates exactly as it was stored — this is what the
+        sidekick poller and the next-turn injection both read.
+        """
+        service = build_service()
+        created = service.create_update(
+            "Deploy finished.", report_type=["sms", "speak"], kind="coding_task",
+            status="success",
+        )
+        [unviewed] = service.get_unviewed_updates()
+        self.assertEqual(unviewed["id"], created["id"])
+        self.assertEqual(sorted(unviewed["channels"]), ["sms", "speak"])
 
 
 class ViewingTests(unittest.TestCase):

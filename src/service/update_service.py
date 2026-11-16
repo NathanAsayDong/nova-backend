@@ -16,6 +16,8 @@ from src.model.report_type import (
     SUPPORTED_REPORT_TYPES,
     DeliveryStatus,
     ReportType,
+    encode_report_types,
+    normalize_report_types,
 )
 from src.model.update import Update
 
@@ -59,6 +61,7 @@ class UpdateService:
                 str(update.conversation_uuid) if update.conversation_uuid else None
             ),
             "report_type": str(update.report_type) if update.report_type else None,
+            "channels": [str(c) for c in update.channels],
             "delivery_status": str(update.delivery_status)
             if update.delivery_status
             else None,
@@ -68,26 +71,25 @@ class UpdateService:
         }
 
     @staticmethod
-    def _validate_report_type(report_type: str | None) -> ReportType | None:
-        if report_type is None:
-            return None
-        candidate = str(report_type).strip().lower()
-        if not candidate:
-            return None
+    def _validate_report_type(
+        report_type: "str | list[str] | None",
+    ) -> list[ReportType]:
+        """
+        Normalize a caller's report_type (single channel or a list of them)
+        into the list of ReportType it names. Accepts either shape so a
+        caller passing a bare string keeps working unmodified.
+        """
         try:
-            return ReportType(candidate)
-        except ValueError:
-            raise ValueError(
-                f"Unknown report_type '{report_type}'. Valid types are "
-                f"{[str(t) for t in ReportType]}."
-            )
+            return normalize_report_types(report_type)
+        except ValueError as exc:
+            raise ValueError(str(exc))
 
     def create_update(
         self,
         update_message: str,
         project_id: int | None = None,
         conversation_uuid: str | None = None,
-        report_type: str | None = None,
+        report_type: "str | list[str] | None" = None,
         kind: str | None = None,
         status: str | None = None,
         link: str | None = None,
@@ -144,17 +146,18 @@ class UpdateService:
                 raise ValueError(f"Conversation {conversation_uuid} does not exist.")
             conversation_uuid = str(uuid_value)
 
-        validated_type = self._validate_report_type(report_type)
-        deliverable = validated_type in SUPPORTED_REPORT_TYPES if validated_type else False
+        channels = self._validate_report_type(report_type)
+        deliverable_channels = [c for c in channels if c in SUPPORTED_REPORT_TYPES]
+        undeliverable_channels = [c for c in channels if c not in SUPPORTED_REPORT_TYPES]
 
         created = self.update_dao.create(
             Update(
                 update_message=update_message,
                 project_id=project_id,
                 conversation_uuid=conversation_uuid,
-                report_type=validated_type,
+                report_type=encode_report_types(channels),
                 delivery_status=(
-                    DeliveryStatus.PENDING if deliverable else DeliveryStatus.NOT_REQUIRED
+                    DeliveryStatus.PENDING if deliverable_channels else DeliveryStatus.NOT_REQUIRED
                 ),
                 kind=kind,
                 status=status,
@@ -163,11 +166,13 @@ class UpdateService:
         )
 
         result = self._to_dict(created)
-        if validated_type is not None and not deliverable:
+        if undeliverable_channels:
+            names = ", ".join(str(c) for c in undeliverable_channels)
             result["warning"] = (
-                f"Reporting by {validated_type} is not deliverable yet — the "
-                "update was recorded and will appear in the updates list, but "
-                "nothing was sent. Only email and call can be delivered today."
+                f"Reporting by {names} is not deliverable yet — the update "
+                "was recorded and will appear in the updates list, but "
+                "nothing was sent for that channel. Only email, sms, call, "
+                "and speak can be delivered today."
             )
         return result
 

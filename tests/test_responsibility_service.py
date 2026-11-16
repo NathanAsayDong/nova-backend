@@ -207,6 +207,16 @@ class ReportMediumTests(unittest.TestCase):
                 self.assertNotIn("send_email", brief)
                 self.assertNotIn("without asking for confirmation", brief)
 
+    def test_speak_brief_mentions_sidekick(self):
+        r = Responsibility(id=1, name="x", report_type=ResponsibilityReportType.SPEAK)
+        self.assertIn("Sidekick", r.report_type_prompt())
+
+    def test_several_channels_combine_every_applicable_sentence(self):
+        r = Responsibility(id=1, name="x", report_type=["email", "speak"])
+        brief = r.report_type_prompt()
+        self.assertIn("email", brief)
+        self.assertIn("Sidekick", brief)
+
 
 class PerformTests(unittest.TestCase):
     def setUp(self):
@@ -324,6 +334,24 @@ class ResponsibilityDeliveryTests(unittest.TestCase):
 
         update = self.service.update_service.created[0]
         self.assertEqual(update["report_type"], "email")
+
+    def test_failure_with_several_channels_preserves_the_whole_list(self):
+        multi = Responsibility(
+            id=9,
+            name="Check things",
+            description="Look.",
+            schedule=["morning"],
+            report_type=["email", "speak"],
+        )
+        service = build_service([multi])
+        self._patch_agent(side_effect=RuntimeError("boom"))
+
+        with self.assertRaises(RuntimeError):
+            service.preform_responsibility(9)
+
+        update = service.update_service.created[0]
+        self.assertIn("email", update["report_type"])
+        self.assertIn("speak", update["report_type"])
 
     def test_routine_success_with_no_report_type_stays_badge_only(self):
         # A responsibility that never asked for delivery in the first place
@@ -464,6 +492,32 @@ class CrudTests(unittest.TestCase):
                 )
                 self.assertTrue(created["report_deliverable"])
                 self.assertNotIn("warning", created)
+
+    def test_a_list_of_channels_is_accepted(self):
+        created = self.service.create_responsibility(
+            name="R", description="d", schedule=["morning"], report_type=["speak", "sms"]
+        )
+        self.assertEqual(sorted(created["channels"]), ["sms", "speak"])
+        self.assertTrue(created["report_deliverable"])
+        self.assertNotIn("warning", created)
+
+    def test_mixed_deliverable_and_undeliverable_channels_warn_for_the_one_channel(self):
+        created = self.service.create_responsibility(
+            name="R", description="d", schedule=["morning"], report_type=["speak", "chat"]
+        )
+        # report_deliverable means every requested channel works -- 'chat'
+        # doesn't, so this is False even though 'speak' alone would deliver.
+        self.assertFalse(created["report_deliverable"])
+        self.assertIn("Reporting by chat", created["warning"])
+
+    def test_update_accepts_a_list_of_channels(self):
+        created = self.service.create_responsibility(
+            name="R", description="d", schedule=["morning"], report_type="email"
+        )
+        updated = self.service.update_responsibility(
+            created["id"], report_type=["email", "speak"]
+        )
+        self.assertEqual(sorted(updated["channels"]), ["email", "speak"])
 
     def test_update_only_changes_given_fields(self):
         created = self.service.create_responsibility(

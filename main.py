@@ -55,6 +55,14 @@ async def lifespan(app: FastAPI):
 
     VisionService.bind_loop(asyncio.get_running_loop())
 
+    # Same hop for speaking a finished-work report through the live
+    # sidekick connection from a delivery pass that may run on a worker
+    # thread (or, in production, a separate OS process with no loop of its
+    # own — see SidekickService.speak_completion).
+    from src.service.sidekick_service import SidekickService
+
+    SidekickService.bind_loop(asyncio.get_running_loop())
+
     # Expired login sessions are dead weight; sweep them on each start.
     try:
         await asyncio.to_thread(auth_service.purge_expired)

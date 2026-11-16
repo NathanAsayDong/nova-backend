@@ -22,7 +22,7 @@ from prompting.prompt_source_prompt import (
 )
 from src.model.conversation import Conversation
 from src.model.message import MessageRole
-from src.model.report_type import ReportType
+from src.model.report_type import ReportType, encode_report_types, normalize_report_types
 from src.harness.spoken_reply import (
     NO_SCREEN_LINE,
     SCREEN_ONLY_LINE,
@@ -440,6 +440,76 @@ class AgentLoop:
             block = ""
         _mark_timing(timer, "memory_late", result="block" if block else "empty")
         return block, True
+
+    # ---------- unviewed updates ----------
+    #
+    # The read behind the notification-queue block below (see that section):
+    # every unviewed Update row, regardless of `kind`. It used to run inline,
+    # synchronously, right where the notifications block is built -- a
+    # comment there noted it was "not overlapped with the memory fetch".
+    # It now starts here, off-thread, at the very top of the turn (see the
+    # call site in `_conversation_turn`), and is collected only once its
+    # result is actually needed to build the user message. Same shape as the
+    # memory-retrieval pair above: a `_start_*` that returns a Future (or
+    # None) and never raises, and a `_collect_*` that awaits it and never
+    # raises either.
+
+    def _start_unviewed_updates(self) -> "Future | None":
+        """
+        Begin the unviewed-updates read off-thread, or None if it could not
+        be started.
+
+        Returns immediately either way; the result is collected by
+        `_collect_unviewed_updates` once the turn is ready to build the
+        notifications block.
+        """
+        try:
+            return _SETUP_POOL.submit(self._fetch_unviewed_updates)
+        except Exception as exc:
+            print(f"Could not start unviewed-updates read (continuing without it): {exc}")
+            return None
+
+    def _fetch_unviewed_updates(self) -> list[dict[str, Any]]:
+        """The read itself. Runs on the pool; never raises."""
+        try:
+            if self.update_service is None:
+                self.update_service = UpdateService()
+            return self.update_service.get_unviewed_updates()
+        except Exception as exc:
+            print(f"Could not check pending notifications (continuing without them): {exc}")
+            return []
+
+    @staticmethod
+    def _collect_unviewed_updates(
+        updates_future: "Future | None", timer: "TurnTimer | None" = None
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """
+        Unviewed updates, or [] if there were none, the read failed, or it
+        never started. Never raises -- same fallback-to-empty behavior as
+        the old inline, synchronous read.
+
+        Returns (updates, finished_early): `finished_early` is whether the
+        background read had already landed by the time the turn got here to
+        ask for it -- the whole point of starting it early -- checked before
+        `.result()`, which would otherwise block.
+        """
+        if updates_future is None:
+            return [], True
+        finished_early = updates_future.done()
+        started_at = time.monotonic()
+        try:
+            result = updates_future.result() or []
+        except Exception as exc:
+            print(f"Could not check pending notifications (continuing without them): {exc}")
+            result = []
+        _mark_timing(
+            timer,
+            "updates_collected",
+            blocked_ms=round((time.monotonic() - started_at) * 1000),
+            finished_early=finished_early,
+            count=len(result),
+        )
+        return result, finished_early
 
     # ---------- pending notifications ----------
     #
@@ -1455,6 +1525,17 @@ class AgentLoop:
         tools_future = _SETUP_POOL.submit(self.tool_service.list_tools)
         mcp_future = _SETUP_POOL.submit(self._load_mcp_servers)
 
+        # The unviewed-updates read (see "unviewed updates" section below)
+        # has no conversation or project dependency either, so it starts
+        # here too -- the earliest point in the turn -- instead of waiting
+        # for the conversation gate like memory retrieval has to. It used to
+        # run synchronously, inline, right before the user message was built;
+        # now it overlaps with the conversation lookup, the tool/MCP fetches,
+        # and the memory retrieval below, and is only awaited once its result
+        # is actually needed (see `_collect_unviewed_updates`).
+        updates_future = self._start_unviewed_updates()
+        parallel_stage_started = time.monotonic()
+
         # Gate the turn on the persisted conversation state (may raise
         # ConversationClosedError), creating the row on first use. A caller
         # that already fetched the row hands it in; the gate still applies.
@@ -1603,23 +1684,31 @@ class AgentLoop:
         # UpdateService.create_update's kind/status params). Checked on every
         # turn in every conversation — deliberately not scoped to this one,
         # since the point is to tell Nate at the start of whichever
-        # conversation he happens to be in next. A cheap DB read, so unlike
-        # memory this is just done inline rather than overlapped on the setup
-        # pool. Marked delivered (is_viewed) immediately after being folded
-        # into this turn's prompt, so a notification is surfaced exactly
-        # once even if this turn never actually mentions it out loud.
+        # conversation he happens to be in next. The read itself started
+        # back at the top of the turn (see `updates_future` above) and
+        # overlapped with the conversation lookup, the tool/MCP fetches, and
+        # the memory retrieval; this just collects whatever it found. Marked
+        # delivered (is_viewed) immediately after being folded into this
+        # turn's prompt, so a notification is surfaced exactly once even if
+        # this turn never actually mentions it out loud.
         notifications_block = ""
-        try:
-            if self.update_service is None:
-                self.update_service = UpdateService()
-            candidate_notifications = [
-                entry
-                for entry in self.update_service.get_unviewed_updates()
-                if entry.get("kind")
-            ]
-        except Exception as exc:
-            candidate_notifications = []
-            print(f"Could not check pending notifications (continuing without them): {exc}")
+        raw_updates, updates_finished_early = self._collect_unviewed_updates(
+            updates_future, timer
+        )
+        candidate_notifications = [entry for entry in raw_updates if entry.get("kind")]
+        # The parallel stage is done: both the memory fetch and the
+        # unviewed-updates read have been started and collected above. This
+        # is the latency the two of them used to spend one after the other
+        # (~250ms memory + ~440-700ms updates) and now spend concurrently
+        # (~max of the two). `updates_finished_early` is the interesting
+        # half of that story -- whether the updates read was already sitting
+        # done, for free, by the time the turn came to collect it.
+        _mark_timing(
+            timer,
+            "parallel_stage_collected",
+            elapsed_ms=round((time.monotonic() - parallel_stage_started) * 1000),
+            updates_finished_early=updates_finished_early,
+        )
         selected_notifications, notification_overflow = self._select_notifications(
             candidate_notifications, conversation_uuid, conversation.project_id
         )
@@ -2163,7 +2252,7 @@ class AgentLoop:
         responsibility_id: int | None = None,
         background: bool = False,
         conversation_uuid: str | None = None,
-        report_type: str | None = None,
+        report_type: "str | list[str] | None" = None,
     ) -> str:
         """
         Run a sub-agent as a bounded Claude + ToolService ReAct loop.
@@ -2190,7 +2279,8 @@ class AgentLoop:
         if self.tool_service is None:
             self.tool_service = ToolService()
 
-        validated_report_type = self._validate_report_type(report_type)
+        validated_channels = self._validate_report_type(report_type)
+        encoded_report_type = encode_report_types(validated_channels)
 
         restrict_management_tools = responsibility_id is not None
 
@@ -2203,8 +2293,8 @@ class AgentLoop:
             parts.append(_RESPONSIBILITY_RUN_RESTRICTION)
         if prompt and prompt.strip():
             parts.append(prompt.strip())
-        if validated_report_type is not None:
-            parts.append(self._report_medium_brief(validated_report_type))
+        if validated_channels:
+            parts.append(self._report_medium_brief(validated_channels))
 
         task_prompt = "\n".join(parts).strip()
         if not task_prompt:
@@ -2213,7 +2303,7 @@ class AgentLoop:
         if background:
             thread = threading.Thread(
                 target=self._run_background_agent,
-                args=(task_prompt, conversation_uuid, validated_report_type),
+                args=(task_prompt, conversation_uuid, encoded_report_type),
                 kwargs={"restrict_management_tools": restrict_management_tools},
                 name="nova-background-agent",
                 daemon=True,
@@ -2223,16 +2313,23 @@ class AgentLoop:
             ]
             self.background_threads.append(thread)
             thread.start()
-            if validated_report_type == ReportType.CALL:
+            if ReportType.CALL in validated_channels:
                 return (
                     "Background agent started. When it finishes, Nova will "
                     "phone the user to report the result. Tell the user to "
                     "expect a call rather than to watch for an update."
                 )
-            if validated_report_type == ReportType.EMAIL:
+            if ReportType.EMAIL in validated_channels:
                 return (
                     "Background agent started. When it finishes, its summary "
                     "will be emailed to the user and also posted as an update."
+                )
+            if ReportType.SPEAK in validated_channels:
+                return (
+                    "Background agent started. When it finishes, if Sidekick "
+                    "mode is on and the user is free Nova will speak the "
+                    "result right away; either way it is also posted as an "
+                    "update."
                 )
             return (
                 "Background agent started. When it finishes, its summary will "
@@ -2245,55 +2342,60 @@ class AgentLoop:
         )
 
     @staticmethod
-    def _validate_report_type(report_type: str | None) -> "ReportType | None":
-        if report_type is None:
-            return None
-        candidate = str(report_type).strip().lower()
-        if not candidate:
-            return None
+    def _validate_report_type(report_type: "str | list[str] | None") -> list[ReportType]:
         try:
-            return ReportType(candidate)
-        except ValueError:
-            raise ToolExecutionError(
-                f"Unknown report_type '{report_type}'. Valid types are "
-                f"{[str(t) for t in ReportType]}.",
-                recoverable=True,
-            )
+            return normalize_report_types(report_type)
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc), recoverable=True)
 
     @staticmethod
-    def _report_medium_brief(report_type: "ReportType") -> str:
+    def _report_medium_brief(report_types: "list[ReportType]") -> str:
         """
         Tell the agent what its summary is going to become.
 
         Deliberately not permission to deliver: delivery happens system-side
         after the run, so this only shapes how the final summary is written.
+        A run can carry several channels at once (e.g. ["chat", "speak"]), in
+        which case every applicable sentence below is included.
         """
-        if report_type == ReportType.CALL:
-            return (
-                "When you finish, Nova will phone the user and report your "
-                "summary out loud, so write that summary to be spoken. Lead "
-                "with the outcome in one sentence, keep the whole thing to a "
-                "few sentences, and leave out code, file paths, URLs, and "
-                "anything else that cannot be read aloud. Do not try to place "
-                "the call yourself — that is handled for you."
-            )
-        if report_type == ReportType.EMAIL:
-            return (
-                "When you finish, your summary will be emailed to the user "
-                "verbatim, so write it as the body of that email. Do not send "
-                "any email yourself — that is handled for you."
-            )
-        return (
-            f"When you finish, your summary is intended to reach the user by "
-            f"{report_type}. Write it accordingly, and do not try to send it "
-            "yourself."
-        )
+        sentences: list[str] = []
+        for report_type in report_types:
+            if report_type == ReportType.CALL:
+                sentences.append(
+                    "When you finish, Nova will phone the user and report "
+                    "your summary out loud, so write that summary to be "
+                    "spoken. Lead with the outcome in one sentence, keep the "
+                    "whole thing to a few sentences, and leave out code, file "
+                    "paths, URLs, and anything else that cannot be read "
+                    "aloud. Do not try to place the call yourself — that is "
+                    "handled for you."
+                )
+            elif report_type == ReportType.EMAIL:
+                sentences.append(
+                    "When you finish, your summary will be emailed to the "
+                    "user verbatim, so write it as the body of that email. Do "
+                    "not send any email yourself — that is handled for you."
+                )
+            elif report_type == ReportType.SPEAK:
+                sentences.append(
+                    "When you finish, if Sidekick mode is on and the user is "
+                    "free, Nova will speak your summary out loud right away, "
+                    "so write it to be spoken: short, plain prose, no code, "
+                    "file paths, or URLs."
+                )
+            else:
+                sentences.append(
+                    f"When you finish, your summary is intended to reach the "
+                    f"user by {report_type}. Write it accordingly, and do not "
+                    "try to send it yourself."
+                )
+        return " ".join(sentences)
 
     def _run_background_agent(
         self,
         task_prompt: str,
         conversation_uuid: str | None,
-        report_type: "ReportType | None" = None,
+        report_type: "str | None" = None,
         restrict_management_tools: bool = False,
     ) -> None:
         """
@@ -2356,7 +2458,7 @@ class AgentLoop:
                 or "A background task finished but produced no summary.",
                 project_id=project_id,
                 conversation_uuid=linked_conversation_uuid,
-                report_type=str(report_type) if report_type else None,
+                report_type=report_type,
                 kind="background_agent",
                 status=notification_status,
             )

@@ -87,6 +87,9 @@ class SidekickConnection:
         self.interrupted = False
         self.speaker: asyncio.Task | None = None
         self.cap_task: asyncio.Task | None = None
+        # Polls for finished background work to speak right away; see
+        # `_notify_loop` and SidekickService.speak_completion.
+        self.notifier: asyncio.Task | None = None
         # One reference for the camera registry: it unregisters by identity,
         # and every `self.send` access makes a new bound method.
         self.camera = self.send
@@ -137,8 +140,13 @@ class SidekickConnection:
         # The glasses are this session's camera for as long as it lasts, so
         # `look` works in the middle of an interjection.
         VisionService.register_camera(str(conversation_uuid), self.camera)
+        # Sidekick is "on" the moment this registry holds the connection —
+        # SidekickService.speak_completion (Feature: speak on completion)
+        # can now reach it from a background delivery pass.
+        SidekickService.register_connection(self)
         self.transcriber = asyncio.create_task(self._transcribe_loop())
         self.cap_task = asyncio.create_task(self._cap())
+        self.notifier = asyncio.create_task(self._notify_loop())
         print(f"[sidekick] started in {conversation_uuid}")
         await self.send(
             {"type": "sidekick_started", "conversationId": str(conversation_uuid)}
@@ -154,11 +162,19 @@ class SidekickConnection:
         if session is None:
             return
         self.session = None
+        SidekickService.unregister_connection(self)
         current = asyncio.current_task()
-        for task in (self.transcriber, self.gate_task, self.interjection, self.cap_task):
+        for task in (
+            self.transcriber,
+            self.gate_task,
+            self.interjection,
+            self.cap_task,
+            self.notifier,
+        ):
             if task is not None and task is not current and not task.done():
                 task.cancel()
         self.transcriber = self.gate_task = self.interjection = self.cap_task = None
+        self.notifier = None
         self.utterance = None
         self.utterances = asyncio.Queue()
         VisionService.unregister_camera(str(session.conversation_uuid), self.camera)
@@ -170,6 +186,121 @@ class SidekickConnection:
     async def _cap(self) -> None:
         await asyncio.sleep(sidekick.SESSION_MAX_SECONDS)
         await self.end("timeout")
+
+    # ---------- speaking on completion ----------
+    #
+    # Lets a background delivery pass (UpdateDeliveryService._deliver_speak,
+    # via SidekickService.speak_completion) and this connection's own
+    # `_notify_loop` below announce finished work immediately, instead of
+    # only at the start of Nate's next turn.
+
+    def is_idle(self) -> bool:
+        """Sidekick is on (a session exists) and not mid-interjection right now."""
+        return self.session is not None and (
+            self.interjection is None or self.interjection.done()
+        )
+
+    async def speak_now(self, text: str, *, bypass_cooldown: bool = False) -> bool:
+        """
+        Speak `text` directly over this connection, outside the gate/model
+        loop an ambient remark goes through — this is a fixed announcement,
+        not something for the gate to decide on.
+
+        `bypass_cooldown` is the narrow, explicit override for the flat
+        COOLDOWN_SECONDS ambient-remark throttle (see SidekickSession); a
+        completion report is not the chatty remark that cooldown exists to
+        space out, so the only caller that sets it true is the completion
+        path. Left False, this would behave like any other remark for
+        cooldown purposes — not currently exercised by any caller, but kept
+        so the check has somewhere to live if a future caller needs it.
+        """
+        session = self.session
+        if session is None:
+            return False
+        if self.interjection is not None and not self.interjection.done():
+            return False
+        if SidekickService.direct_turn_active():
+            return False
+        if not bypass_cooldown and session.cooling_down():
+            return False
+
+        conversation_id = str(session.conversation_uuid)
+        try:
+            await self.send(
+                {
+                    "type": "speech_text",
+                    "text": text,
+                    "role": "final",
+                    "conversationId": conversation_id,
+                }
+            )
+            await nova_controller.stream_tts_audio(
+                self.websocket, text, role="final", send_lock=self.send_lock
+            )
+        except Exception as exc:
+            print(f"[sidekick] speak_now failed: {exc}")
+            return False
+
+        session.note_remark(text)
+        await self.try_send(
+            {
+                "type": "done",
+                "message": "Remark complete.",
+                "conversationId": conversation_id,
+                "assistantText": text,
+                "expectsReply": False,
+            }
+        )
+        return True
+
+    async def _notify_loop(self) -> None:
+        """
+        While this session is idle, speak finished background work the
+        moment it lands rather than waiting for Nate's next turn.
+
+        Polls the same unviewed, kind-tagged rows AgentLoop._conversation_turn
+        injects at the start of the next turn (see UpdateService.create_update's
+        kind/status params); speaking one here marks it viewed so it is
+        announced exactly once, the same compare-and-swap that protects the
+        next-turn path from double-delivery. Any update this loop can't get
+        to right now (busy, or nothing new) is simply left unviewed for that
+        next-turn path to pick up instead — this loop never needs a fallback
+        of its own.
+        """
+        from src.service.update_service import UpdateService
+
+        update_service = UpdateService()
+        while True:
+            await asyncio.sleep(sidekick.COMPLETION_POLL_SECONDS)
+            if self.session is None:
+                return
+            if not self.is_idle() or SidekickService.direct_turn_active():
+                continue
+            try:
+                unviewed = await asyncio.to_thread(update_service.get_unviewed_updates)
+            except Exception as exc:
+                print(f"[sidekick] could not check for finished work: {exc}")
+                continue
+
+            notifications = [entry for entry in unviewed if entry.get("kind")]
+            if not notifications:
+                continue
+
+            entry = notifications[0]
+            summary = (entry.get("update_message") or "").strip()
+            if not summary:
+                continue
+            lead = "Heads up, this didn't go well" if entry.get("status") == "failed" else "Quick update"
+            text = f"{lead}: {summary}"
+
+            if not await self.speak_now(text, bypass_cooldown=True):
+                continue
+            update_id = entry.get("id")
+            if update_id is not None:
+                try:
+                    await asyncio.to_thread(update_service.mark_update_viewed, update_id)
+                except Exception as exc:
+                    print(f"[sidekick] could not mark notification {update_id} spoken: {exc}")
 
     # ---------- utterances ----------
 

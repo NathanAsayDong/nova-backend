@@ -143,20 +143,21 @@ class UpdateDeliveryService:
         failed = 0
 
         for update in pending:
-            report_type = update.report_type
+            channels = update.channels
 
-            if report_type not in SUPPORTED_REPORT_TYPES:
-                # Recorded intent we can't act on (sms, chat). Settle it now so
-                # it stops being scanned on every pass; the update itself is
-                # still in the badge, which is the honest outcome.
+            if not any(c in SUPPORTED_REPORT_TYPES for c in channels):
+                # Recorded intent we can't act on (chat, or an empty/unknown
+                # list). Settle it now so it stops being scanned on every
+                # pass; the update itself is still in the badge, which is the
+                # honest outcome.
                 self.update_service.mark_delivery_failed(
                     update.id,
-                    f"No delivery channel for report type '{report_type}'.",
+                    f"No delivery channel for report type '{update.report_type}'.",
                 )
                 failed += 1
                 continue
 
-            if report_type == ReportType.CALL:
+            if ReportType.CALL in channels:
                 if quiet:
                     deferred += 1
                     continue
@@ -167,7 +168,7 @@ class UpdateDeliveryService:
             outcome = self.deliver_update(update)
             if outcome == "delivered":
                 delivered += 1
-                if report_type == ReportType.CALL:
+                if ReportType.CALL in channels:
                     calls_remaining -= 1
             elif outcome == "deferred":
                 deferred += 1
@@ -187,11 +188,24 @@ class UpdateDeliveryService:
 
     def deliver_update(self, update: Update) -> str:
         """
-        Deliver one update. Returns "delivered", "deferred", or "failed".
+        Deliver one update through every channel it names.
 
-        "delivered" means handed to the channel — for a call that means the
-        call was placed, not that the user picked up; the status callback
-        settles that later.
+        Returns "delivered", "deferred", or "failed" for the update as a
+        whole: "delivered" once every deliverable channel either succeeded
+        or had nothing to do (e.g. `speak` with no live, idle sidekick
+        session — see `_deliver_speak`); "deferred" if any channel should be
+        retried on a later pass (and none outright failed); "failed"
+        otherwise. A call only *starts* here (see the class docstring), so a
+        placed call still counts as "delivered" for this pass even though
+        its own settlement comes later from the Twilio status callback.
+
+        Per-channel outcomes are not persisted individually — the row has
+        one delivery_status, same as before multi-channel reporting — so a
+        update with several channels is retried as a whole on its next pass
+        if any one of them deferred, even if another already succeeded. That
+        channel's delivery call runs again, which every channel here treats
+        as safe to repeat (idempotent at the "did the user hear/see this"
+        level, not literally side-effect-free).
         """
         claimed = self.update_service.claim_for_delivery(update.id)
         if claimed is None:
@@ -199,21 +213,37 @@ class UpdateDeliveryService:
             return "deferred"
 
         attempts = (claimed.delivery_attempts or 0) + 1
+        channels = claimed.channels
+        deliverable_channels = [c for c in channels if c in SUPPORTED_REPORT_TYPES]
 
-        try:
-            if claimed.report_type == ReportType.EMAIL:
-                return self._deliver_email(claimed, attempts)
-            if claimed.report_type == ReportType.SMS:
-                return self._deliver_sms(claimed, attempts)
-            if claimed.report_type == ReportType.CALL:
-                return self._deliver_call(claimed, attempts)
-
+        if not deliverable_channels:
             self.update_service.mark_delivery_failed(
                 claimed.id,
                 f"No delivery channel for report type '{claimed.report_type}'.",
                 attempts=attempts,
             )
             return "failed"
+
+        try:
+            outcomes: list[str] = []
+            for channel in deliverable_channels:
+                if channel == ReportType.EMAIL:
+                    outcomes.append(self._deliver_email(claimed, attempts))
+                elif channel == ReportType.SMS:
+                    outcomes.append(self._deliver_sms(claimed, attempts))
+                elif channel == ReportType.CALL:
+                    outcomes.append(self._deliver_call(claimed, attempts))
+                elif channel == ReportType.SPEAK:
+                    outcomes.append(self._deliver_speak(claimed, attempts))
+
+            if "failed" in outcomes and "deferred" not in outcomes and "delivered" not in outcomes:
+                return "failed"
+            if "deferred" in outcomes:
+                return "deferred"
+            # Every channel either delivered or had nothing to do (the
+            # per-channel helpers already settled/requeued the row as
+            # appropriate), so the row as a whole is done.
+            return "delivered"
         except Exception as exc:
             # Never leave a claimed update stuck IN_PROGRESS: an unexpected
             # error here would otherwise strand it out of the queue forever.
@@ -374,6 +404,43 @@ class UpdateDeliveryService:
         )
         print(f"Placed call {call_sid} to deliver update {update.id}.")
         return "delivered"
+
+    def _deliver_speak(self, update: Update, attempts: int) -> str:
+        """
+        Speak this update's summary through the live sidekick session, if
+        one is connected and idle right now.
+
+        The speaking itself can only happen in the process that owns the
+        live /ws/sidekick connection — see SidekickService.speak_completion
+        and the module note on `deliver_pending` running on a schedule that
+        may be a separate OS process (worker.py) from the API process that
+        holds that socket. When no idle session is reachable from here —
+        sidekick off, Nate mid-conversation, or this pass simply running in
+        the worker process rather than the API process — this channel is
+        deferred, not failed: a kind-tagged update is also picked up by the
+        sidekick connection's own poller the moment a session goes idle (see
+        SidekickConnection in sidekick_controller.py), and a plain
+        speak-only update keeps retrying here until it is either spoken or
+        exhausts its attempts, at which point it falls back to being an
+        ordinary badge-only update.
+        """
+        from src.service.sidekick_service import SidekickService
+
+        if SidekickService.speak_completion(update.update_message or ""):
+            self.update_service.mark_delivered(update.id)
+            return "delivered"
+
+        if attempts >= self.max_delivery_attempts():
+            self.update_service.mark_delivery_failed(
+                update.id,
+                "No idle Sidekick session was available to speak this update.",
+                attempts=attempts,
+            )
+            return "failed"
+        self.update_service.requeue_delivery(
+            update.id, error="Waiting for an idle Sidekick session.", attempts=attempts
+        )
+        return "deferred"
 
     # ---------- outcome from the call status callback ----------
 
