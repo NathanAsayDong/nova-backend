@@ -62,8 +62,12 @@ final class TurnDetector {
     var onTurnEnd: ((TurnEndReason) -> Void)?
     var onSpeakingChange: ((Bool) -> Void)?
 
-    /// Matches the backend's DEFAULT_SILENCE_MS at scale 1.0.
-    static let defaultSilenceMs: Double = 1000
+    /// Matches the backend's DEFAULT_SILENCE_MS at scale 1.0. Raised from
+    /// 1000 to 1300 alongside the backend tiers (endpointing_service.py) to
+    /// make end-of-speech detection less aggressive; nova-frontend's
+    /// turnDetector.ts carries the identical constant and needs the same
+    /// change to stay in step (separate repo, not updated by this change).
+    static let defaultSilenceMs: Double = 1300
     static let minSpeechMs: Double = 120
     static let calibrationMs: Double = 650
     static let calibrationRampSkipMs: Double = 250
