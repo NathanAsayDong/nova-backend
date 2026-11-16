@@ -15,6 +15,7 @@ from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 from src.model.project import Project  # noqa: F401  (see meeting.py on why)
+from src.model.report_type import ReportType, normalize_report_types
 
 
 class CodingStatus(StrEnum):
@@ -54,9 +55,18 @@ class CodingSession(SQLModel, table=True):
     last_result: str | None = None
     last_seq: int = 0
     project_id: int | None = Field(default=None, foreign_key="project.id")
+    # How Nate wants to hear about this task finishing — bare value or
+    # JSON-encoded list, same convention as Update.report_type. None means
+    # badge-only: the completion only posts an update (see
+    # CodingService.record_event).
+    report_type: str | None = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: datetime | None = None
+
+    @property
+    def channels(self) -> list[ReportType]:
+        return normalize_report_types(self.report_type)
 
 
 class CodingEvent(SQLModel, table=True):

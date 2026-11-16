@@ -23,6 +23,30 @@ from src.service.tool_service import ToolService  # noqa: E402
 
 _BASE = "src.service.coding_service.CodingService"
 
+# Same shape as register_project_tools.py's _REPORT_TYPE_PROPERTY — kept as a
+# local copy rather than importing across scripts, matching how this script
+# already duplicates rather than shares its tool-definition helpers.
+_REPORT_TYPE_VALUES = ["email", "sms", "call", "chat", "speak"]
+
+_REPORT_TYPE_PROPERTY = {
+    "anyOf": [
+        {"type": "string", "enum": _REPORT_TYPE_VALUES},
+        {"type": "array", "items": {"type": "string", "enum": _REPORT_TYPE_VALUES}},
+    ],
+    "description": (
+        "How Nate wants to hear about this task finishing — a single channel "
+        "(e.g. 'email'), or a list of several at once (e.g. ['speak', "
+        "'sms']). 'email' emails the summary, 'sms' texts it, 'call' phones "
+        "him and reads it out, and 'speak' has Nova say it immediately "
+        "through Sidekick mode if it's on and he's free (falling back to the "
+        "usual update otherwise). 'chat' has no delivery channel of its own. "
+        "Omit for no push — the result still posts as an update either way. "
+        "Only set this when he actually asked to be notified, and combine "
+        "channels when he asks for more than one, e.g. 'tell me when it's "
+        "done and also text me' -> ['speak', 'sms']."
+    ),
+}
+
 CODING_TOOLS: list[dict] = [
     {
         "name": "start_coding_task",
@@ -44,7 +68,10 @@ CODING_TOOLS: list[dict] = [
             "an hour: say you have started it and move on, then use check_coding_task "
             "when he asks. Write the instructions as you would brief a capable "
             "engineer who cannot ask you a follow-up: what to build, where, and how "
-            "to know it worked."
+            "to know it worked. Set report_type when Nate asks to be told "
+            "when it's done — a single channel or a list to use several at "
+            "once (e.g. ['speak', 'sms']); omit it and the result still "
+            "posts as an update he can check later."
         ),
         "config": {
             "type": "service_method",
@@ -72,6 +99,7 @@ CODING_TOOLS: list[dict] = [
                         "type": "boolean",
                         "description": "Work in its own git worktree and branch instead of the repo's real working tree. Defaults to true; pass false to use the real working tree instead (only one such task per repo at a time).",
                     },
+                    "report_type": _REPORT_TYPE_PROPERTY,
                 },
                 "required": ["repo", "instructions"],
                 "additionalProperties": False,

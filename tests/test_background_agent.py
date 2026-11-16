@@ -278,6 +278,46 @@ class ReportTypeTests(BackgroundAgentTests):
         self.assertEqual(self.update_service.created[0]["report_type"], "call")
 
 
+class MultiChannelReportTypeTests(BackgroundAgentTests):
+    """A background agent can be asked to report through several channels at once."""
+
+    def test_a_list_of_channels_is_stamped_on_the_update(self):
+        self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type=["chat", "speak"]
+        )
+        self._join_background()
+
+        stored = self.update_service.created[0]["report_type"]
+        # Single-channel rows stay a bare string; only two-or-more encode as JSON.
+        self.assertIn('"chat"', stored)
+        self.assertIn('"speak"', stored)
+
+    def test_speak_brief_tells_the_agent_to_write_for_speech(self):
+        self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type="speak"
+        )
+        self._join_background()
+
+        task = self.captured[0]["context"][0]["content"]
+        self.assertIn("Sidekick", task)
+
+    def test_ack_mentions_speak_when_requested(self):
+        result = self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type="speak"
+        )
+        self._join_background()
+
+        self.assertIn("Sidekick", result)
+
+    def test_a_single_item_list_behaves_like_a_bare_string(self):
+        self.agent_loop.run_agent(
+            prompt="do the thing", background=True, report_type=["call"]
+        )
+        self._join_background()
+
+        self.assertEqual(self.update_service.created[0]["report_type"], "call")
+
+
 _RESTRICTED_TOOL_NAMES = {
     "create_responsibility",
     "create_scheduled_task",

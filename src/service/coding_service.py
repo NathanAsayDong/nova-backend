@@ -19,6 +19,7 @@ from uuid import UUID
 
 from src.dao.coding_session_dao import CodingSessionDao
 from src.model.coding_session import CodingEvent, CodingSession, CodingStatus
+from src.model.report_type import encode_report_types
 from src.service.update_service import UpdateService
 
 # Event types that say the session moved on rather than just chattered.
@@ -66,6 +67,7 @@ class CodingService:
         title: str | None = None,
         project_id: int | None = None,
         isolate: bool = True,
+        report_type: "str | list[str] | None" = None,
     ) -> dict:
         session_id = uuid.uuid4()
         title = (title or instructions).strip()[:120]
@@ -80,6 +82,7 @@ class CodingService:
             repo=repo,
             instructions=instructions,
             project_id=project_id,
+            report_type=encode_report_types(report_type),
             rollup="Starting up.",
         )
         await asyncio.to_thread(self.dao.create, session)
@@ -440,6 +443,7 @@ class CodingService:
                     self.update_service.create_update(
                         update_message=f"Coding task '{session.title}': {fields['rollup']}",
                         project_id=session.project_id,
+                        report_type=session.report_type,
                         kind="coding_task",
                         status=notification_status,
                     )
@@ -515,6 +519,7 @@ class CodingService:
         title: str | None = None,
         project_id: int | None = None,
         isolate: bool = True,
+        report_type: "str | list[str] | None" = None,
         conversation_uuid: str | None = None,
     ) -> dict:
         """Tool entry point: hand a coding task to the Mac."""
@@ -525,6 +530,7 @@ class CodingService:
                 title=title,
                 project_id=project_id,
                 isolate=isolate,
+                report_type=report_type,
             )
         )
 

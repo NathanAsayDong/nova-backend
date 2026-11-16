@@ -2,7 +2,7 @@ from sqlalchemy import Column, JSON
 from sqlmodel import SQLModel, Field
 from datetime import datetime
 
-from src.model.report_type import ReportType
+from src.model.report_type import ReportType, normalize_report_types
 
 # Report types are no longer specific to responsibilities — a background agent
 # can be given one too, and both paths converge on the Update that carries it.
@@ -22,7 +22,13 @@ class Responsibility(SQLModel, table=True):
     )
     last_run: datetime | None = None
     project_id: int | None = None
-    report_type: ReportType | None = None
+    # Bare value or JSON-encoded list — see Update.channels and
+    # src.model.report_type.normalize_report_types/encode_report_types.
+    report_type: str | None = None
+
+    @property
+    def channels(self) -> list[ReportType]:
+        return normalize_report_types(self.report_type)
 
     def to_payload(self) -> dict:
         return self.model_dump(
@@ -46,23 +52,39 @@ class Responsibility(SQLModel, table=True):
 
         Delivery is handled system-side once the run produces an Update, so
         this is context for the agent's own writing — it should know whether
-        its summary will be read on a screen or spoken down a phone line — and
-        never an instruction to deliver anything itself.
+        its summary will be read on a screen, spoken down a phone line, or
+        both — and never an instruction to deliver anything itself. One
+        responsibility can carry several channels at once (e.g. ["chat",
+        "speak"]), in which case every applicable sentence below is included.
         """
-        if self.report_type == ReportType.EMAIL:
-            return (
-                "Your summary of this run will be emailed to the user verbatim, "
-                "so write it as the body of that email."
-            )
-        elif self.report_type == ReportType.CALL:
-            return (
-                "Nova will phone the user and report this run out loud, using "
-                "your summary as the basis for the conversation. Write it to be "
-                "spoken: lead with the outcome, keep it short, and leave out "
-                "code, file paths, and anything unreadable aloud."
-            )
-        elif self.report_type == ReportType.SMS:
-            return "Your summary of this run will be texted to the user, so keep it very short."
-        elif self.report_type == ReportType.CHAT:
-            return "Your summary of this run will be shown to the user in chat."
-        return ""
+        sentences: list[str] = []
+        for channel in self.channels:
+            if channel == ReportType.EMAIL:
+                sentences.append(
+                    "Your summary of this run will be emailed to the user "
+                    "verbatim, so write it as the body of that email."
+                )
+            elif channel == ReportType.CALL:
+                sentences.append(
+                    "Nova will phone the user and report this run out loud, "
+                    "using your summary as the basis for the conversation. "
+                    "Write it to be spoken: lead with the outcome, keep it "
+                    "short, and leave out code, file paths, and anything "
+                    "unreadable aloud."
+                )
+            elif channel == ReportType.SMS:
+                sentences.append(
+                    "Your summary of this run will be texted to the user, so "
+                    "keep it very short."
+                )
+            elif channel == ReportType.SPEAK:
+                sentences.append(
+                    "If Sidekick mode is on and the user is free, Nova will "
+                    "also speak your summary out loud right away, so keep it "
+                    "short and spoken-friendly: no code, file paths, or URLs."
+                )
+            elif channel == ReportType.CHAT:
+                sentences.append(
+                    "Your summary of this run will be shown to the user in chat."
+                )
+        return " ".join(sentences)

@@ -171,6 +171,59 @@ class WorkingTreeTests(unittest.TestCase):
                 f"{tool['name']} -> {method} is not a method on CodingService",
             )
 
+    def test_start_describes_report_type_including_speak_and_lists(self):
+        start = next(t for t in self.tools if t["name"] == "start_coding_task")
+        report_type_prop = start["config"]["input_schema"]["properties"]["report_type"]
+
+        values = report_type_prop["anyOf"][0]["enum"]
+        self.assertIn("speak", values)
+        self.assertEqual(report_type_prop["anyOf"][1]["type"], "array")
+        self.assertIn("several", report_type_prop["description"])
+
+
+class StartReportTypeTests(unittest.TestCase):
+    """start_coding_task carries report_type onto the session it creates,
+    so a finished task's notification (see CompletionNotificationTests)
+    knows which channels the task was asked to report through."""
+
+    @patch("src.service.coding_service.CodingSessionDao")
+    def test_report_type_is_stored_on_the_session(self, dao_cls):
+        from unittest.mock import AsyncMock, MagicMock
+
+        dao = MagicMock()
+        dao_cls.return_value = dao
+        service = CodingService()
+        service.link = None  # Mac offline: start() returns before dispatching.
+
+        import asyncio
+
+        asyncio.run(
+            service.start(
+                repo="nova-backend",
+                instructions="fix it",
+                report_type=["chat", "speak"],
+            )
+        )
+
+        created = dao.create.call_args.args[0]
+        self.assertIn("chat", created.report_type)
+        self.assertIn("speak", created.report_type)
+
+    @patch("src.service.coding_service.CodingSessionDao")
+    def test_no_report_type_leaves_the_session_badge_only(self, dao_cls):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        dao = MagicMock()
+        dao_cls.return_value = dao
+        service = CodingService()
+        service.link = None
+
+        asyncio.run(service.start(repo="nova-backend", instructions="fix it"))
+
+        created = dao.create.call_args.args[0]
+        self.assertIsNone(created.report_type)
+
 
 class MacShellTests(unittest.TestCase):
     """
@@ -449,6 +502,24 @@ class CompletionNotificationTests(unittest.TestCase):
             )
 
         service.update_service.create_update.assert_not_called()
+
+    def test_the_sessions_report_type_rides_along_with_the_notification(self):
+        """
+        A session started with report_type (e.g. ['speak', 'sms']) carries it
+        onto every completion notification, so the delivery dispatcher (and
+        the sidekick speak path) sees the same channels the task was started
+        with, not just the kind/status tags.
+        """
+        session = self._session(report_type='["speak", "sms"]')
+        service = self._service(session)
+
+        service.record_event(
+            {"session_id": str(session.session_id), "seq": 1, "type": "result",
+             "result": "All tests pass.", "is_error": False}
+        )
+
+        kwargs = service.update_service.create_update.call_args.kwargs
+        self.assertEqual(kwargs["report_type"], '["speak", "sms"]')
 
     def test_a_failure_filing_the_notification_does_not_lose_the_event(self):
         """record_event's own outer try/except must not swallow this as a

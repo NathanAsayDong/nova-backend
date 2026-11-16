@@ -958,5 +958,107 @@ class InterruptAndCancelWiringTests(unittest.TestCase):
         self.assertTrue(connection.interjection.cancelled())
 
 
+class SpeakOnCompletionTests(unittest.TestCase):
+    """
+    Speak on completion (Feature: proactive sidekick speech). Exercised
+    directly on SidekickConnection.speak_now / is_idle, same no-socket style
+    as InterruptAndCancelWiringTests above — the full register/bind_loop/
+    SidekickService.speak_completion wiring (main.py's lifespan binding the
+    event loop, UpdateDeliveryService._deliver_speak calling in) is covered
+    separately in test_update_delivery_service.py with SidekickService
+    itself mocked out.
+    """
+
+    def setUp(self):
+        self.addCleanup(setattr, SidekickService, "active_direct_turns", 0)
+
+    def test_idle_means_a_session_with_no_interjection_running(self):
+        connection = sidekick_controller.SidekickConnection(FakeSendWebSocket())
+        self.assertFalse(connection.is_idle())  # no session started yet
+
+        connection.session = SidekickSession(uuid.uuid4())
+        self.assertTrue(connection.is_idle())
+
+        async def never_finishes():
+            await asyncio.sleep(100)
+
+        async def scenario():
+            connection.interjection = asyncio.create_task(never_finishes())
+            await asyncio.sleep(0)
+            return connection.is_idle()
+
+        self.assertFalse(asyncio.run(scenario()))
+
+    def test_speak_now_sends_the_text_and_notes_the_remark(self):
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+        connection.session = SidekickSession(uuid.uuid4())
+
+        async def no_tts(*args, **kwargs):
+            return True
+
+        with patch.object(nova_controller, "stream_tts_audio", no_tts):
+            spoken = asyncio.run(connection.speak_now("Quick update: done."))
+
+        self.assertTrue(spoken)
+        self.assertEqual(connection.session.last_line(), "")
+        # note_remark starts the ordinary cooldown for the NEXT ambient
+        # remark; the completion report itself was not held back by it.
+        self.assertIsNotNone(connection.session.last_remark_at)
+        kinds = [m["type"] for m in websocket.sent]
+        self.assertIn("speech_text", kinds)
+        self.assertIn("done", kinds)
+
+    def test_speak_now_without_a_session_is_a_no_op(self):
+        connection = sidekick_controller.SidekickConnection(FakeSendWebSocket())
+        self.assertFalse(asyncio.run(connection.speak_now("hi")))
+
+    def test_speak_now_respects_cooldown_unless_bypassed(self):
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+        connection.session = SidekickSession(uuid.uuid4())
+        # Simulate a remark that just happened: within COOLDOWN_SECONDS.
+        connection.session.note_remark("earlier remark")
+
+        async def no_tts(*args, **kwargs):
+            return True
+
+        with patch.object(nova_controller, "stream_tts_audio", no_tts):
+            # Ordinary ambient-remark semantics: still cooling down.
+            blocked = asyncio.run(connection.speak_now("another remark"))
+            self.assertFalse(blocked)
+
+            # The completion-speech bypass is explicit and narrow: only this
+            # call sets bypass_cooldown=True.
+            spoken = asyncio.run(
+                connection.speak_now("finished the task", bypass_cooldown=True)
+            )
+            self.assertTrue(spoken)
+
+    def test_a_direct_turn_in_progress_blocks_speak_now(self):
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+        connection.session = SidekickSession(uuid.uuid4())
+        SidekickService.begin_direct_turn()
+        try:
+            self.assertFalse(connection.is_idle() and not SidekickService.direct_turn_active())
+            spoken = asyncio.run(connection.speak_now("done", bypass_cooldown=True))
+            self.assertFalse(spoken)
+        finally:
+            SidekickService.end_direct_turn()
+
+    def test_registering_makes_the_connection_reachable_for_completion_speech(self):
+        websocket = FakeSendWebSocket()
+        connection = sidekick_controller.SidekickConnection(websocket)
+        connection.session = SidekickSession(uuid.uuid4())
+
+        SidekickService.register_connection(connection)
+        try:
+            self.assertIs(SidekickService._idle_connection(), connection)
+        finally:
+            SidekickService.unregister_connection(connection)
+        self.assertIsNone(SidekickService._idle_connection())
+
+
 if __name__ == "__main__":
     unittest.main()

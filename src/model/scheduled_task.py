@@ -3,7 +3,7 @@ from enum import StrEnum
 
 from sqlmodel import SQLModel, Field
 
-from src.model.report_type import ReportType
+from src.model.report_type import ReportType, normalize_report_types
 
 
 class TaskStatus(StrEnum):
@@ -28,11 +28,17 @@ class ScheduledTask(SQLModel, table=True):
     run_at: datetime | None = None
     status: TaskStatus | None = TaskStatus.PENDING
     project_id: int | None = None
-    report_type: ReportType | None = None
+    # Bare value or JSON-encoded list — see Update.channels and
+    # src.model.report_type.normalize_report_types/encode_report_types.
+    report_type: str | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     result: str | None = None
+
+    @property
+    def channels(self) -> list[ReportType]:
+        return normalize_report_types(self.report_type)
 
     def to_payload(self) -> dict:
         return self.model_dump(

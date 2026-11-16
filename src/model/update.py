@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlmodel import SQLModel, Field
 
-from src.model.report_type import DeliveryStatus, ReportType
+from src.model.report_type import DeliveryStatus, ReportType, normalize_report_types
 
 
 class Update(SQLModel, table=True):
@@ -17,7 +17,12 @@ class Update(SQLModel, table=True):
 
     # How the user asked to hear about this, set when the work was spawned.
     # None means badge-only: it shows up in the updates list and nowhere else.
-    report_type: ReportType | None = Field(default=None)
+    # Stored as either a bare value ("email", backward compatible with every
+    # row written before multi-channel reporting) or a JSON-encoded list
+    # ('["chat", "speak"]') — see `channels` below and
+    # src.model.report_type.encode_report_types/normalize_report_types,
+    # which is what understands both shapes.
+    report_type: str | None = Field(default=None)
     delivery_status: DeliveryStatus = Field(default=DeliveryStatus.NOT_REQUIRED)
     # Counts dispatch attempts, not rings. Bounds retries on an update the
     # user never picks up so Nova doesn't call forever.
@@ -36,6 +41,11 @@ class Update(SQLModel, table=True):
     kind: str | None = Field(default=None)
     status: str | None = Field(default=None)
     link: str | None = Field(default=None)
+
+    @property
+    def channels(self) -> list[ReportType]:
+        """report_type normalized to a list, whichever shape it was stored in."""
+        return normalize_report_types(self.report_type)
 
     def to_payload(self) -> dict:
         return self.model_dump(

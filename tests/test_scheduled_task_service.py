@@ -171,6 +171,20 @@ class CreateTests(unittest.TestCase):
         result = service.create_scheduled_task("x", "y", soon(), report_type="chat")
         self.assertIn("warning", result)
 
+    def test_a_list_of_channels_is_accepted_and_normalized(self):
+        service = build_service()
+        result = service.create_scheduled_task(
+            "x", "y", soon(), report_type=["speak", "sms"]
+        )
+        self.assertEqual(sorted(result["channels"]), ["sms", "speak"])
+        self.assertNotIn("warning", result)
+
+    def test_speak_alone_is_deliverable(self):
+        service = build_service()
+        result = service.create_scheduled_task("x", "y", soon(), report_type="speak")
+        self.assertEqual(result["channels"], ["speak"])
+        self.assertNotIn("warning", result)
+
 
 class ListAndCancelTests(unittest.TestCase):
     def test_list_defaults_to_pending(self):
@@ -249,6 +263,25 @@ class RunTests(unittest.TestCase):
 
         # Nothing pending is left for a later pass to pick up.
         self.assertEqual(service.run_due_tasks()["due"], 0)
+
+    def test_a_list_of_channels_round_trips_to_the_agent_and_the_update(self):
+        agent = self._patch_agent("all done")
+        service = build_service(
+            [pending(id=1, report_type=["chat", "speak"], project_id=7)]
+        )
+
+        service.run_task(1)
+
+        passed = agent.run_agent.call_args.kwargs["report_type"]
+        # Whatever shape the row stored it in is handed straight to
+        # run_agent, which understands bare strings and JSON-encoded lists
+        # alike (see normalize_report_types) -- the service layer doesn't
+        # need to re-decode it first.
+        self.assertIn("chat", passed)
+        self.assertIn("speak", passed)
+        update = service.update_service.created[0]
+        self.assertIn("chat", update["report_type"])
+        self.assertIn("speak", update["report_type"])
 
     def test_routine_failure_with_no_report_type_stays_badge_only(self):
         # A task nobody asked to be called/texted/emailed about stays
