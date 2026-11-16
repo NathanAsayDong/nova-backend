@@ -35,6 +35,27 @@ script, mid-deploy, if the target pid is an ancestor of ours. See
 refuses to kill itself or anything upstream of itself while still being
 free to tree-kill everything else (API/worker parents and the
 multiprocessing.spawn children they leave behind).
+
+Stale protected ancestors: refusing to kill an ancestor is the right call
+mid-deploy, but it must not mean the ancestor is simply abandoned on the
+port forever — production hit exactly that on 2026-11-16: a deploy run as a
+descendant of the live API process left that old API (protected, as an
+ancestor) still listening on port 8000 right alongside the freshly started
+one, so some requests kept hitting old code. When `_sweep_leftovers` finds
+port/worker pids it cannot touch because they are ancestors, it hands them
+off to a *second*, independently-spawned, detached helper process (see
+`spawn_stale_ancestor_helper` / `run_stale_ancestor_helper`). That helper is
+launched with no inherited handles and its own session/process group (POSIX
+`start_new_session`; Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`)
+specifically so it is *not* a descendant of the ancestor it is about to
+kill, and so it keeps running even if this script — or the ancestor tree
+itself — exits or is killed out from under it. It waits for this script's
+own pid to exit (so it never races this deploy's own health check or
+rollback), then tree-kills the stale ancestor pid(s), then makes sure
+exactly one healthy API ends up listening on the port, restarting it if the
+kill also took down the freshly started one. This script's own deploy
+outcome (and exit code) never depends on that helper — a stale protected
+ancestor is logged and handed off, never a deploy failure.
 """
 
 from __future__ import annotations
@@ -63,6 +84,14 @@ STATE_FILE = LOG_DIR / "last_deploy.json"
 DEFAULT_HEALTH_URL = "http://127.0.0.1:8000/health"
 DEFAULT_HEALTH_TIMEOUT = 60
 DEFAULT_PORT = 8000
+
+# Floor for how long the stale-ancestor helper waits for this deploy script to
+# exit before it will touch the ancestor tree. Scaled off --health-timeout
+# (which the caller may raise well past the default) but never below this,
+# since a rollback doubles the number of restart+health-check cycles this
+# script can still be mid-way through.
+STALE_ANCESTOR_HELPER_MIN_WAIT_SECONDS = 300
+STALE_ANCESTOR_HELPER_WAIT_MULTIPLIER = 4
 
 # Known-offline test modules (see the nova-backend-testing runbook): the rest
 # of the suite imports things that hang or fail without the DB/network this
@@ -323,6 +352,180 @@ def stop_pid(pid: int | None, *, tree: bool = True) -> None:
         pass
 
 
+def spawn_stale_ancestor_helper(
+    ancestor_pids: list[int],
+    deploy_pid: int,
+    port: int,
+    health_url: str,
+    repo_root: Path,
+    max_wait_seconds: int,
+) -> None:
+    """
+    Launch a detached helper that finishes cleaning up `ancestor_pids`.
+
+    `stop_pid` refuses to touch these because they are ancestors of
+    `deploy_pid` (see `_protected_pids`) — tree-killing one mid-deploy would
+    take the deploy script down with it. This spawns a second process,
+    re-invoking this same script in `--helper-mode`, specifically detached
+    (own session/process group, no inherited stdio) so it is *not* itself a
+    descendant of the ancestor tree and keeps running no matter what happens
+    to `deploy_pid` or that tree. See `run_stale_ancestor_helper` for what it
+    does once it wakes up.
+    """
+    args = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--helper-mode",
+        "--deploy-pid",
+        str(deploy_pid),
+        "--ancestor-pids",
+        ",".join(str(pid) for pid in ancestor_pids),
+        "--port",
+        str(port),
+        "--health-url",
+        health_url,
+        "--repo-root",
+        str(repo_root),
+        "--max-wait-seconds",
+        str(max_wait_seconds),
+    ]
+    popen_kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if supervisor.IS_WINDOWS:
+        # DETACHED_PROCESS: no console, not tied to this process's job/console.
+        # CREATE_NEW_PROCESS_GROUP: so it is not in this process's group either.
+        # getattr-guarded because these attributes don't exist in the
+        # subprocess module on non-Windows interpreters (e.g. tests run on
+        # the Mac/Linux dev box with supervisor.IS_WINDOWS patched to True).
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "DETACHED_PROCESS", 0x00000008
+        ) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    subprocess.Popen(args, **popen_kwargs)  # noqa: S603 - fixed argv, no shell
+
+
+def _wait_for_pid_exit(pid: int, timeout_seconds: float, poll_interval: float = 1.0) -> bool:
+    """Block until `pid` is no longer alive, or `timeout_seconds` elapses."""
+    deadline = time.monotonic() + max(0, timeout_seconds)
+    while supervisor.pid_alive(pid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval)
+    return True
+
+
+def _ensure_single_healthy_api(
+    port: int,
+    health_url: str,
+    repo_root: Path,
+    logger: logging.Logger,
+    attempts: int = 5,
+    delay_seconds: float = 2.0,
+) -> bool:
+    """
+    Make sure exactly one process is listening on `port` and /health is up.
+
+    Called after the stale ancestor tree has been killed. Killing that tree
+    can (rarely) also take down the freshly started API — e.g. if it shared
+    a process group with something underneath the old ancestor — so this
+    restarts it when needed rather than just checking and giving up. It only
+    ever stops pids it finds listening on `port` right now (never the
+    ancestor pids already handled, never this helper's own pid, since this
+    helper never binds the port itself).
+    """
+    for attempt in range(1, attempts + 1):
+        remaining = find_all_pids_on_port(port)
+        if len(remaining) == 1 and check_health_once(health_url):
+            logger.info(
+                f"Confirmed exactly one healthy API (pid={remaining[0]}) on port {port}."
+            )
+            return True
+
+        if remaining:
+            logger.warning(
+                f"Attempt {attempt}/{attempts}: {len(remaining)} pid(s) on port {port} "
+                f"({remaining}) are not a single healthy API; stopping and restarting."
+            )
+            for pid in remaining:
+                stop_pid(pid)
+        else:
+            logger.warning(
+                f"Attempt {attempt}/{attempts}: nothing is listening on port {port}; "
+                "starting a fresh API."
+            )
+
+        try:
+            start_api(repo_root, port)
+        except Exception as exc:  # noqa: BLE001 - keep retrying the loop
+            logger.error(f"Attempt {attempt}/{attempts}: failed to start API: {exc}")
+
+        time.sleep(delay_seconds)
+
+    remaining = find_all_pids_on_port(port)
+    healthy = len(remaining) == 1 and check_health_once(health_url)
+    if not healthy:
+        logger.error(f"Gave up after {attempts} attempts; port {port} pid(s)={remaining}.")
+    return healthy
+
+
+def run_stale_ancestor_helper(
+    deploy_pid: int,
+    ancestor_pids: list[int],
+    port: int,
+    health_url: str,
+    repo_root: Path,
+    max_wait_seconds: int,
+    logger: logging.Logger,
+) -> int:
+    """
+    The detached helper's whole job, start to finish.
+
+    Waits for the deploy script (`deploy_pid`) to exit — so this never races
+    its health check or rollback — then tree-kills `ancestor_pids` and makes
+    sure exactly one healthy API is left on `port` afterward. Deliberately
+    never raises past this function's own try/except in `main()`: a bug here
+    should end up logged in this helper's own log file, not crash silently
+    with nothing to show for it.
+    """
+    logger.info(
+        f"Stale-ancestor helper started for ancestor pid(s) {ancestor_pids}; "
+        f"waiting up to {max_wait_seconds}s for deploy pid={deploy_pid} to exit."
+    )
+    if not _wait_for_pid_exit(deploy_pid, max_wait_seconds):
+        logger.error(
+            f"Deploy pid={deploy_pid} did not exit within {max_wait_seconds}s; "
+            f"refusing to touch ancestor pid(s) {ancestor_pids} while it may still be "
+            "one of their descendants."
+        )
+        return 1
+
+    logger.info(f"Deploy pid={deploy_pid} has exited. Cleaning up ancestor pid(s) {ancestor_pids}.")
+
+    # `stop_pid` re-derives this *helper's own* protected set (its pid plus
+    # its own ancestors) every time it's called — not the exited deploy
+    # script's. Because this helper was spawned detached, that set should
+    # never contain the stale ancestor pids by the time we get here; this is
+    # still what keeps the helper from ever killing itself.
+    for pid in ancestor_pids:
+        logger.info(f"Tree-killing stale ancestor pid={pid}")
+        stop_pid(pid)
+
+    time.sleep(1.0)
+
+    healthy = _ensure_single_healthy_api(port, health_url, repo_root, logger)
+    if healthy:
+        logger.info("Stale-ancestor cleanup finished: exactly one healthy API is serving the port.")
+        return 0
+    logger.error("Stale-ancestor cleanup finished but could not confirm a single healthy API.")
+    return 1
+
+
 def start_api(cwd: Path, port: int) -> dict:
     """Start the API detached, and wait for it to accept connections on `port`."""
     return supervisor.start(
@@ -451,29 +654,101 @@ class DeployRunner:
         itself refuses to touch this script or any of its ancestors, so this
         loop can never kill its own process no matter what the lookups
         return.
+
+        A leftover that IS this script's own ancestor is a different problem:
+        `stop_pid` will keep silently skipping it forever, which is exactly
+        how a stale ancestor API was left answering requests in production
+        on 2026-11-16 (see the module docstring). Those pids are collected
+        separately and handed off to a detached helper at the end instead of
+        just being logged and abandoned.
         """
+        protected = _protected_pids()
+        stale_ancestors: set[int] = set()
+
         for attempt in range(1, attempts + 1):
             port_pids = find_all_pids_on_port(port)
             worker_pids = find_all_worker_pids()
             leftovers = sorted(set(port_pids) | set(worker_pids))
             if not leftovers:
+                if stale_ancestors:
+                    self._spawn_stale_ancestor_helper(sorted(stale_ancestors))
+                return
+
+            # "protected" is this script's own pid *plus* its ancestors.
+            # Only the latter are a stale-ancestor problem to hand off — this
+            # script's own pid showing up here would be a lookup bug, not
+            # something to spawn a cleanup helper for.
+            own_pid = os.getpid()
+            ancestor_hits = sorted(pid for pid in leftovers if pid in protected and pid != own_pid)
+            killable = [pid for pid in leftovers if pid not in protected]
+            stale_ancestors.update(ancestor_hits)
+
+            if ancestor_hits:
+                self.logger.warning(
+                    f"Sweep pass {attempt}/{attempts}: pid(s) {ancestor_hits} are ancestors "
+                    "of this deploy script and cannot be tree-killed from here; will hand "
+                    "off to a detached helper once this deploy finishes."
+                )
+            if not killable:
+                # Nothing left this script itself can do here — every
+                # remaining leftover is protected (an ancestor, or this
+                # script's own pid, which should never actually appear). If
+                # any of them are genuine ancestors, hand off and stop
+                # immediately rather than silently abandoning them (the
+                # 2026-11-16 prod bug) instead of looping pointlessly on
+                # pids that will never become killable.
+                if stale_ancestors:
+                    self._spawn_stale_ancestor_helper(sorted(stale_ancestors))
                 return
 
             self.logger.info(
-                f"Sweep pass {attempt}/{attempts}: killing leftover pid(s) {leftovers} "
+                f"Sweep pass {attempt}/{attempts}: killing leftover pid(s) {killable} "
                 f"(port listeners={port_pids or 'none'}, worker processes={worker_pids or 'none'})"
             )
-            for leftover_pid in leftovers:
+            for leftover_pid in killable:
                 stop_pid(leftover_pid)
             time.sleep(delay_seconds)
 
-        remaining_port = find_all_pids_on_port(port)
-        remaining_worker = find_all_worker_pids()
-        if remaining_port or remaining_worker:
-            self.logger.warning(
-                f"Leftover sweep exhausted after {attempts} passes; still see "
-                f"port pid(s) {remaining_port} and worker pid(s) {remaining_worker}."
+        # Exhausted every pass without the port/worker list ever coming up
+        # empty — some killable leftover kept reappearing (e.g. a respawning
+        # child) and/or a stale ancestor was seen on the last pass.
+        if stale_ancestors:
+            self._spawn_stale_ancestor_helper(sorted(stale_ancestors))
+        self.logger.warning(
+            f"Leftover sweep exhausted after {attempts} passes without the port/worker "
+            "list ever coming up clear; see the sweep pass logs above for the pid(s) involved."
+        )
+
+    def _spawn_stale_ancestor_helper(self, ancestor_pids: list[int]) -> None:
+        """
+        Hand off pids `_sweep_leftovers` found but could not kill (ancestors
+        of this script) to a detached helper process. See
+        `spawn_stale_ancestor_helper` / `run_stale_ancestor_helper` for what
+        that helper actually does. This never raises the deploy failure path
+        — a stale protected ancestor is logged and delegated, not a reason
+        to fail the deploy.
+        """
+        cfg = self.config
+        max_wait = max(
+            STALE_ANCESTOR_HELPER_MIN_WAIT_SECONDS,
+            cfg.health_timeout * STALE_ANCESTOR_HELPER_WAIT_MULTIPLIER,
+        )
+        self.logger.warning(
+            f"Spawning detached helper to clean up stale ancestor pid(s) {ancestor_pids} "
+            f"after this deploy's own health check finishes (will wait up to {max_wait}s "
+            "for this script to exit)."
+        )
+        try:
+            spawn_stale_ancestor_helper(
+                ancestor_pids=ancestor_pids,
+                deploy_pid=os.getpid(),
+                port=cfg.port,
+                health_url=cfg.health_url,
+                repo_root=cfg.repo_root,
+                max_wait_seconds=max_wait,
             )
+        except Exception as exc:  # noqa: BLE001 - never let this fail the deploy
+            self.logger.error(f"Failed to spawn stale-ancestor helper: {exc}")
 
     def wait_for_health(self) -> bool:
         return wait_for_health(self.config.health_url, self.config.health_timeout)
@@ -562,7 +837,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--health-timeout", type=int, default=DEFAULT_HEALTH_TIMEOUT)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
+    # Internal: how this script re-invokes itself as the detached
+    # stale-ancestor helper (see spawn_stale_ancestor_helper). Not meant to
+    # be passed by hand, hence SUPPRESS.
+    parser.add_argument("--helper-mode", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--deploy-pid", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--ancestor-pids", default="", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--max-wait-seconds",
+        type=int,
+        default=STALE_ANCESTOR_HELPER_MIN_WAIT_SECONDS,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv)
+
+    if args.helper_mode:
+        ancestor_pids = [int(p) for p in args.ancestor_pids.split(",") if p.strip()]
+        helper_log_path = LOG_DIR / f"stale_ancestor_helper_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        helper_logger = build_logger(helper_log_path)
+        try:
+            return run_stale_ancestor_helper(
+                deploy_pid=args.deploy_pid,
+                ancestor_pids=ancestor_pids,
+                port=args.port,
+                health_url=args.health_url,
+                repo_root=Path(args.repo_root),
+                max_wait_seconds=args.max_wait_seconds,
+                logger=helper_logger,
+            )
+        except Exception as exc:  # noqa: BLE001 - always log, never crash silently
+            helper_logger.error(f"Stale-ancestor helper crashed: {exc}")
+            return 2
 
     log_path = LOG_DIR / f"deploy_{time.strftime('%Y%m%d_%H%M%S')}.log"
     logger = build_logger(log_path)
