@@ -47,6 +47,22 @@ class NormalizeAndEncodeReportTypesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_report_types("carrier-pigeon")
 
+    def test_a_list_with_one_invalid_channel_is_rejected(self):
+        # Regression guard: every item in a multi-channel list must be
+        # validated, not just the list shape itself — ['speak', 'sms'] is
+        # valid (see test_a_python_list_normalizes_in_order_without_duplicates)
+        # but a typo'd sibling must still fail loudly rather than silently
+        # dropping the bad entry.
+        with self.assertRaises(ValueError):
+            normalize_report_types(["speak", "carrier-pigeon"])
+
+    def test_the_rejection_message_lists_every_supported_type_including_speak(self):
+        with self.assertRaises(ValueError) as ctx:
+            normalize_report_types("carrier-pigeon")
+        message = str(ctx.exception)
+        for channel in ("email", "sms", "call", "chat", "speak"):
+            self.assertIn(channel, message)
+
     def test_encode_single_channel_stays_a_bare_string(self):
         self.assertEqual(encode_report_types("email"), "email")
         self.assertEqual(encode_report_types(["call"]), "call")
