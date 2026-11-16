@@ -28,9 +28,13 @@ Self-restart safety: this script is meant to be started by the Nova tool
 `deploy_main` (see src/service/deploy_service.py) while Nova's own backend
 process is still running the tool call that triggered it. That means this
 script's OS process can be a *descendant* of the very API process it is
-about to stop. See the comment on `stop_pid` below for why that makes
-`taskkill /F /T` (tree-kill) actively dangerous here, and what this script
-does instead.
+about to stop. A tree-kill (`taskkill /F /T`) walks down from the target pid
+to every process Windows still considers its descendant — including this
+script, mid-deploy, if the target pid is an ancestor of ours. See
+`_protected_pids` and the comment on `stop_pid` below for how this script
+refuses to kill itself or anything upstream of itself while still being
+free to tree-kill everything else (API/worker parents and the
+multiprocessing.spawn children they leave behind).
 """
 
 from __future__ import annotations
@@ -164,8 +168,8 @@ def run_test_suite(cwd: Path, modules: list[str] | None = None) -> tuple[bool, s
 # ---------------------------------------------------------------------------
 
 
-def find_pid_on_port(port: int) -> int | None:
-    """The pid listening on `port`, if any. Mirrors scripts/tower-status.ps1."""
+def find_all_pids_on_port(port: int) -> list[int]:
+    """Every pid listening on `port`. Mirrors scripts/tower-status.ps1."""
     if supervisor.IS_WINDOWS:
         script = (
             f"(Get-NetTCPConnection -LocalPort {port} -State Listen "
@@ -177,21 +181,28 @@ def find_pid_on_port(port: int) -> int | None:
             text=True,
             check=False,
         )
-        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-        return int(lines[0]) if lines and lines[0].isdigit() else None
+    else:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"], capture_output=True, text=True, check=False
+        )
 
-    result = subprocess.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, check=False)
     lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-    return int(lines[0]) if lines and lines[0].isdigit() else None
+    return sorted({int(line) for line in lines if line.isdigit()})
 
 
-def find_worker_pid() -> int | None:
-    """The pid running `worker.py`, if any."""
+def find_pid_on_port(port: int) -> int | None:
+    """The first pid listening on `port`, if any. Kept for single-pid callers."""
+    pids = find_all_pids_on_port(port)
+    return pids[0] if pids else None
+
+
+def find_all_worker_pids() -> list[int]:
+    """Every pid running `worker.py`."""
     if supervisor.IS_WINDOWS:
         script = (
             "Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='uv.exe'\" "
             "| Where-Object { $_.CommandLine -match 'worker\\.py' } "
-            "| Select-Object -First 1 -ExpandProperty ProcessId"
+            "| Select-Object -ExpandProperty ProcessId"
         )
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
@@ -199,42 +210,117 @@ def find_worker_pid() -> int | None:
             text=True,
             check=False,
         )
-        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-        return int(lines[0]) if lines and lines[0].isdigit() else None
+    else:
+        result = subprocess.run(
+            ["pgrep", "-f", "worker.py"], capture_output=True, text=True, check=False
+        )
 
-    result = subprocess.run(["pgrep", "-f", "worker.py"], capture_output=True, text=True, check=False)
     lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-    return int(lines[0]) if lines and lines[0].isdigit() else None
+    return sorted({int(line) for line in lines if line.isdigit()})
 
 
-def stop_pid(pid: int | None) -> None:
+def find_worker_pid() -> int | None:
+    """The first pid running `worker.py`, if any. Kept for single-pid callers."""
+    pids = find_all_worker_pids()
+    return pids[0] if pids else None
+
+
+def _parent_pid_map() -> dict[int, int]:
+    """pid -> parent pid, for every process currently visible on the box."""
+    parents: dict[int, int] = {}
+    try:
+        if supervisor.IS_WINDOWS:
+            script = (
+                "Get-CimInstance Win32_Process | "
+                "Select-Object ProcessId,ParentProcessId | ConvertTo-Csv -NoTypeInformation"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            rows = (result.stdout or "").splitlines()[1:]  # skip CSV header
+            for row in rows:
+                parts = [p.strip().strip('"') for p in row.split(",")]
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    parents[int(parts[0])] = int(parts[1])
+        else:
+            result = subprocess.run(
+                ["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, check=False
+            )
+            for line in (result.stdout or "").splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    parents[int(parts[0])] = int(parts[1])
+    except OSError:
+        pass
+    return parents
+
+
+def _protected_pids() -> set[int]:
     """
-    Stop exactly one process by pid. Deliberately NOT a tree-kill.
+    This process's own pid, plus every ancestor of it.
 
-    This script can itself be a *descendant* of the API process it has just
-    been told to stop: the Nova tool that triggers a deploy
-    (src/service/deploy_service.py) spawns this script from inside the very
-    uvicorn process serving that tool call. `process_supervisor.kill_tree`
-    uses `taskkill /F /T /PID` on Windows, which walks down from the target
-    pid to every process Windows still considers its descendant — including
-    this script, mid-deploy, if the target pid is an ancestor of ours. A
-    plain, non-tree kill of only the pid we looked up (the one actually
-    listening on the port / running worker.py) cannot reach upward or
-    sideways to anything else, so it cannot kill the deploy script itself.
+    This script can be a *descendant* of the very API process it has just
+    been told to stop (the Nova tool that triggers a deploy spawns this
+    script from inside the uvicorn process serving that tool call). A
+    tree-kill of an ancestor pid would walk back down and take out this
+    script mid-deploy, so every pid in this set is off-limits no matter what
+    find_pid_on_port / find_worker_pid / a leftover sweep turns up.
+    """
+    protected = {os.getpid()}
+    parent_of = _parent_pid_map()
+    current = os.getpid()
+    for _ in range(64):  # bounded: a parent-pid cycle or bad data must not hang this
+        parent = parent_of.get(current)
+        if parent is None or parent in protected:
+            break
+        protected.add(parent)
+        current = parent
+    return protected
 
-    If uvicorn's --reload spawns a child that re-binds the port after the
-    parent dies, the caller re-checks find_pid_on_port and calls this again
-    on the new pid — still never a tree-kill.
+
+def stop_pid(pid: int | None, *, tree: bool = True) -> None:
+    """
+    Stop one process by pid, killing its whole tree by default.
+
+    The API and worker are launched with `uv run`, and the API spawns
+    multiprocessing.spawn children (some of which inherit the listening
+    socket). Killing just the parent leaves those children running old code,
+    which is how stale code kept answering requests after a deploy. On
+    Windows that means `taskkill /F /T /PID`; off Windows it reuses
+    `process_supervisor.kill_tree`, which kills the process group.
+
+    The one thing this must never do is reach this script itself: see
+    `_protected_pids`. Any pid that is this process or one of its ancestors
+    is silently skipped instead of killed, tree or no tree. A pid that is
+    already gone is also a no-op — never raise for that either.
     """
     if pid is None:
         return
+    if pid in _protected_pids():
+        return
+
     if supervisor.IS_WINDOWS:
-        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, check=False)
-    else:
+        if tree:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, check=False
+            )
+        else:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, check=False)
+        return
+
+    if tree:
         try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
+            supervisor.kill_tree(None, pid=pid)
+            return
+        except Exception:  # noqa: BLE001 - fall back to a plain signal below
             pass
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def start_api(cwd: Path, port: int) -> dict:
@@ -340,6 +426,8 @@ class DeployRunner:
         else:
             self.logger.info("No worker process found running; nothing to stop.")
 
+        self._sweep_leftovers(cfg.port)
+
         self.logger.info("Starting API (uv run main.py)...")
         api_result = start_api(cfg.repo_root, cfg.port)
         self.logger.info(f"  api: {api_result.get('ready_reason')}")
@@ -347,6 +435,45 @@ class DeployRunner:
         self.logger.info("Starting worker (uv run worker.py)...")
         worker_result = start_worker(cfg.repo_root)
         self.logger.info(f"  worker: {worker_result.get('ready_reason')}")
+
+    def _sweep_leftovers(
+        self, port: int, attempts: int = 5, delay_seconds: float = 1.0
+    ) -> None:
+        """
+        Catch everything the single known-pid stops above could miss.
+
+        `uv run` and the API's own multiprocessing.spawn children can leave
+        behind extra processes still listening on `port` or still running
+        worker.py — sometimes more than one of each. This finds *every* such
+        pid (not just the first) and tree-kills each one, retrying with a
+        short bounded backoff until the port is actually free, since a
+        just-killed parent's socket can take a beat to release. `stop_pid`
+        itself refuses to touch this script or any of its ancestors, so this
+        loop can never kill its own process no matter what the lookups
+        return.
+        """
+        for attempt in range(1, attempts + 1):
+            port_pids = find_all_pids_on_port(port)
+            worker_pids = find_all_worker_pids()
+            leftovers = sorted(set(port_pids) | set(worker_pids))
+            if not leftovers:
+                return
+
+            self.logger.info(
+                f"Sweep pass {attempt}/{attempts}: killing leftover pid(s) {leftovers} "
+                f"(port listeners={port_pids or 'none'}, worker processes={worker_pids or 'none'})"
+            )
+            for leftover_pid in leftovers:
+                stop_pid(leftover_pid)
+            time.sleep(delay_seconds)
+
+        remaining_port = find_all_pids_on_port(port)
+        remaining_worker = find_all_worker_pids()
+        if remaining_port or remaining_worker:
+            self.logger.warning(
+                f"Leftover sweep exhausted after {attempts} passes; still see "
+                f"port pid(s) {remaining_port} and worker pid(s) {remaining_worker}."
+            )
 
     def wait_for_health(self) -> bool:
         return wait_for_health(self.config.health_url, self.config.health_timeout)
