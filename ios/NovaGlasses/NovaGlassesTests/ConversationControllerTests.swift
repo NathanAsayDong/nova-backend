@@ -506,13 +506,57 @@ final class ConversationControllerTests: XCTestCase {
         XCTAssertEqual(rig.controller.phase, .thinking)
     }
 
-    func testClosedConversationIsForgotten() {
+    func testClosedConversationIsForgottenAndRecoveredQuietly() {
         let rig = Rig.speaking()
         XCTAssertEqual(rig.ids.load(), "conv-1")
         rig.socket.emit(.error(message: "Conversation is closed.", code: "conversation_closed"))
         XCTAssertNil(rig.ids.load())
         XCTAssertEqual(rig.controller.phase, .idle)
-        XCTAssertEqual(rig.earcons.played.last, .error)
+        // A closed conversation (e.g. the nightly auto-close) is expected,
+        // recoverable state, not a failure: no alarming error cue, and the
+        // next utterance below starts a fresh conversation on its own.
+        XCTAssertEqual(rig.earcons.played.last, .cancel)
+
+        rig.speak(600)
+        rig.wake.hear()
+        XCTAssertEqual(rig.socket.starts.last?.conversationId, nil, "the next turn starts a brand new conversation")
+    }
+
+    func testResetForNewConversationSettlesAnInFlightReplyAndClearsTheId() {
+        let rig = Rig.speaking()
+        XCTAssertEqual(rig.ids.load(), "conv-1")
+        XCTAssertEqual(rig.controller.lastTranscript, "what time is it")
+
+        let closedId = rig.controller.resetForNewConversation()
+
+        XCTAssertEqual(closedId, "conv-1", "the caller can ask the server to close it")
+        XCTAssertNil(rig.ids.load())
+        XCTAssertEqual(rig.controller.phase, .idle)
+        XCTAssertEqual(rig.player.stopAllCalls, 1, "Nova stops talking rather than finishing the old reply")
+        XCTAssertEqual(rig.controller.lastTranscript, "")
+        XCTAssertEqual(rig.controller.lastReply, "")
+
+        // The next utterance opens a brand new conversation.
+        rig.socket.events.removeAll()
+        rig.speak(600)
+        rig.wake.hear()
+        XCTAssertNil(rig.socket.starts.last?.conversationId)
+    }
+
+    func testResetForNewConversationFromIdleJustClearsState() {
+        let rig = Rig.idle()
+        rig.ids.save("conv-9")
+
+        let closedId = rig.controller.resetForNewConversation()
+
+        XCTAssertEqual(closedId, "conv-9")
+        XCTAssertNil(rig.ids.load())
+        XCTAssertEqual(rig.controller.phase, .idle)
+    }
+
+    func testResetForNewConversationWithNothingOpenReturnsNil() {
+        let rig = Rig.idle()
+        XCTAssertNil(rig.controller.resetForNewConversation())
     }
 
     func testARequestWaitsForTheSocketToReconnect() {

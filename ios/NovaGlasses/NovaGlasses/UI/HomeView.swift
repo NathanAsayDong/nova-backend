@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HomeView: View {
     @Bindable var model: AppModel
+    @State private var showNewConversationConfirm = false
 
     private var controller: ConversationController { model.controller }
 
@@ -25,6 +26,30 @@ struct HomeView: View {
                             Image(systemName: "waveform")
                                 .foregroundStyle(.tint)
                         }
+                    }
+                    Button {
+                        showNewConversationConfirm = true
+                    } label: {
+                        HStack {
+                            Label("New conversation", systemImage: "arrow.counterclockwise")
+                            Spacer()
+                            if model.isStartingNewConversation {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(model.isStartingNewConversation)
+                    .confirmationDialog(
+                        "Start a new conversation?",
+                        isPresented: $showNewConversationConfirm,
+                        titleVisibility: .visible
+                    ) {
+                        Button("New conversation", role: .destructive) {
+                            Task { await model.startNewConversation() }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Nova will stop talking if she's mid-reply and forget everything said so far. This can't be undone.")
                     }
                     Toggle("Listening for \"Hey Nova\"", isOn: Binding(
                         get: { model.listeningEnabled },

@@ -883,6 +883,40 @@ final class ConversationController {
         setPhase(.idle, message ?? idleMessage)
     }
 
+    // MARK: - New conversation
+
+    /// The "New conversation" button: settles any turn in progress the same
+    /// way a barge-in would (stop playback, drop whatever capture was live,
+    /// abandon the server's answer), clears the shared conversation id and
+    /// the on-screen transcript, and returns the id that was open so the
+    /// caller can ask the server to close it. Safe to call from any phase,
+    /// including `.off` — there is just nothing to settle in that case.
+    @discardableResult
+    func resetForNewConversation() -> String? {
+        if phase == .speaking || phase == .thinking || phase == .listening {
+            suppressAssistantAudio = false
+            awaitingListeningAck = false
+            pendingFollowUp = false
+            pendingSidekickFollowUp = false
+            listeningIsSidekickFollowUp = false
+            turnLost = false
+            thinkingTimer?.cancel()
+            player.stopAll()
+            dropCapture(sendAbort: true)
+            discardAwaitingSocket()
+            closeWakeUtterance()
+            cancelTimers()
+            turnFinished = true
+            partialTranscript = ""
+            setPhase(.idle, idleMessage)
+        }
+        let closingId = conversationIds.load()
+        conversationIds.clear()
+        lastTranscript = ""
+        lastReply = ""
+        return closingId
+    }
+
     /// Sidekick's last remark asked a question: once its playback drains,
     /// open a brief wake-phrase-free listening window for the answer (see
     /// `playbackDrained`). A no-op outside `.idle` — Sidekick never speaks
@@ -1080,7 +1114,14 @@ final class ConversationController {
 
         case .error(let message, let code):
             if code == "conversation_closed" || message.contains("Invalid conversationId") {
+                // Terminal (closed last night, or by the New Conversation
+                // button elsewhere) — not a failure the user needs to see.
+                // Drop the stale id; the next utterance starts a fresh
+                // conversation automatically, same as any other turn.
                 conversationIds.clear()
+                dropCapture(sendAbort: false)
+                goIdle(cue: .cancel, message: "Starting a new conversation…")
+                return
             }
             dropCapture(sendAbort: false)
             goIdle(cue: .error, message: message)
