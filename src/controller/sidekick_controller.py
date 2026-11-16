@@ -298,7 +298,11 @@ class SidekickConnection:
             update_id = entry.get("id")
             if update_id is not None:
                 try:
-                    await asyncio.to_thread(update_service.mark_update_viewed, update_id)
+                    await asyncio.to_thread(
+                        update_service.mark_update_viewed,
+                        update_id,
+                        consumed_by="sidekick_notify_loop",
+                    )
                 except Exception as exc:
                     print(f"[sidekick] could not mark notification {update_id} spoken: {exc}")
 

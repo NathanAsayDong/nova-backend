@@ -82,11 +82,12 @@ class FakeUpdateService:
         self.calls.append(("claim", update_id))
         return update
 
-    def mark_delivered(self, update_id):
+    def mark_delivered(self, update_id, *, consumed_by=None):
         update = self.updates[int(update_id)]
         update.delivery_status = DeliveryStatus.DELIVERED
         update.is_viewed = True
-        self.calls.append(("delivered", update_id))
+        update.consumed_by = consumed_by
+        self.calls.append(("delivered", update_id, consumed_by))
         return update
 
     def mark_delivery_failed(self, update_id, error, attempts=None):

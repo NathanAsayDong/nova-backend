@@ -276,7 +276,7 @@ class UpdateDeliveryService:
             self._settle_or_retry(update, attempts, "SMTP send failed.")
             return "deferred" if attempts < self.max_delivery_attempts() else "failed"
 
-        self.update_service.mark_delivered(update.id)
+        self.update_service.mark_delivered(update.id, consumed_by="delivery:email")
         return "delivered"
 
     @staticmethod
@@ -325,7 +325,7 @@ class UpdateDeliveryService:
             return "failed"
 
         if result.get("status") == "sent":
-            self.update_service.mark_delivered(update.id)
+            self.update_service.mark_delivered(update.id, consumed_by="delivery:sms")
             print(f"Update {update.id} delivered by SMS.")
             return "delivered"
 
@@ -427,7 +427,7 @@ class UpdateDeliveryService:
         from src.service.sidekick_service import SidekickService
 
         if SidekickService.speak_completion(update.update_message or ""):
-            self.update_service.mark_delivered(update.id)
+            self.update_service.mark_delivered(update.id, consumed_by="delivery:speak")
             return "delivered"
 
         if attempts >= self.max_delivery_attempts():

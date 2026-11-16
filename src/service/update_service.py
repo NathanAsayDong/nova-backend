@@ -186,16 +186,24 @@ class UpdateService:
         """Take ownership of a pending update, or None if already claimed."""
         return self.update_dao.claim_for_delivery(int(update_id))
 
-    def mark_delivered(self, update_id: int) -> Update | None:
+    def mark_delivered(
+        self, update_id: int, *, consumed_by: str | None = None
+    ) -> Update | None:
         """
         Record a successful delivery.
 
         Also marks the update viewed: the user has now been emailed it or
         heard it read out on the phone, so leaving it lit in the badge would
         be asking them to read the same thing twice.
+
+        `consumed_by` names the channel that actually delivered it (e.g.
+        "delivery:email") -- see migration 012.
         """
         return self.update_dao.set_delivery_state(
-            int(update_id), DeliveryStatus.DELIVERED, mark_viewed=True
+            int(update_id),
+            DeliveryStatus.DELIVERED,
+            mark_viewed=True,
+            consumed_by=consumed_by,
         )
 
     def mark_delivery_failed(
@@ -246,11 +254,27 @@ class UpdateService:
         """Cheap badge count for the client's updates indicator."""
         return len(self.update_dao.get_unviewed())
 
-    def mark_update_viewed(self, update_id: int) -> dict:
-        update = self.update_dao.mark_viewed(int(update_id))
+    def mark_update_viewed(
+        self, update_id: int, *, consumed_by: str | None = None
+    ) -> dict:
+        update = self.update_dao.mark_viewed(int(update_id), consumed_by=consumed_by)
         if update is None:
             raise ValueError(f"Update {update_id} does not exist.")
         return self._to_dict(update)
+
+    def unmark_update_viewed(self, update_id: int) -> dict | None:
+        """
+        Undo a mark_update_viewed that turned out to be premature.
+
+        Unlike mark_update_viewed, a miss here is not an error: by the time
+        a caller decides the earlier mark was wrong, the row may since have
+        been legitimately consumed by someone else (the delivery dispatcher,
+        the sidekick notify loop, another turn), and that outcome must win --
+        see UpdateDao.unmark_viewed. None covers both "already reverted" and
+        "someone else got there first."
+        """
+        update = self.update_dao.unmark_viewed(int(update_id))
+        return self._to_dict(update) if update is not None else None
 
     def mark_all_updates_viewed(self) -> dict:
         """

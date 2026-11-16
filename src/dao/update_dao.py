@@ -49,7 +49,7 @@ class UpdateDao(BaseDao):
         )
         return self._to_model(self._model_class, response.data[0])
 
-    def mark_viewed(self, id: int) -> Update | None:
+    def mark_viewed(self, id: int, *, consumed_by: str | None = None) -> Update | None:
         """
         Mark one update viewed, or no-op (returns None) if it already was.
 
@@ -59,12 +59,49 @@ class UpdateDao(BaseDao):
         notification both call this, but only the one that gets there while
         the row is still unviewed gets a row back, so the item is delivered
         exactly once even without a cross-call transaction.
+
+        `consumed_by` is a short free-text tag for who actually did it (a
+        turn's prompt_source+conversation, the sidekick notify loop, a
+        delivery channel) -- see migration 012. Optional and purely
+        diagnostic; nothing here depends on it being set.
+        """
+        payload: dict = {"is_viewed": True}
+        if consumed_by is not None:
+            payload["consumed_by"] = consumed_by
+        response = (
+            self.client.table(self._table)
+            .update(payload)
+            .eq("id", id)
+            .eq("is_viewed", False)
+            .execute()
+        )
+        if not response.data:
+            return None
+        return self._to_model(self._model_class, response.data[0])
+
+    def unmark_viewed(self, id: int) -> Update | None:
+        """
+        Undo a `mark_viewed` that turned out to be premature, or no-op
+        (returns None) if the row isn't currently viewed.
+
+        Exists for AgentLoop._conversation_turn's sidekick-pass branch: a
+        scope-less notification gets marked viewed the moment it is folded
+        into a turn's prompt (see mark_viewed above), but a Sidekick ambient
+        interjection can still end in a silent "[[pass]]" that throws the
+        whole turn away unspoken and unpersisted (is_sidekick_pass in
+        src/harness/agent_loop.py) -- in which case the mark was wrong and
+        this restores the row to unviewed (and clears consumed_by) so the
+        next eligible turn gets a real shot at it. The `is_viewed=True` in
+        the WHERE clause is the same compare-and-swap shape as mark_viewed,
+        in reverse: if something else already consumed the row in between
+        (the delivery dispatcher, the notify loop, another turn), this is a
+        no-op rather than clobbering that outcome.
         """
         response = (
             self.client.table(self._table)
-            .update({"is_viewed": True})
+            .update({"is_viewed": False, "consumed_by": None})
             .eq("id", id)
-            .eq("is_viewed", False)
+            .eq("is_viewed", True)
             .execute()
         )
         if not response.data:
@@ -146,12 +183,17 @@ class UpdateDao(BaseDao):
         error: str | None = None,
         attempts: int | None = None,
         mark_viewed: bool = False,
+        consumed_by: str | None = None,
     ) -> Update | None:
         """
         Move an update to a delivery state, stamping whatever came with it.
 
         delivered_at is set only on DELIVERED so it always means "the user
         actually got this", never "we last touched the row".
+
+        `consumed_by` (see migration 012) is only written when `mark_viewed`
+        is also set -- it names the delivery channel that actually got this
+        in front of the user, e.g. "delivery:email".
         """
         payload: dict = {"delivery_status": status.value}
         if call_sid is not None:
@@ -165,6 +207,8 @@ class UpdateDao(BaseDao):
             payload["delivered_at"] = datetime.now(timezone.utc).isoformat()
         if mark_viewed:
             payload["is_viewed"] = True
+            if consumed_by is not None:
+                payload["consumed_by"] = consumed_by
 
         response = (
             self.client.table(self._table)

@@ -263,6 +263,40 @@ class FakeToolDao:
         ]
 
 
+class FakeUpdateService:
+    """
+    Minimal stand-in for UpdateService in the notification-injection path --
+    same shape as the one in tests/test_memory_injection.py, kept local here
+    so this file doesn't depend on that one's internals.
+    """
+
+    def __init__(self, unviewed=()):
+        self._unviewed = {entry["id"]: dict(entry) for entry in unviewed}
+        self.marked_viewed: list[int] = []
+        self.unmarked_viewed: list[int] = []
+        self.consumed_by: dict[int, str | None] = {}
+
+    def get_unviewed_updates(self):
+        return [
+            entry
+            for entry in self._unviewed.values()
+            if entry["id"] not in self.marked_viewed
+        ]
+
+    def mark_update_viewed(self, update_id, *, consumed_by=None):
+        self.marked_viewed.append(update_id)
+        self.consumed_by[update_id] = consumed_by
+        return self._unviewed.get(update_id)
+
+    def unmark_update_viewed(self, update_id):
+        if update_id in self.marked_viewed:
+            self.marked_viewed.remove(update_id)
+            self.unmarked_viewed.append(update_id)
+            self.consumed_by.pop(update_id, None)
+            return self._unviewed.get(update_id)
+        return None
+
+
 def _agent_loop(tools=()):
     loop = AgentLoop()
     loop.memory_retrieval_enabled = False
@@ -326,6 +360,42 @@ class PassSentinelTests(unittest.TestCase):
         self.assertEqual(events, [{"type": "silent"}])
         self.assertEqual(self.conversations.recorded, [])
         self.assertEqual(self.loop.conversations[self.conversation_id], [])
+
+    def test_a_pass_restores_an_injected_notification_to_unviewed(self):
+        """
+        Regression test for updates 381-386: a scope-less, kind-tagged
+        notification matches any conversation (AgentLoop._notification_scope_matches),
+        so an ambient Sidekick interjection triggered by unrelated overheard
+        chatter can pick it up, mark it delivered, and then still pass --
+        at which point the earlier mark was premature and must be undone,
+        not left standing as a silent, unheard "delivery."
+        """
+        update_service = FakeUpdateService(
+            unviewed=[
+                {
+                    "id": 386,
+                    "kind": "coding_task",
+                    "status": "success",
+                    "update_message": "PR #42 merged.",
+                    "link": None,
+                    "conversation_uuid": None,
+                    "project": None,
+                    "created_at": None,
+                }
+            ]
+        )
+        self.loop.update_service = update_service
+        self._rounds(_live(["[[", "pass", "]]"], FakeMessage([FakeTextBlock("[[pass]]")])))
+
+        events = self._run()
+
+        self.assertEqual(events, [{"type": "silent"}])
+        # Marked viewed while the prompt was being built, then restored once
+        # the turn turned out to be a silent pass -- never left stuck viewed
+        # with nobody having heard it.
+        self.assertEqual(update_service.marked_viewed, [])
+        self.assertEqual(update_service.unmarked_viewed, [386])
+        self.assertEqual(update_service.get_unviewed_updates()[0]["id"], 386)
 
     def test_a_pass_after_looking_still_persists_nothing(self):
         self.loop.tool_service.call_tool = lambda tool, args, context=None: "a chessboard"

@@ -104,11 +104,20 @@ class FakeUpdateDao:
         self.updates[entity.id] = entity
         return entity
 
-    def mark_viewed(self, id):
+    def mark_viewed(self, id, *, consumed_by=None):
         update = self.updates.get(int(id))
         if update is None:
             return None
         update.is_viewed = True
+        update.consumed_by = consumed_by
+        return update
+
+    def unmark_viewed(self, id):
+        update = self.updates.get(int(id))
+        if update is None or not update.is_viewed:
+            return None
+        update.is_viewed = False
+        update.consumed_by = None
         return update
 
     def mark_all_viewed(self):
@@ -390,6 +399,36 @@ class ViewingTests(unittest.TestCase):
         service = build_service()
         with self.assertRaises(ValueError):
             service.mark_update_viewed(7)
+
+    def test_mark_one_viewed_records_who_consumed_it(self):
+        service = build_service(updates=(make_update(1),))
+        result = service.mark_update_viewed(1, consumed_by="chat_prompt:abc-123")
+        self.assertTrue(result["is_viewed"])
+        self.assertEqual(service.update_dao.updates[1].consumed_by, "chat_prompt:abc-123")
+
+    def test_unmark_restores_an_update_to_unviewed(self):
+        """
+        Regression coverage for the sidekick-pass bug: a notification can be
+        marked viewed the moment it's folded into a turn's prompt, then need
+        undoing because that turn never actually said or persisted anything
+        -- see AgentLoop._conversation_turn's is_sidekick_pass branch.
+        """
+        service = build_service(updates=(make_update(1),))
+        service.mark_update_viewed(1, consumed_by="sidekick_prompt:abc-123")
+
+        result = service.unmark_update_viewed(1)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["is_viewed"])
+        self.assertEqual(service.update_dao.updates[1].consumed_by, None)
+        self.assertEqual(service.get_unviewed_count(), 1)
+
+    def test_unmark_an_already_unviewed_update_is_a_quiet_no_op(self):
+        # Someone else may have legitimately settled it in between (the
+        # delivery dispatcher, the notify loop, another turn) -- that
+        # outcome must win, not get clobbered.
+        service = build_service(updates=(make_update(1),))
+        self.assertIsNone(service.unmark_update_viewed(1))
 
 
 if __name__ == "__main__":
