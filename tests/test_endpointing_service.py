@@ -5,6 +5,7 @@ from src.service.endpointing_service import (
     DEFAULT_SILENCE_MS,
     MAX_SILENCE_MS,
     MIN_SILENCE_MS,
+    MIN_WORDS_FOR_BARE_PERIOD,
     PENDING_SILENCE_MS,
     STATEMENT_SILENCE_MS,
     caption_endpoint_decision,
@@ -136,6 +137,20 @@ class EndpointDecisionTests(unittest.TestCase):
         self.assert_window("The migration", PENDING_SILENCE_MS, "short_fragment")
         self.assert_window("Sophie", PENDING_SILENCE_MS, "short_fragment")
 
+    def test_a_bare_period_on_a_short_fragment_is_not_trusted(self):
+        # Whisper ends whatever fragment it is handed with a period, so a
+        # two-word clip punctuated that way is just as likely a dangling
+        # name as a finished thought. Below MIN_WORDS_FOR_BARE_PERIOD, the
+        # period must not grant the statement tier.
+        for transcript in ("Sophie.", "The migration.", "Send that."):
+            self.assertLess(len(transcript.split()), MIN_WORDS_FOR_BARE_PERIOD)
+            self.assert_window(transcript, PENDING_SILENCE_MS, "weak_terminal_punctuation")
+
+    def test_a_bare_period_at_or_above_the_word_floor_is_trusted(self):
+        transcript = "Send that to Sophie."
+        self.assertGreaterEqual(len(transcript.split()), MIN_WORDS_FOR_BARE_PERIOD)
+        self.assert_window(transcript, STATEMENT_SILENCE_MS, "terminal_statement")
+
     def test_unpunctuated_clause_leans_unfinished(self):
         # Whisper punctuates sentences it hears as finished; one it left open
         # is usually a speaker mid-thought.
@@ -159,9 +174,11 @@ class EndpointDecisionTests(unittest.TestCase):
 
     def test_max_hold_is_not_slower_than_it_needs_to_be(self):
         # The ceiling exists for genuine dangles; it must still feel like a
-        # conversation, not a timeout. Raised from 2200 to 2800ms so a
-        # mid-thought pause has more room before Nova jumps in.
-        self.assertLessEqual(MAX_SILENCE_MS, 3000)
+        # conversation, not a timeout. Raised 2200 -> 2800 -> 3600ms (the
+        # last bump as part of making end-of-speech detection substantially
+        # less aggressive end-to-end) so a mid-thought pause or a dangling
+        # conjunction has real room before Nova jumps in.
+        self.assertLessEqual(MAX_SILENCE_MS, 4000)
 
     def test_silence_budget_ms_matches_the_decision(self):
         self.assertEqual(

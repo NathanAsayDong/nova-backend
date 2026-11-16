@@ -64,23 +64,46 @@ def _ms(base: int) -> int:
 
 
 # Obviously finished — a question, an exclamation, a bare "yes": just enough
-# silence to be sure the speaker stopped.
-MIN_SILENCE_MS = _ms(600)
+# silence to be sure the speaker stopped. Raised from 600 to 750 (+25%):
+# PR #35 fixed the live-caption floor, but Nate was still getting cut off on
+# the normal voice path and especially on the glasses, where mic placement
+# and wind noise make a genuinely-finished-sounding tail more common mid-
+# sentence. Every tier below is raised for the same reason — this whole pass
+# is "make end-of-speech detection substantially less aggressive," not just
+# patch the one floor bug.
+MIN_SILENCE_MS = _ms(750)
 # A trailing period. Weaker evidence than a question mark: Whisper ends
 # whatever fragment it decodes with a period, and people dictating pause
 # between complete sentences intending to continue — so a statement gets a
-# thinking-pause of grace that a question does not need.
-STATEMENT_SILENCE_MS = _ms(850)
-# Nothing either way — no transcript yet.
-DEFAULT_SILENCE_MS = _ms(1000)
+# thinking-pause of grace that a question does not need. Raised from 850 to
+# 1100 (+~29%).
+STATEMENT_SILENCE_MS = _ms(1100)
+# Nothing either way — no transcript yet. Raised from 1000 to 1300 (+30%),
+# to match the client's own neutral starting window (TurnDetector.swift /
+# turnDetector.ts `defaultSilenceMs`) — keep those in step if this changes.
+DEFAULT_SILENCE_MS = _ms(1300)
 # Leaning unfinished: a particle, a comma, mid-number, a short fragment, or a
-# clause Whisper did not close with punctuation.
-PENDING_SILENCE_MS = _ms(1400)
+# clause Whisper did not close with punctuation. Raised from 1400 to 2100
+# (+50%) — the biggest relative bump of the five tiers, because this is the
+# window that actually covers an ordinary mid-thought pause ("let me think
+# about... the budget") or trailing off, which is exactly the behavior Nate
+# is describing as a cutoff.
+PENDING_SILENCE_MS = _ms(2100)
 # Obviously unfinished: hold the line. This is the window that actually
-# protects a speaker who pauses mid-thought ("send that to, uh...") — raised
-# from 2200 to 2800 (+~27%) because the old ceiling was still cutting Nate
-# off during a longer thinking pause before he resumed talking.
-MAX_SILENCE_MS = _ms(2800)
+# protects a speaker who pauses mid-thought ("send that to, uh...") — first
+# raised from 2200 to 2800 (+~27%), now from 2800 to 3600 (+~29%, so a
+# dangling conjunction or filler word gets a solid 3.6s before Nova gives up
+# and treats silence as the end of the turn).
+MAX_SILENCE_MS = _ms(3600)
+
+# Below this many words, a bare trailing period is not trusted as evidence
+# the sentence is finished — see `_score_transcript`'s "weak_terminal_
+# punctuation" branch. Whisper puts a period on whatever fragment it is
+# handed ("Sophie." after two words is as likely a dangling name as a
+# complete thought), and a short fragment is exactly where that habit does
+# the most damage: at low word counts there is no other lexical evidence
+# (hard/soft continuation, filler) to catch it.
+MIN_WORDS_FOR_BARE_PERIOD = 3
 
 
 # Live captions are transcribed with greedy decoding (ASRService's `fast`
@@ -98,9 +121,9 @@ MAX_SILENCE_MS = _ms(2800)
 # differently machine to machine; NOVA_CAPTION_SILENCE_FLOOR_MS in .env.
 def _caption_floor() -> int:
     try:
-        return _ms(int(os.getenv("NOVA_CAPTION_SILENCE_FLOOR_MS", "850")))
+        return _ms(int(os.getenv("NOVA_CAPTION_SILENCE_FLOOR_MS", "1100")))
     except ValueError:
-        return _ms(850)
+        return _ms(1100)
 
 
 CAPTION_SILENCE_FLOOR_MS = _caption_floor()
@@ -235,6 +258,16 @@ def _score_transcript(transcript: str | None) -> EndpointDecision:
     if last_char in "?!":
         return EndpointDecision(MIN_SILENCE_MS, "terminal_question")
     if last_char == ".":
+        # A short fragment does not get to borrow the statement tier just
+        # because Whisper happened to end it with a period — that habit is
+        # exactly as likely on a dangling two-word clip ("Sophie.", "The
+        # thing.") as on a real complete thought, and at this word count
+        # there is no other lexical evidence (hard/soft continuation,
+        # filler) around to catch the false read. Require the transcript to
+        # actually look like a finished utterance before trusting the
+        # period; otherwise treat it the same as any other short fragment.
+        if len(words) < MIN_WORDS_FOR_BARE_PERIOD:
+            return EndpointDecision(PENDING_SILENCE_MS, "weak_terminal_punctuation")
         return EndpointDecision(STATEMENT_SILENCE_MS, "terminal_statement")
     if last_char in _PENDING_PUNCTUATION:
         return EndpointDecision(PENDING_SILENCE_MS, "pending_punctuation")
