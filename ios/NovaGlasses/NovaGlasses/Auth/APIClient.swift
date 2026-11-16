@@ -93,6 +93,15 @@ struct APIClient: Sendable {
         return json["enabled"] as? Bool ?? enabled
     }
 
+    // MARK: - Conversations
+
+    /// POST /conversations/{id}/close — the same endpoint the web chat's
+    /// "New conversation" button uses. Closing is terminal and idempotent
+    /// from the client's point of view: an already-closed id errors harmlessly.
+    func closeConversation(id: String) async throws {
+        _ = try await perform(request("conversations/\(id)/close", method: "POST"))
+    }
+
     // MARK: - Vision
 
     /// POST /vision/images: a glasses photo → its id for `stop.imageIds`.

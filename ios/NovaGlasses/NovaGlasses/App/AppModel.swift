@@ -19,6 +19,9 @@ final class AppModel {
     private(set) var isLoggedIn: Bool
     private(set) var listeningEnabled = false
     private(set) var errorMessage: String?
+    /// A "New conversation" request is in flight — guards against a double tap
+    /// starting two at once.
+    private(set) var isStartingNewConversation = false
     private(set) var routeSummary = "—"
     private(set) var wakeAvailable = false
     var serverURLString: String {
@@ -230,6 +233,41 @@ final class AppModel {
         autoOffTask?.cancel()
         if mirrorToServer {
             _ = try? await api.setPower(false)
+        }
+    }
+
+    /// "New conversation": closes whatever thread is open (settling an
+    /// in-flight reply first), clears the on-screen transcript, and hands
+    /// both the glasses socket and Sidekick a fresh conversation id — so the
+    /// very next utterance, on either path, starts the new thread rather than
+    /// the old one.
+    func startNewConversation() async {
+        guard !isStartingNewConversation else { return }
+        isStartingNewConversation = true
+        defer { isStartingNewConversation = false }
+
+        // Sidekick's session is server-side state keyed by its own cached
+        // conversation id: a bare reconnect keeps it, so it has to be ended
+        // and restarted to pick up the id the direct side is about to adopt.
+        let wasSidekickOn = sidekick.isOn
+        if wasSidekickOn {
+            sidekick.stop()
+        }
+
+        let closingId = controller.resetForNewConversation()
+
+        if wasSidekickOn {
+            sidekick.start()
+        }
+
+        guard let closingId else { return }
+        do {
+            try await api.closeConversation(id: closingId)
+        } catch {
+            // Best-effort: the client has already moved on to a fresh
+            // conversation id regardless, and closing is idempotent, so a
+            // failed close here is not worth surfacing to the user.
+            AudioLog.shared.add("Closing the old conversation failed: \(error.localizedDescription)")
         }
     }
 
