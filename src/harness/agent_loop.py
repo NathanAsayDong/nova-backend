@@ -49,6 +49,14 @@ _SENTENCE_END = re.compile(r"[.!?][\"')\]]*\s")
 _MIN_SENTENCE_CHARS = 30
 _AGENT_MAX_ITERATIONS = 50
 
+# Background agents (run_agent / _run_agent_loop launched via
+# _run_background_agent, a responsibility, or a scheduled task) run
+# unattended and off the request path, so they get their own, much larger
+# cap instead of sharing the conversation loop's — see
+# _BACKGROUND_AGENT_LOOP_TIMEOUT_SECONDS below for the matching wall-clock
+# budget.
+_BACKGROUND_AGENT_MAX_ITERATIONS = 100
+
 # Stand-in for a tool_result the agent loop never got to record — the tool
 # call was interrupted by a timeout, a retry, or a crash partway through.
 # Anthropic rejects every later request on a conversation with a dangling
@@ -79,6 +87,11 @@ _ORPHANED_TOOL_CALL_TEXT = "[a tool call was interrupted and removed from histor
 # updates stop being reassurance and become the thing you are waiting out.
 _MAX_SPOKEN_PROGRESS_LINES = 3
 _AGENT_LOOP_TIMEOUT_SECONDS = 120.0
+
+# No one is watching a background run the way a user watches a conversation
+# turn, so it can afford to wait much longer for a result: 15 minutes against
+# the conversation loop's 2.
+_BACKGROUND_AGENT_LOOP_TIMEOUT_SECONDS = 900.0
 
 # The turn's setup work — memory retrieval, the tool list, the MCP registry —
 # and its write-behind persistence all run here, so they overlap instead of
@@ -2510,8 +2523,8 @@ class AgentLoop:
 
         history: list[dict[str, Any]] = [{"role": "user", "content": task_prompt}]
 
-        for _ in range(_AGENT_MAX_ITERATIONS):
-            if time.monotonic() - started_at > _AGENT_LOOP_TIMEOUT_SECONDS:
+        for _ in range(_BACKGROUND_AGENT_MAX_ITERATIONS):
+            if time.monotonic() - started_at > _BACKGROUND_AGENT_LOOP_TIMEOUT_SECONDS:
                 return "I hit a time limit while working on that and had to stop."
 
             # Set once this round retries after a pairing repair, so a

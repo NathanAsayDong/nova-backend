@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest import mock
 from uuid import UUID, uuid4
 
+from src.harness import agent_loop as agent_loop_module
 from src.harness.agent_loop import AgentLoop
 from src.model.conversation import Conversation
 from src.model.responsibility import Responsibility
@@ -21,6 +22,14 @@ class FakeTextBlock:
 class FakeMessage:
     content: list
     stop_reason: str = "end_turn"
+
+
+@dataclass
+class FakeToolUseBlock:
+    id: str
+    name: str
+    input: dict
+    type: str = "tool_use"
 
 
 class FakeToolDao:
@@ -408,6 +417,75 @@ class ResponsibilityRunToolRestrictionTests(unittest.TestCase):
 
         tool_names = {t["name"] for t in (self.captured[0]["tools"] or [])}
         self.assertFalse(tool_names & _RESTRICTED_TOOL_NAMES)
+
+
+class BackgroundAgentLimitTests(unittest.TestCase):
+    """
+    Background runs (_run_agent_loop, shared by run_agent's synchronous and
+    threaded paths) got their own, much larger iteration cap and wall-clock
+    budget than the conversation loop -- see
+    _BACKGROUND_AGENT_MAX_ITERATIONS / _BACKGROUND_AGENT_LOOP_TIMEOUT_SECONDS
+    in agent_loop.py. These confirm the loop actually honors them.
+    """
+
+    def setUp(self):
+        self.agent_loop = AgentLoop()
+        self.agent_loop.memory_retrieval_enabled = False
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        self.agent_loop.tool_service = tool_service
+        self.agent_loop.update_service = FakeUpdateService()
+        self.agent_loop.conversation_service = FakeConversationService()
+
+    def test_background_loop_honors_the_iteration_cap(self):
+        """
+        A model that never stops calling tools must not run forever -- the
+        loop gives up after exactly _BACKGROUND_AGENT_MAX_ITERATIONS calls,
+        not the conversation loop's much smaller _AGENT_MAX_ITERATIONS.
+        """
+        call_count = 0
+
+        def never_finishes(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            nonlocal call_count
+            call_count += 1
+            return FakeMessage(
+                content=[FakeToolUseBlock(id=f"t{call_count}", name="unknown_tool", input={})]
+            )
+
+        self.agent_loop.claude_service.get_response = never_finishes
+
+        with mock.patch.object(agent_loop_module, "_BACKGROUND_AGENT_MAX_ITERATIONS", 3):
+            result = self.agent_loop.run_agent(prompt="do the thing")
+
+        self.assertEqual(call_count, 3)
+        self.assertIn("loop limit", result)
+
+    def test_background_loop_honors_the_fifteen_minute_timeout(self):
+        """
+        Mocking time.monotonic to jump past the 900-second budget on the
+        very first check proves the loop reads
+        _BACKGROUND_AGENT_LOOP_TIMEOUT_SECONDS before ever calling the model.
+        """
+
+        def never_called(*args, **kwargs):
+            raise AssertionError("should never reach the model: timeout fires first")
+
+        self.agent_loop.claude_service.get_response = never_called
+
+        with mock.patch.object(
+            agent_loop_module.time, "monotonic", side_effect=[0.0, 1000.0]
+        ):
+            result = self.agent_loop.run_agent(prompt="do the thing")
+
+        self.assertIn("time limit", result)
+
+    def test_conversation_limits_are_unaffected(self):
+        self.assertEqual(agent_loop_module._AGENT_MAX_ITERATIONS, 50)
+        self.assertEqual(agent_loop_module._AGENT_LOOP_TIMEOUT_SECONDS, 120.0)
+        self.assertEqual(agent_loop_module._BACKGROUND_AGENT_MAX_ITERATIONS, 100)
+        self.assertEqual(
+            agent_loop_module._BACKGROUND_AGENT_LOOP_TIMEOUT_SECONDS, 900.0
+        )
 
 
 if __name__ == "__main__":

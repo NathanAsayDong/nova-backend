@@ -2,9 +2,11 @@ import json
 import unittest
 from types import SimpleNamespace
 from dataclasses import dataclass, field
+from unittest import mock
 from uuid import UUID, uuid4
 
 from prompting.prompt_source_prompt import PromptSourceEnum
+from src.harness import agent_loop as agent_loop_module
 from src.harness.agent_loop import AgentLoop
 from src.harness.spoken_reply import SCREEN_ONLY_LINE
 from src.service.claude_service import TOOL_USE_STARTED, TurnStream
@@ -2078,3 +2080,55 @@ class InterruptedToolCallTests(unittest.TestCase):
         self.assertEqual(by_id["t1"]["content"], "fine")
         self.assertTrue(by_id["t2"]["is_error"])
         self.assertTrue(by_id["t3"]["is_error"])
+
+
+class ConversationLoopLimitTests(unittest.TestCase):
+    """
+    Background agents got their own, much larger iteration cap and wall-clock
+    budget (see _BACKGROUND_AGENT_MAX_ITERATIONS / _BACKGROUND_AGENT_LOOP_
+    TIMEOUT_SECONDS in agent_loop.py) so a long unattended run isn't bound by
+    what's reasonable for someone watching a conversation. These guard that
+    the conversation loop's own, unattended-agent-unrelated limits never
+    drifted in that change.
+    """
+
+    def test_conversation_limits_are_unchanged(self):
+        self.assertEqual(agent_loop_module._AGENT_MAX_ITERATIONS, 50)
+        self.assertEqual(agent_loop_module._AGENT_LOOP_TIMEOUT_SECONDS, 120.0)
+
+    def test_background_limits_are_distinct_and_larger(self):
+        self.assertEqual(agent_loop_module._BACKGROUND_AGENT_MAX_ITERATIONS, 100)
+        self.assertEqual(
+            agent_loop_module._BACKGROUND_AGENT_LOOP_TIMEOUT_SECONDS, 900.0
+        )
+
+    def test_conversation_loop_still_times_out_at_its_own_limit(self):
+        """
+        Forcing the conversation loop's own timeout constant down to zero
+        trips the "time limit" fallback on the very first round -- proving
+        the round_no loop reads _AGENT_LOOP_TIMEOUT_SECONDS, not the new,
+        much larger background constant.
+        """
+        agent_loop_instance = AgentLoop()
+        agent_loop_instance.memory_retrieval_enabled = False
+        conversation_id = uuid4()
+        tool_service = ToolService.__new__(ToolService)
+        tool_service.tool_dao = FakeToolDao()
+        agent_loop_instance.tool_service = tool_service
+        agent_loop_instance.conversation_service = FakeConversationService()
+
+        def fake_stream(prompt, role=None, context=None, tools=None, system=None, mcp_servers=None):
+            raise AssertionError("should never reach the model: timeout fires first")
+
+        agent_loop_instance.claude_service.stream_response = fake_stream
+
+        with mock.patch.object(agent_loop_module, "_AGENT_LOOP_TIMEOUT_SECONDS", 0.0):
+            events = list(
+                agent_loop_instance.conversation_loop_events(
+                    "hi", conversation_id, prompt_source=PromptSourceEnum.CHAT_PROMPT
+                )
+            )
+
+        self.assertTrue(
+            any("time limit" in event.get("text", "") for event in events)
+        )
