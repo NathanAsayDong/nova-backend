@@ -1,17 +1,17 @@
-# Graph Report - ios-new-conversation-button  (2026-11-16)
+# Graph Report - silent-mode-backend  (2026-11-24)
 
 ## Corpus Check
-- 241 files · ~219,656 words
+- 243 files · ~227,134 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 12 file(s) not represented in the graph (top: (none) 4, .mdc 1, .pbxproj 1)
 
 ## Summary
-- 5398 nodes · 12702 edges · 230 communities (132 shown, 98 thin omitted)
-- Extraction: 89% EXTRACTED · 11% INFERRED · 0% AMBIGUOUS · INFERRED: 1338 edges (avg confidence: 0.89)
+- 5539 nodes · 12986 edges · 229 communities (132 shown, 97 thin omitted)
+- Extraction: 89% EXTRACTED · 11% INFERRED · 0% AMBIGUOUS · INFERRED: 1380 edges (avg confidence: 0.89)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `cba40aff`
+- Built from commit: `5e69f9d5`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -21,10 +21,10 @@
 - SimpleFinancesService
 - text
 - TranscribeSocketTests
-- test_openai_loop.py
+- OpenAILoopTests
 - ServerEvent
 - AgentLoopImageTests
-- .run_agent
+- test_background_agent.py
 - ._env
 - make_update
 - ClaudeService
@@ -32,33 +32,33 @@
 - build_service
 - Nova system prompt (persona)
 - SidekickController
-- ReportType
+- agent_loop.py
 - Harness
 - CodingService
-- ScheduledTask
+- ScheduledTaskService
 - _most_recent_local_midnight_utc
 - FakeChunkDao
 - time
 - test_memory_chunk_service.py
-- MeetingError
+- meeting_controller.py
 - CursorService
 - MeetingService
-- test_code_service.py
-- CodingSession
+- FileOperationTests
+- AppModel
 - UpdateDeliveryService
 - ConversationController
-- ScheduledTaskService
+- Keys
 - deploy_main.py
-- test_auth_service.py
+- NovaSession
 - LiveReply
 - auth_service.py
-- __main__.py
-- coding_controller.py
-- AgentBindingTests
+- SessionManager
+- _runner
+- _silent_logger
 - json
 - DATGlassesCamera
-- Sendable
-- Project
+- Handle
+- CodeService
 - ResponsibilityService
 - Responsibility
 - McpOAuthService
@@ -69,46 +69,46 @@
 - McpServerService
 - AgentLoop
 - TurnTimer
-- test_auth_gate.py
+- build_app
 - AuthService
-- pending
+- SpeakOnCompletionTests
 - build_service
 - FakeMessage
 - FakePersonaDao
 - ConversationLoopStreamTests
-- ReplyTests
+- sms_controller.py
 - SpeechPlayer
 - EndpointDecisionTests
 - .look
 - FakeCamera
 - ConversationControllerTests
 - ._artifact_for_tool
-- .start
+- BaseDao
 - ClientEvent
 - NovaGlasses
 - Conversation
-- agent_loop.py
+- test_vision.py
 - McpServer
 - PersonaService
 - TwilioService
 - HttpGateTests
 - ._conversation_turn
-- get_conversation_messages
-- .durationMs
+- run_migrations.py
+- IsIdleTests
 - parse_gate_reply
 - is_nova_interrupt_phrase
-- FailureHistoryAndRetryTests
+- fake_stream
 - LiveScreenTests
 - FakeMcpServerDao
 - FakeMeetingDao
 - CrudTests
 - SettingsService
 - Person
-- test_sms.py
+- bip_service.py
 - test_responsibility_service.py
 - StreamedSpeechTests
-- sessions.py
-- build_memory_service
+- test_deploy_main.py
+- test_memory_injection.py
 - meeting_service.py
 - ASRService
 - main.py
@@ -116,68 +116,67 @@
 - Mac code agent daemon
 - test_spoken_reply.py
 - SpokenProse
-- CameraError
+- recording_meeting
 - ._run_begin
 - BipService
 - NovaSocket
-- test_coding_service.py
+- Rig
 - asr_service.py
-- SessionManager
+- test_sms.py
 - CompletionNotificationTests
-- TwilioErrorClassificationTests
+- ElevenLabsService
 - .repair_tool_pairing
-- pathlib
+- .deploy_main
 - FakeDao
 - .run_turn
-- link.py
-- AppModel
-- test_process_supervisor.py
-- .completed
-- EnrollmentError
+- protocol.py
+- HomeView
+- asr-bench.py
+- test_conversation_loop.py
+- SpeakQueuedLinesGatingTests
 - APIClient
 - Foundation
 - Earcon
 - SidekickSocketTests
-- PromptSourceTests
+- AuthStore
 - EndSessionTests
 - SidekickSession
 - worker.py
-- FakePersonDao
-- email_service.py
-- .conversation_loop_events
-- MacSessionLifecycleTests
-- FakeDao
+- DeployService
+- CheckForStaleConversationsTests
+- FollowUpTests
+- GateTestCase
 - ClassificationTests
-- Any
+- ProviderSelectionTests
 - CaptureEngine
 - AuthenticateTests
 - history_compaction.py
-- FakeResponsibilityDao
+- AsrLock
 - SidekickConnection
 - WorkingTreeTests
 - AudioRouteManager
 - .isOnlyWakePhrase
-- NovaGlasses
+- VoiceMode
 - .sanitize_mcp_history
 - PerformTests
-- ImageStore
-- Link
+- FakeDao
+- SilentModeServiceTests
 - .split_sms_body
-- test_settings_service.py
+- .allowed_sms_senders
 - FakeSendWebSocket
 - FallbackChainTests
 - SpokenTrackTests
-- .iter_sentence_chunks
+- ConversationControllerSilentModeTests
 - GlassesSocketTests
 - VisionService
 - test_asr_filters.py
 - MemoryChunkService
-- os
+- replay_request.py
 - host_environment_prompt.py
 - PassSentinelTests
 - TTSService
 - CLAUDE.md
-- .scaled
+- .decode
 - install.sh
 - uninstall.sh
 - settings_controller.py
@@ -186,68 +185,69 @@
 - CurrentModelTests
 - FakeHttp
 - CommandLineService
-- DemoService
-- AudioSessionPolicy
+- ToolServiceTests
+- meeting_socket
 - dict
-- VisionRoutesTests
+- RelayTokenTests
 - SpeechWakeDetector
 - SentryModeTests
-- VisionClient
+- MirrorTests
 - AddPersonView
 - PersonaPrompt
 - .setUp
 - CreateScheduleRequirementTests
-- prepare
-- turn_timer.py
-- StatusTextTests
-- fake_stream
+- AmbientForwardingTests
+- os
+- row_to_session
+- SelfKillHazardTests
+- SpawnStaleAncestorHelperTimingTests
 - HostEnvironmentPromptTests
-- .setUp
-- XCTestCase
+- MacSessionLifecycleTests
+- ThinkingPulseTests
 - .wantsToSee
 - GoodbyeTimingTests
-- .handle
+- String
 - InterruptedToolCallTests
 - CooldownTests
 - speech_summary
 - LockoutTests
 - GuardrailTests
-- split_wake_phrase
+- ToolUseStarted
 - FakeConversationService
-- .test_a_live_turn_reads_deltas_then_exposes_the_message
-- test_persona_service.py
+- FakeAgentLoop
+- FakeClaudeService
 - FaceService
 - AgentLink
 - _FakeTable
 - clamp_spoken
-- LoginTests
+- FakeNotesDao
 - FakeResponse
 - FinishedSessionTowerTests
-- TranscribeUtteranceTests
+- ReplyQueue
+- MeetingSegment
 - FallbackTests
+- AuthenticationTests
+- FakeConversationDao
+- FakeEmbeddingService
 - FakeUpdateService
-- FakeAgentLoop
-- SidekickService
+- make_request
 - WorktreeCollisionTests
 - ResponsibilityDeliveryTests
-- _receive
-- FakeTaskDao
-- .add
+- Entry
 - ReportMediumTests
 - _said
 - ServiceMethodToolConfig
-- faces_controller.py
 
 ## God Nodes (most connected - your core abstractions)
-1. `AgentLoop` - 131 edges
-2. `Conversation` - 89 edges
-3. `ConversationController` - 84 edges
-4. `ToolService` - 68 edges
+1. `AgentLoop` - 135 edges
+2. `Conversation` - 92 edges
+3. `ConversationController` - 85 edges
+4. `ToolService` - 72 edges
 5. `build_service()` - 57 edges
 6. `CodingService` - 55 edges
 7. `Responsibility` - 54 edges
 8. `MeetingService` - 52 edges
-9. `UpdateService` - 49 edges
+9. `UpdateService` - 50 edges
 10. `Tool` - 48 edges
 
 ## Surprising Connections (you probably didn't know these)
@@ -270,58 +270,54 @@
 - **Mac agent core design principles** — mac_agent_readme_dial_out, mac_agent_readme_sessions_as_threads, mac_agent_readme_git_worktree [EXTRACTED 1.00]
 - **Persisted-action safety rules across foreground and background agents** — prompting_nova_persona_prompt_confirm_persisted_actions, prompting_nova_persona_prompt_clarify_before_executing, prompting_background_agent_prompt_no_outward_actions [INFERRED 0.85]
 
-## Communities (230 total, 98 thin omitted)
+## Communities (229 total, 97 thin omitted)
 
 ### Community 0 - "Tool"
-Cohesion: 0.07
-Nodes (12): main(), main(), main(), main(), main(), migration_files(), ToolDao, Tool (+4 more)
+Cohesion: 0.15
+Nodes (6): main(), main(), main(), main(), ToolDao, Tool
 
 ### Community 1 - "nova_controller.py"
 Cohesion: 0.05
-Nodes (32): audio_file_bytes(), is_raw_pcm(), _pcm_params(), suffix_for_mime(), transcribe_serialized(), _canonical_wake_text(), chat_stream(), event_source() (+24 more)
+Nodes (33): audio_file_bytes(), is_raw_pcm(), _pcm_params(), suffix_for_mime(), transcribe_serialized(), _canonical_wake_text(), chat_stream(), event_source() (+25 more)
 
 ### Community 2 - "SimpleFinancesService"
 Cohesion: 0.11
 Nodes (6): SimplApiError, SimplConfigurationError, SimpleFinancesService, response(), SimpleFinancesServiceTest, SimplFinancesToolRegistrationTest
 
 ### Community 3 - "text"
-Cohesion: 0.11
-Nodes (8): ToolUseStarted, AuthenticationTests, forward(), make_request(), PathTokenRouteTests, SenderGateTests, go(), text()
+Cohesion: 0.19
+Nodes (4): forward(), PathTokenRouteTests, SenderGateTests, text()
 
-### Community 5 - "test_openai_loop.py"
-Cohesion: 0.17
+### Community 5 - "OpenAILoopTests"
+Cohesion: 0.16
 Nodes (7): FakeClient, FakeFunctionCall, FakeResponse, FakeResponsesAPI, FakeTool, FakeToolService, OpenAILoopTests
 
 ### Community 6 - "ServerEvent"
-Cohesion: 0.04
-Nodes (50): Keys, assistantText, bytes, chunkBase64, client, code, conversationId, count (+42 more)
+Cohesion: 0.06
+Nodes (26): ServerEvent, audioStreamChunk, audioStreamEnd, audioStreamStart, captureRequest, chunkReceived, done, error (+18 more)
 
 ### Community 7 - "AgentLoopImageTests"
-Cohesion: 0.33
+Cohesion: 0.23
 Nodes (4): AgentLoopImageTests, FakeMessage, FakeTextBlock, FakeToolUseBlock
 
-### Community 8 - ".run_agent"
-Cohesion: 0.09
-Nodes (4): BackgroundAgentTests, MultiChannelReportTypeTests, ReportTypeTests, ResponsibilityRunToolRestrictionTests
-
-### Community 9 - "._env"
-Cohesion: 0.13
-Nodes (4): CartesiaService, CartesiaRequestTests, _full_chain_env(), ProviderSelectionTests
+### Community 8 - "test_background_agent.py"
+Cohesion: 0.05
+Nodes (16): BackgroundAgentLimitTests, never_finishes(), BackgroundAgentTests, fake_get_response(), FakeConversationService, FakeMessage, FakeProjectDao, FakeTextBlock (+8 more)
 
 ### Community 10 - "make_update"
-Cohesion: 0.12
-Nodes (13): at(), BadgeOnlyTests, build_service(), CallDeliveryTests, EmailDeliveryTests, make_update(), MultiChannelDeliveryTests, QuietHoursTests (+5 more)
+Cohesion: 0.06
+Nodes (20): describe_twilio_error(), is_permanent_twilio_error(), at(), BadgeOnlyTests, build_service(), CallDeliveryTests, EmailDeliveryTests, FakeUpdateService (+12 more)
 
 ### Community 11 - "ClaudeService"
-Cohesion: 0.08
-Nodes (6): _env_flag(), ClaudeService, _maybe_dump_request(), _maybe_print_prompt(), GenerationKwargsTests, ClaudeServiceMcpKwargsTests
+Cohesion: 0.10
+Nodes (4): _env_flag(), ClaudeService, GenerationKwargsTests, ClaudeServiceMcpKwargsTests
 
 ### Community 12 - "GithubService"
 Cohesion: 0.15
 Nodes (4): GithubService, GithubServiceError, _FakeResponse, GithubServiceTests
 
 ### Community 13 - "build_service"
-Cohesion: 0.06
+Cohesion: 0.05
 Nodes (10): build_service(), CreateUpdateTests, FakeConversationDao, FakeProjectDao, FakeUpdateDao, make_update(), MultiChannelReportTypeTests, NotificationQueueFieldsTests (+2 more)
 
 ### Community 14 - "Nova system prompt (persona)"
@@ -329,108 +325,116 @@ Cohesion: 0.07
 Nodes (28): Hosting Nova off the home network, Backend environment variables, Cloudflare Tunnel (nova-tower, cloudflared), Firebase Hosting frontend (nova-voice-nd.web.app), Infobip SMS integration (/sms/inbound), Failed-login lockout policy, Mac coding agent (/ws/coding), MCP OAuth callback (+20 more)
 
 ### Community 15 - "SidekickController"
-Cohesion: 0.15
-Nodes (15): Cancellable, ConversationIdStore, EarconPlaying, GlassesCamera, MainScheduler, NovaSocketing, Scheduling, SpeechPlaying (+7 more)
+Cohesion: 0.11
+Nodes (12): .currentConversationId, Cancellable, ConversationIdStore, EarconPlaying, GlassesCamera, MainScheduler, NovaSocketing, Scheduling (+4 more)
 
-### Community 16 - "ReportType"
-Cohesion: 0.14
-Nodes (4): encode_report_types(), normalize_report_types(), ReportType, NormalizeAndEncodeReportTypesTests
+### Community 16 - "agent_loop.py"
+Cohesion: 0.10
+Nodes (5): MessageDao, _memory_block_budget_seconds(), Message, MessageRole, ConversationService
 
 ### Community 17 - "Harness"
 Cohesion: 0.08
 Nodes (15): LevelSmoother, Snapshot, State, calibrating, cooldown, idle, onset, speaking (+7 more)
 
-### Community 19 - "ScheduledTask"
-Cohesion: 0.12
-Nodes (3): ScheduledTaskDao, ScheduledTask, TaskStatus
+### Community 18 - "CodingService"
+Cohesion: 0.04
+Nodes (9): CodingSessionDao, CodingEvent, CodingSession, CodingService, AgentBindingTests, FakeLink, MacShellTests, StartReportTypeTests (+1 more)
+
+### Community 19 - "ScheduledTaskService"
+Cohesion: 0.09
+Nodes (5): ScheduledTaskDao, ScheduledTask, TaskStatus, ScheduledTaskService, CurrentTimeTests
 
 ### Community 20 - "_most_recent_local_midnight_utc"
-Cohesion: 0.07
-Nodes (7): _most_recent_local_midnight_utc(), IsIdleTests, IsPastRolloverTests, build_service(), CheckForStaleConversationsTests, FakeConversationDao, MostRecentLocalMidnightUtcTests
+Cohesion: 0.13
+Nodes (3): _most_recent_local_midnight_utc(), IsPastRolloverTests, MostRecentLocalMidnightUtcTests
 
 ### Community 22 - "time"
-Cohesion: 0.11
-Nodes (18): _all(), await_ready(), check(), classify(), _entry(), kill_tree(), _log_paths(), pid_alive() (+10 more)
+Cohesion: 0.07
+Nodes (23): fetch(), main(), sha256(), _remove(), transcribe_utterance(), _all(), await_ready(), check() (+15 more)
 
 ### Community 23 - "test_memory_chunk_service.py"
 Cohesion: 0.07
 Nodes (13): build_service(), FakeClaudeResponse, FakeClaudeService, FakeConversationService, FakeEmbeddingService, FakeMemoryChunkDao, FakeTextBlock, FetchMemoryTests (+5 more)
 
-### Community 24 - "MeetingError"
-Cohesion: 0.09
-Nodes (19): transcribe_segments_serialized(), delete_meeting(), get_active_meeting(), get_meeting(), get_meeting_segments(), list_meetings(), _meeting_error(), meeting_socket() (+11 more)
+### Community 24 - "meeting_controller.py"
+Cohesion: 0.10
+Nodes (12): transcribe_segments_serialized(), delete_meeting(), get_active_meeting(), get_meeting(), get_meeting_segments(), list_meetings(), _meeting_error(), regenerate_notes() (+4 more)
 
 ### Community 25 - "CursorService"
 Cohesion: 0.17
 Nodes (4): CursorService, CursorServiceError, CursorServiceTests, _FakeResponse
 
 ### Community 26 - "MeetingService"
-Cohesion: 0.05
-Nodes (4): MeetingDao, Meeting, MeetingStatus, MeetingService
+Cohesion: 0.04
+Nodes (8): MeetingChunkDao, MeetingDao, MeetingNotesDao, Meeting, MeetingChunk, MeetingNotes, MeetingError, MeetingService
 
-### Community 27 - "test_code_service.py"
-Cohesion: 0.06
-Nodes (7): CodeServiceTestCase, EditTests, FakeConversationDao, FakeProjectDao, FileOperationTests, PathContainmentTests, ProjectResolutionTests
+### Community 27 - "FileOperationTests"
+Cohesion: 0.09
+Nodes (3): EditTests, FileOperationTests, PathContainmentTests
+
+### Community 28 - "AppModel"
+Cohesion: 0.13
+Nodes (4): AppModel, .baseURL, .serverURLString, .body
+
+### Community 29 - "UpdateDeliveryService"
+Cohesion: 0.12
+Nodes (3): EmailService, _env_int(), UpdateDeliveryService
 
 ### Community 30 - "ConversationController"
 Cohesion: 0.10
-Nodes (8): Capture, ConversationController, .idleMessage, .isEnabled, .isWorking, .wakeWatching, Once, Sentry mode
+Nodes (7): Capture, ConversationController, .idleMessage, .isEnabled, .isWorking, .wakeWatching, Once
+
+### Community 31 - "Keys"
+Cohesion: 0.08
+Nodes (23): Keys, assistantText, bytes, chunkBase64, client, code, conversationId, count (+15 more)
 
 ### Community 32 - "deploy_main.py"
 Cohesion: 0.07
-Nodes (22): build_logger(), check_health_once(), current_commit(), DeployConfig, DeployError, DeployRunner, find_all_pids_on_port(), find_all_worker_pids() (+14 more)
-
-### Community 33 - "test_auth_service.py"
-Cohesion: 0.10
-Nodes (4): NovaSessionDao, row_to_session(), NovaSession, RowConversionTests
+Nodes (26): build_logger(), check_health_once(), current_commit(), DeployConfig, DeployError, DeployRunner, _ensure_single_healthy_api(), find_all_pids_on_port() (+18 more)
 
 ### Community 35 - "auth_service.py"
 Cohesion: 0.12
 Nodes (9): _client_ip(), current_session(), list_sessions(), login(), logout(), AuthNotConfigured, BadCredentials, LockedOut (+1 more)
 
-### Community 36 - "__main__.py"
-Cohesion: 0.15
-Nodes (7): Config, _flag(), load_env_file(), _configure_logging(), main(), _run(), _task()
+### Community 36 - "SessionManager"
+Cohesion: 0.07
+Nodes (12): Config, load_env_file(), Link, _configure_logging(), main(), _run(), _task(), _as_int() (+4 more)
 
-### Community 37 - "coding_controller.py"
-Cohesion: 0.14
-Nodes (11): adopt_claude_thread(), _authorized(), coding_socket(), coding_status(), get_coding_session(), list_claude_threads(), list_coding_sessions(), read_claude_thread() (+3 more)
+### Community 37 - "_runner"
+Cohesion: 0.12
+Nodes (5): DryRunTests, LeftoverSweepTests, RollbackPathTests, _runner(), SweepHandsOffStaleAncestorsTests
+
+### Community 38 - "_silent_logger"
+Cohesion: 0.12
+Nodes (4): EnsureSingleHealthyApiTests, HelperModeCliTests, RunStaleAncestorHelperTests, _silent_logger()
 
 ### Community 39 - "json"
-Cohesion: 0.16
-Nodes (16): _all(), await_ready(), check(), _entry(), kill_tree(), _log_paths(), pid_alive(), port_open() (+8 more)
+Cohesion: 0.10
+Nodes (21): _all(), await_ready(), check(), classify(), _entry(), kill_tree(), _log_paths(), pid_alive() (+13 more)
 
 ### Community 40 - "DATGlassesCamera"
-Cohesion: 0.10
-Nodes (3): failed, notReady, DATGlassesCamera
-
-### Community 41 - "Sendable"
-Cohesion: 0.14
-Nodes (8): Phase, idle, listening, off, sentryBlocked, speaking, thinking, Handle
-
-### Community 42 - "Project"
-Cohesion: 0.09
-Nodes (3): Project, CodeService, ProjectService
+Cohesion: 0.07
+Nodes (15): CameraError, .errorDescription, failed, glassesAudioNotUp, noCamera, notReady, timeout, DATGlassesCamera (+7 more)
 
 ### Community 44 - "Responsibility"
-Cohesion: 0.21
+Cohesion: 0.17
 Nodes (4): Responsibility, at(), CheckForResponsibilitiesTests, DueTests
 
 ### Community 45 - "McpOAuthService"
-Cohesion: 0.18
-Nodes (5): McpOAuthService, _now(), _origin(), _path(), CompleteAndRefreshTests
+Cohesion: 0.22
+Nodes (4): _b64url(), McpOAuthService, _origin(), _path()
 
 ### Community 46 - "make_update"
 Cohesion: 0.16
 Nodes (5): ConversationResolutionTests, make_update(), OpeningPromptTests, TwiMLTests, form()
 
 ### Community 47 - "build_service"
-Cohesion: 0.05
-Nodes (25): MeetingSegment, build_service(), ChunkingTests, CommitSegmentsTests, DeleteMeetingTests, FakeAgentLoop, FakeClaudeService, FakeConversationDao (+17 more)
+Cohesion: 0.14
+Nodes (5): build_service(), FakeProjectDao, RetrievalTests, StartMeetingTests, StopMeetingTests
 
 ### Community 48 - "asyncio"
-Cohesion: 0.08
-Nodes (19): logout_all(), close_conversation(), create_person(), _callback_page(), create_mcp_server(), delete_mcp_server(), list_mcp_servers(), mcp_oauth_callback() (+11 more)
+Cohesion: 0.04
+Nodes (35): logout_all(), adopt_claude_thread(), _authorized(), coding_socket(), coding_status(), get_coding_session(), list_claude_threads(), list_coding_sessions() (+27 more)
 
 ### Community 49 - "call_controller.py"
 Cohesion: 0.08
@@ -438,95 +442,95 @@ Nodes (16): answer_call(), call_status(), _escape(), mint_relay_token(), _openin
 
 ### Community 51 - "AgentLoop"
 Cohesion: 0.05
-Nodes (22): AgentLoop, ToolService, fake_get_response(), FakeConversationService, FakeMessage, FakeTextBlock, FakeToolDao, FakeUpdateService (+14 more)
+Nodes (21): AgentLoop, ToolService, ConversationLoopLimitTests, CountingService, FakeConversationService, FakeToolDao, PrefetchedConversationTests, GlassesCannotRecordMeetingsTests (+13 more)
 
 ### Community 52 - "TurnTimer"
 Cohesion: 0.10
 Nodes (8): _emit(), TurnTimer, _drain(), _FakeMessage, _FakeStream, _FakeUsage, TurnStreamUsageMarkTests, TurnTimerTests
 
-### Community 53 - "test_auth_gate.py"
-Cohesion: 0.11
-Nodes (7): AuthGate, bearer_token(), _header(), is_exempt(), build_app(), ExemptionTests, SidekickAuthTests
+### Community 53 - "build_app"
+Cohesion: 0.22
+Nodes (3): build_app(), stream(), fake_stream()
 
 ### Community 54 - "AuthService"
-Cohesion: 0.12
-Nodes (3): AuthService, _hash_token(), ConfigurationTests
+Cohesion: 0.11
+Nodes (3): AuthService, _hash_token(), _now()
 
-### Community 55 - "pending"
-Cohesion: 0.21
-Nodes (4): pending(), RecoverStuckTests, RunDueTests, RunTests
+### Community 55 - "SpeakOnCompletionTests"
+Cohesion: 0.15
+Nodes (4): no_tts(), SpeakOnCompletionTests, never_finishes(), scenario()
 
 ### Community 56 - "build_service"
-Cohesion: 0.14
-Nodes (6): build_service(), CreateTests, FakeProjectDao, FakeUpdateService, ListAndCancelTests, soon()
+Cohesion: 0.07
+Nodes (11): build_service(), CreateTests, FakeProjectDao, FakeTaskDao, FakeUpdateService, ListAndCancelTests, pending(), RecoverStuckTests (+3 more)
 
 ### Community 57 - "FakeMessage"
-Cohesion: 0.23
-Nodes (7): FakeMessage, FakeTextBlock, fake_stream(), fake_stream(), fake_stream(), ToolTurnSpeechTests, fake_stream()
+Cohesion: 0.13
+Nodes (13): fake_stream(), FakeMessage, FakeTextBlock, fake_stream(), fake_stream(), fake_stream(), fake_stream(), StatusTextTests (+5 more)
 
 ### Community 58 - "FakePersonaDao"
-Cohesion: 0.14
+Cohesion: 0.13
 Nodes (7): build_service(), CachingTests, FakePersonaDao, LoadingTests, seed_row(), ToolFacingWrapperTests, VersioningAndRollbackTests
 
 ### Community 59 - "ConversationLoopStreamTests"
-Cohesion: 0.15
+Cohesion: 0.14
 Nodes (4): ConversationLoopStreamTests, fake_stream(), fake_stream(), EventStreamTests
+
+### Community 60 - "sms_controller.py"
+Cohesion: 0.11
+Nodes (9): _authorize(), inbound_sms(), inbound_sms_with_path_token(), _is_stale(), _receive(), resolve_sms_conversation(), _run_sms_turn(), ConversationClosedError (+1 more)
 
 ### Community 61 - "SpeechPlayer"
 Cohesion: 0.07
 Nodes (7): MP3StreamDecoder, PlaybackWatchdog, SpeechPlayer, .isBusy, .now, Stream, PlaybackWatchdogTests
 
 ### Community 62 - "EndpointDecisionTests"
-Cohesion: 0.06
-Nodes (11): AsrLock, caption_endpoint_decision(), _caption_floor(), endpoint_decision(), _endpoint_scale(), EndpointDecision, _ms(), _score_transcript() (+3 more)
+Cohesion: 0.07
+Nodes (10): caption_endpoint_decision(), _caption_floor(), endpoint_decision(), _endpoint_scale(), EndpointDecision, _ms(), _score_transcript(), silence_budget_ms() (+2 more)
 
 ### Community 63 - ".look"
-Cohesion: 0.17
-Nodes (10): Client → server, Connecting, Deviations from the brief and additions, Interjections, Prompt and tools, Server behaviour, Server → client, Sidekick protocol: `WS /ws/sidekick` (+2 more)
+Cohesion: 0.16
+Nodes (11): Vision: "Hey Nova, what do you see?", Client → server, Connecting, Deviations from the brief and additions, Interjections, Prompt and tools, Server behaviour, Server → client (+3 more)
 
 ### Community 64 - "FakeCamera"
-Cohesion: 0.21
+Cohesion: 0.22
 Nodes (4): FakeCamera, FakeVision, settle(), VisionControllerTests
 
 ### Community 65 - "ConversationControllerTests"
 Cohesion: 0.05
-Nodes (13): ConversationControllerTests, ConversationControllerTests.Rig, FakePlayer, .isBusy, FakeSocket, .starts, FakeWake, Item (+5 more)
+Nodes (14): PCMFormat, PreRollBuffer, .count, AudioFramingTests, ConversationControllerTests, ConversationControllerTests.Rig, FakePlayer, .isBusy (+6 more)
 
 ### Community 68 - "ClientEvent"
-Cohesion: 0.06
-Nodes (28): AudioRole, final, progress, status, wake, CapturePurpose, sentry, turn (+20 more)
+Cohesion: 0.07
+Nodes (25): AudioRole, final, progress, status, wake, CapturePurpose, sentry, turn (+17 more)
 
 ### Community 69 - "NovaGlasses"
-Cohesion: 0.18
-Nodes (4): AmbientForwardingTests, What is verified and what is not, NovaGlasses, XCTest
+Cohesion: 0.23
+Nodes (3): AudioSessionPolicyTests, NovaGlasses, XCTest
 
 ### Community 70 - "Conversation"
-Cohesion: 0.07
-Nodes (7): ConversationDao, MessageDao, Conversation, Message, ConversationService, FakeConversationService, ThreadResolutionTests
+Cohesion: 0.10
+Nodes (4): ConversationDao, Conversation, FakeConversationService, ThreadResolutionTests
 
-### Community 71 - "agent_loop.py"
-Cohesion: 0.06
-Nodes (15): PromptSourceEnum, _handle_inbound(), _is_stale(), resolve_sms_conversation(), _run_sms_turn(), MessageRole, TurnStream, has_be_quiet_phrase() (+7 more)
+### Community 71 - "test_vision.py"
+Cohesion: 0.04
+Nodes (18): AuthGate, bearer_token(), _header(), is_exempt(), has_be_quiet_phrase(), _normalize(), ToolExecutionError, ImageStore (+10 more)
 
 ### Community 72 - "McpServer"
-Cohesion: 0.21
-Nodes (3): McpServer, _b64url(), _parse_expiry()
+Cohesion: 0.20
+Nodes (3): McpServer, _now(), _parse_expiry()
 
 ### Community 74 - "TwilioService"
 Cohesion: 0.07
-Nodes (7): main(), report(), TwilioConfigurationError, TwilioService, ConfigurationGuardTests, EscapingTests, RelayTokenTests
+Nodes (12): backend_url(), close_current_conversation(), fetch_conversation_info(), fetch_health(), fetch_projects(), fetch_tools(), stream_reply(), main() (+4 more)
 
 ### Community 76 - "._conversation_turn"
-Cohesion: 0.03
-Nodes (6): persist(), _memory_block_budget_seconds(), _PassHold, strip_expects_reply(), _strip_expects_reply_events(), GlassesPromptSourceTests
+Cohesion: 0.04
+Nodes (6): PromptSourceEnum, persist(), _PassHold, strip_expects_reply(), _strip_expects_reply_events(), GlassesPromptSourceTests
 
-### Community 77 - "get_conversation_messages"
-Cohesion: 0.32
-Nodes (4): get_conversation(), get_conversation_messages(), _parse_uuid(), _project_payload()
-
-### Community 78 - ".durationMs"
-Cohesion: 0.18
-Nodes (4): PCMFormat, PreRollBuffer, .count, AudioFramingTests
+### Community 77 - "run_migrations.py"
+Cohesion: 0.16
+Nodes (4): main(), migration_files(), _jsonable(), SQLService
 
 ### Community 79 - "parse_gate_reply"
 Cohesion: 0.22
@@ -536,45 +540,57 @@ Nodes (3): parse_gate_reply(), SidekickGate, GateReplyTests
 Cohesion: 0.15
 Nodes (4): is_nova_interrupt_phrase(), _normalize_tokens(), NegativeMatchTests, PositiveMatchTests
 
-### Community 81 - "FailureHistoryAndRetryTests"
-Cohesion: 0.15
-Nodes (4): FailureHistoryAndRetryTests, fake_stream(), fake_stream(), _FakeBadRequestError
+### Community 81 - "fake_stream"
+Cohesion: 0.10
+Nodes (6): fake_stream(), FailureHistoryAndRetryTests, fake_stream(), fake_stream(), FailureSpeechTests, _FakeBadRequestError
+
+### Community 82 - "LiveScreenTests"
+Cohesion: 0.19
+Nodes (3): LiveScreenTests, ScriptedTurnStream, get_final_message()
 
 ### Community 83 - "FakeMcpServerDao"
 Cohesion: 0.17
 Nodes (3): build_service(), FakeMcpServerDao, McpServerServiceTests
 
-### Community 88 - "test_sms.py"
-Cohesion: 0.13
-Nodes (6): BipConfigurationError, BipRequestError, is_permanent_bip_error(), normalize_phone_number(), SmsRecipientError, NormalizationTests
+### Community 86 - "SettingsService"
+Cohesion: 0.11
+Nodes (3): SettingsService, ModelListTests, _ResetsSharedState
+
+### Community 87 - "Person"
+Cohesion: 0.11
+Nodes (3): PersonDao, Person, FakePersonDao
+
+### Community 88 - "bip_service.py"
+Cohesion: 0.16
+Nodes (4): BipConfigurationError, BipRequestError, _describe_response_error(), is_permanent_bip_error()
 
 ### Community 89 - "test_responsibility_service.py"
-Cohesion: 0.14
-Nodes (4): build_service(), FakeProjectDao, FakeUpdateService, WindowTests
+Cohesion: 0.11
+Nodes (5): build_service(), FakeProjectDao, FakeResponsibilityDao, FakeUpdateService, WindowTests
 
-### Community 90 - "StreamedSpeechTests"
-Cohesion: 0.27
-Nodes (3): stream(), StreamedSpeechTests, fake_stream()
+### Community 91 - "test_deploy_main.py"
+Cohesion: 0.12
+Nodes (4): FailingTestsAbortTests, HappyPathTests, SpawnStaleAncestorHelperTests, WaitForPidExitTests
 
-### Community 91 - "sessions.py"
-Cohesion: 0.17
-Nodes (5): _contained(), make_guard(), can_use_tool(), _flatten(), _is_prose()
-
-### Community 92 - "build_memory_service"
-Cohesion: 0.26
-Nodes (5): build_memory_service(), FakeEmbeddingService, FakeMemoryChunkDao, match(), RetrieveContextTests
+### Community 92 - "test_memory_injection.py"
+Cohesion: 0.07
+Nodes (14): MemoryChunkDao, MemoryChunk, MemoryMatch, build_memory_service(), FakeConversationService, FakeEmbeddingService, FakeMemoryChunkDao, FakeMessage (+6 more)
 
 ### Community 93 - "meeting_service.py"
 Cohesion: 0.06
-Nodes (9): BaseDao, CodingSessionDao, MeetingChunkDao, MeetingNotesDao, ProjectDao, CodingEvent, CodingStatus, MeetingChunk (+1 more)
+Nodes (9): ProjectDao, CodingStatus, MeetingStatus, Project, ProjectService, CodeServiceTestCase, FakeConversationDao, FakeProjectDao (+1 more)
+
+### Community 94 - "ASRService"
+Cohesion: 0.11
+Nodes (3): ASRService, TranscriptSegment, NovaService
 
 ### Community 95 - "main.py"
-Cohesion: 0.15
-Nodes (6): _allowed_origins(), health(), lifespan(), root(), _broadcast(), face_socket()
+Cohesion: 0.11
+Nodes (7): _allowed_origins(), health(), lifespan(), root(), _broadcast(), face_socket(), SidekickService
 
 ### Community 96 - "UpdateService"
-Cohesion: 0.08
-Nodes (4): UpdateDao, DeliveryStatus, Update, UpdateService
+Cohesion: 0.05
+Nodes (9): UpdateDao, DeliveryStatus, encode_report_types(), normalize_report_types(), ReportType, Update, UpdateService, EscapingTests (+1 more)
 
 ### Community 97 - "Mac code agent daemon"
 Cohesion: 0.16
@@ -584,133 +600,129 @@ Nodes (14): Nova code agent (Mac) README, Anthropic API key stripping, Mac dials
 Cohesion: 0.16
 Nodes (6): _comparable(), is_repeat(), _plain_text(), strip_speak_tags(), IsRepeatTests, StripSpeakTagsTests
 
-### Community 100 - "CameraError"
-Cohesion: 0.14
-Nodes (10): APIError, badResponse, .errorDescription, server, unauthorized, CameraError, .errorDescription, glassesAudioNotUp (+2 more)
+### Community 100 - "recording_meeting"
+Cohesion: 0.18
+Nodes (5): CommitSegmentsTests, DeleteMeetingTests, recording_meeting(), RecoveryTests, UpdateMeetingTests
 
 ### Community 101 - "._run_begin"
 Cohesion: 0.23
 Nodes (6): BeginFlowTests, fake_get(), fake_post(), fake_post(), fake_post(), FakeResponse
 
-### Community 102 - "BipService"
-Cohesion: 0.17
-Nodes (3): BipService, _describe_response_error(), _parse_number_list()
-
-### Community 103 - "NovaSocket"
-Cohesion: 0.11
-Nodes (7): .baseURL, SocketConnectionState, connected, connecting, disconnected, unauthorized, NovaSocket
-
 ### Community 105 - "asr_service.py"
 Cohesion: 0.20
 Nodes (8): main(), _hotwords(), _load_parakeet(), missing_cuda_libraries(), _nvidia_wheel_dll_dirs(), _platform_default_provider(), _resolve_whisper_device(), _setup_cuda_libraries()
 
-### Community 106 - "SessionManager"
-Cohesion: 0.27
-Nodes (3): _as_int(), _ms_to_iso(), SessionManager
+### Community 106 - "test_sms.py"
+Cohesion: 0.26
+Nodes (4): _handle_inbound(), normalize_phone_number(), SmsRecipientError, NormalizationTests
 
-### Community 108 - "TwilioErrorClassificationTests"
-Cohesion: 0.14
-Nodes (6): describe_twilio_error(), is_permanent_twilio_error(), SimpleNamespace_Exception, TwilioErrorClassificationTests, reject(), flake()
+### Community 108 - "ElevenLabsService"
+Cohesion: 0.23
+Nodes (3): _describe_failure(), ElevenLabsService, ElevenLabsRequestTests
 
-### Community 110 - "pathlib"
-Cohesion: 0.05
-Nodes (13): DeployService, DryRunTests, FailingTestsAbortTests, HappyPathTests, HealthTimeoutTests, LeftoverSweepTests, RollbackPathTests, _runner() (+5 more)
+### Community 110 - ".deploy_main"
+Cohesion: 0.15
+Nodes (3): HealthTimeoutTests, StopPidTreeKillTests, DeployMainTests
 
 ### Community 111 - "FakeDao"
-Cohesion: 0.23
-Nodes (3): ConnectorFilteringTests, FakeDao, oauth_server()
+Cohesion: 0.18
+Nodes (4): CompleteAndRefreshTests, ConnectorFilteringTests, FakeDao, oauth_server()
 
 ### Community 112 - ".run_turn"
 Cohesion: 0.10
 Nodes (8): MemoryInjectionTests, boom(), notification(), NotificationCapTests, NotificationCrossMediumTests, NotificationRecencyTests, NotificationScopingTests, PendingNotificationsInjectionTests
 
-### Community 113 - "link.py"
-Cohesion: 0.21
+### Community 113 - "protocol.py"
+Cohesion: 0.39
 Nodes (3): _artifact_for(), encode(), _truncate()
 
-### Community 114 - "AppModel"
-Cohesion: 0.05
-Nodes (21): AppModel, .serverURLString, NovaGlassesApp, .body, RootView, .body, AuthStore, .baseQuery (+13 more)
+### Community 114 - "HomeView"
+Cohesion: 0.09
+Nodes (16): NovaGlassesApp, .body, RootView, .body, AudioLogView, HomeView, .cameraText, .connectionText (+8 more)
 
-### Community 115 - "test_process_supervisor.py"
-Cohesion: 0.10
-Nodes (8): cut_clips(), default_audio(), load(), main(), fetch(), main(), sha256(), MirrorTests
+### Community 115 - "asr-bench.py"
+Cohesion: 0.36
+Nodes (4): cut_clips(), default_audio(), load(), main()
 
-### Community 116 - ".completed"
-Cohesion: 0.13
-Nodes (7): fake_stream(), fake_stream(), fake_stream(), fake_stream(), TurnStreamTests, get_final_message(), fake_stream()
+### Community 116 - "test_conversation_loop.py"
+Cohesion: 0.07
+Nodes (8): _maybe_print_prompt(), TurnStream, PromptSourceTests, SentenceChunkTests, TurnStreamTests, __iter__(), get_final_message(), get_final_message()
 
-### Community 117 - "EnrollmentError"
-Cohesion: 0.18
-Nodes (5): DuplicatePerson, EnrollmentError, face_row(), FaceServiceTests, unit()
+### Community 118 - "APIClient"
+Cohesion: 0.16
+Nodes (7): APIClient, APIError, badResponse, .errorDescription, server, unauthorized, Person
 
 ### Community 119 - "Foundation"
-Cohesion: 0.12
-Nodes (9): AudioToolbox, AVFoundation, Foundation, MWDATCamera, MWDATCore, Observation, Security, Speech (+1 more)
+Cohesion: 0.09
+Nodes (11): AudioToolbox, AVFoundation, Foundation, ImageIO, AudioSessionPolicy, MWDATCamera, MWDATCore, Observation (+3 more)
 
 ### Community 120 - "Earcon"
-Cohesion: 0.12
+Cohesion: 0.11
 Nodes (15): Earcons, Note, Earcon, cancel, done, error, shutter, sidekickCue (+7 more)
+
+### Community 122 - "AuthStore"
+Cohesion: 0.24
+Nodes (3): AuthStore, .baseQuery, Security
 
 ### Community 125 - "worker.py"
 Cohesion: 0.16
 Nodes (10): BuildJobsTests, build_jobs(), _recover_stuck_tasks(), _run_check_for_responsibilities(), _run_check_for_stale_conversations(), _run_deliver_pending_updates(), _run_process_conversations(), _run_scheduled_tasks() (+2 more)
 
-### Community 128 - ".conversation_loop_events"
-Cohesion: 0.19
-Nodes (6): PrefetchedConversationTests, fake_stream(), fake_stream(), fake_stream(), FakeBlock, FakeMessage
+### Community 128 - "CheckForStaleConversationsTests"
+Cohesion: 0.24
+Nodes (3): build_service(), CheckForStaleConversationsTests, FakeConversationDao
 
-### Community 130 - "FakeDao"
-Cohesion: 0.11
-Nodes (4): GateTestCase, WebSocketGateTests, AuthServiceTestCase, FakeDao
+### Community 130 - "GateTestCase"
+Cohesion: 0.13
+Nodes (4): GateTestCase, WebSocketGateTests, AuthServiceTestCase, LoginTests
 
 ### Community 135 - "history_compaction.py"
 Cohesion: 0.20
 Nodes (15): _block_chars(), cap_messages(), clear_old_tool_results(), _clearable_blocks(), compact_history(), _env_int(), _is_plain_user_turn(), _history() (+7 more)
 
 ### Community 137 - "SidekickConnection"
-Cohesion: 0.12
+Cohesion: 0.15
 Nodes (3): Utterances, sidekick_socket(), SidekickConnection
 
 ### Community 139 - "AudioRouteManager"
 Cohesion: 0.22
 Nodes (3): AudioRouteManager, Route, .summary
 
-### Community 141 - "NovaGlasses"
-Cohesion: 0.25
-Nodes (7): Build and test (CLI), Code map, How it behaves, Install on your iPhone, NovaGlasses, On-device field checklist, Vision: "Hey Nova, what do you see?"
-
-### Community 144 - "ImageStore"
-Cohesion: 0.21
-Nodes (3): ImageStore, VisionImage, ImageStoreTests
+### Community 141 - "VoiceMode"
+Cohesion: 0.14
+Nodes (11): VoiceMode, conversation, sentry, VoiceModeStore, Build and test (CLI), Code map, How it behaves, Install on your iPhone (+3 more)
 
 ### Community 148 - "FakeSendWebSocket"
-Cohesion: 0.09
-Nodes (9): no_tts(), FakeSendWebSocket, InterruptAndCancelWiringTests, scenario(), scenario(), scenario(), SpeakOnCompletionTests, never_finishes() (+1 more)
+Cohesion: 0.14
+Nodes (5): FakeSendWebSocket, InterruptAndCancelWiringTests, scenario(), scenario(), scenario()
 
 ### Community 153 - "VisionService"
-Cohesion: 0.16
-Nodes (4): VisionService, ContentBlocksTests, LookToolTests, phone()
+Cohesion: 0.05
+Nodes (15): capture_failed(), read_jpeg_body(), upload_image(), Identification, CaptureFailed, InvalidImage, is_image_block(), prepare() (+7 more)
 
 ### Community 154 - "test_asr_filters.py"
 Cohesion: 0.26
 Nodes (4): drop_hallucination(), DropHallucinationTests, _segment(), WhisperSegmentFilterTests
 
 ### Community 155 - "MemoryChunkService"
-Cohesion: 0.06
-Nodes (7): MemoryChunkDao, MemoryChunk, MemoryMatch, EmbeddingService, MemoryChunkService, ParseChunksTests, RetrievableQueryTests
+Cohesion: 0.07
+Nodes (4): EmbeddingService, MemoryChunkService, ParseChunksTests, RetrievableQueryTests
 
-### Community 156 - "os"
-Cohesion: 0.13
-Nodes (10): classify(), _clip(), _resolve_cwd(), run(), _scratch_pair(), main(), one_call(), main() (+2 more)
+### Community 156 - "replay_request.py"
+Cohesion: 0.20
+Nodes (5): main(), one_call(), main(), one_call(), variants()
 
 ### Community 157 - "host_environment_prompt.py"
 Cohesion: 0.31
 Nodes (3): host_environment_prompt(), _host_kind(), _machine_line()
 
 ### Community 158 - "PassSentinelTests"
-Cohesion: 0.08
-Nodes (12): is_sidekick_pass(), _agent_loop(), FakeConversationService, FakeMessage, FakeTextBlock, FakeToolDao, FakeToolUseBlock, _live() (+4 more)
+Cohesion: 0.10
+Nodes (9): is_sidekick_pass(), FakeMessage, FakeTextBlock, FakeToolUseBlock, FakeUpdateService, _live(), LookToolExclusionTests, fake_stream() (+1 more)
+
+### Community 159 - "TTSService"
+Cohesion: 0.12
+Nodes (7): _build_provider(), _ChainedProvider, OpenAITTS, TTSService, _cartesia(), _eleven_labs(), _mock_chain()
 
 ### Community 165 - "settings_controller.py"
 Cohesion: 0.11
@@ -728,57 +740,49 @@ Nodes (5): build_service(), FakeHttp, InfobipRequestTests, RecipientAllowlistTes
 Cohesion: 0.07
 Nodes (3): CommandLineService, BackgroundTests, ForegroundTests
 
-### Community 176 - "dict"
+### Community 174 - "ToolServiceTests"
 Cohesion: 0.19
-Nodes (4): user_phone_number(), basic(), InboundSecretTests, SenderAllowlistTests
+Nodes (3): DemoService, FakeToolDao, ToolServiceTests
 
-### Community 177 - "VisionRoutesTests"
-Cohesion: 0.26
-Nodes (3): Identification, FakeFaceService, VisionRoutesTests
+### Community 175 - "meeting_socket"
+Cohesion: 0.48
+Nodes (6): meeting_socket(), capture_loop(), flush_tail(), send(), _transcribe_tail(), _resolve_meeting_id()
+
+### Community 179 - "SentryModeTests"
+Cohesion: 0.09
+Nodes (3): SentryModeTests, WakePhraseAloneTests, WakeStraightToListeningTests
 
 ### Community 181 - "AddPersonView"
-Cohesion: 0.24
-Nodes (6): .api, AddPersonView, .body, FacesView, .body, PhotosUI
+Cohesion: 0.11
+Nodes (8): .api, ImagePrep, VisionClient, AddPersonView, .body, FacesView, .body, PhotosUI
+
+### Community 182 - "PersonaPrompt"
+Cohesion: 0.13
+Nodes (3): PromptEnums, PersonaPromptDao, PersonaPrompt
 
 ### Community 183 - ".setUp"
-Cohesion: 0.12
-Nodes (4): DirectTurnCounterTests, fake_transcribe(), FakeGate, FakeSidekickLoop
+Cohesion: 0.13
+Nodes (3): fake_transcribe(), FakeGate, FakeSidekickLoop
 
-### Community 185 - "prepare"
-Cohesion: 0.31
-Nodes (3): prepare(), jpeg(), PrepareTests
-
-### Community 186 - "turn_timer.py"
+### Community 186 - "os"
 Cohesion: 0.06
-Nodes (22): backend_url(), close_current_conversation(), fetch_conversation_info(), fetch_health(), fetch_projects(), fetch_tools(), stream_reply(), _build_file_logger() (+14 more)
+Nodes (14): _flag(), _contained(), make_guard(), can_use_tool(), _is_prose(), _build_file_logger(), _default_log_path(), mark() (+6 more)
 
-### Community 188 - "fake_stream"
-Cohesion: 0.18
-Nodes (3): fake_stream(), fake_stream(), FailureSpeechTests
+### Community 191 - "MacSessionLifecycleTests"
+Cohesion: 0.10
+Nodes (3): MacConcurrentSessionTests, MacSessionLifecycleTests, sink()
 
-### Community 192 - "XCTestCase"
-Cohesion: 0.16
-Nodes (3): ThinkingPulseTests, WakePhraseAloneTests, WakeStraightToListeningTests
-
-### Community 195 - ".handle"
+### Community 195 - "String"
 Cohesion: 0.11
-Nodes (8): PhotoSlot, GlassesCameraState, .canCapture, ready, registering, streaming, unavailable, unregistered
+Nodes (17): Phase, idle, listening, off, sentryBlocked, speaking, thinking, PhotoSlot (+9 more)
 
 ### Community 196 - "InterruptedToolCallTests"
-Cohesion: 0.26
-Nodes (3): FakeToolUseBlock, InterruptedToolCallTests, _call()
-
-### Community 197 - "CooldownTests"
-Cohesion: 0.18
-Nodes (3): CooldownTests, refused(), _mock_chain()
-
-### Community 201 - "split_wake_phrase"
-Cohesion: 0.23
-Nodes (4): has_wake_phrase(), split_wake_phrase(), SplitWakePhraseTests, WakePhraseTests
+Cohesion: 0.20
+Nodes (4): FakeToolUseBlock, InterruptedToolCallTests, fake_stream(), _call()
 
 ### Community 205 - "FaceService"
-Cohesion: 0.13
-Nodes (5): FaceService, GalleryPerson, match(), _normalise(), MatchTests
+Cohesion: 0.07
+Nodes (17): add_sample(), create_person(), delete_person(), _enroll(), DuplicatePerson, EnrollmentError, FaceModelsMissing, FaceService (+9 more)
 
 ### Community 207 - "_FakeTable"
 Cohesion: 0.13
@@ -788,17 +792,13 @@ Nodes (4): CheckForStaleConversationsLoopTests, _FakeResponse, _FakeSupabaseClie
 Cohesion: 0.23
 Nodes (5): deliver(), mark_first_speech(), _clamp(), clamp_spoken(), ClampSpokenTests
 
-### Community 227 - "_receive"
-Cohesion: 0.31
-Nodes (4): _authorize(), inbound_sms(), inbound_sms_with_path_token(), _receive()
+### Community 213 - "MeetingSegment"
+Cohesion: 0.13
+Nodes (6): MeetingSegment, ChunkingTests, FinalizeTests, NotesTests, NotesUseNoToolsTests, TranscriptTests
 
-### Community 231 - ".add"
-Cohesion: 0.14
-Nodes (4): AudioLog, Entry, .body, .body
-
-### Community 242 - "faces_controller.py"
-Cohesion: 0.10
-Nodes (11): add_sample(), delete_person(), _enroll(), list_people(), capture_failed(), read_jpeg_body(), upload_image(), FaceModelsMissing (+3 more)
+### Community 231 - "Entry"
+Cohesion: 0.36
+Nodes (3): AudioLog, Entry, .body
 
 ## Ambiguous Edges - Review These
 - `TTS conversion enhancer prompt (empty)` → `Voice mode tone guidelines`  [AMBIGUOUS]
@@ -806,23 +806,23 @@ Nodes (11): add_sample(), delete_person(), _enroll(), list_people(), capture_fai
 
 ## Knowledge Gaps
 - **165 isolated node(s):** `UserNotifications`, `.serverURLString`, `.summary`, `AudioToolbox`, `.count` (+160 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1701 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **98 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 1765 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **97 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **What is the exact relationship between `TTS conversion enhancer prompt (empty)` and `Voice mode tone guidelines`?**
   _Edge tagged AMBIGUOUS (relation: conceptually_related_to) - confidence is low._
-- **Why does `NovaGlasses` connect `NovaGlasses` to `NovaGlasses`, `ConversationController`?**
+- **Why does `NovaGlasses` connect `VoiceMode` to `AmbientForwardingTests`, `.look`?**
   _High betweenness centrality (0.312) - this node is a cross-community bridge._
-- **Are the 43 inferred relationships involving `AgentLoop` (e.g. with `Server behaviour` and `PromptEnums`) actually correct?**
-  _`AgentLoop` has 43 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 45 inferred relationships involving `AgentLoop` (e.g. with `Server behaviour` and `PromptEnums`) actually correct?**
+  _`AgentLoop` has 45 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `UserNotifications`, `.serverURLString`, `.summary` to the rest of the system?**
   _165 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `Tool` be split into smaller, more focused modules?**
-  _Cohesion score 0.06558118498417007 - nodes in this community are weakly interconnected._
-- **Why does `Vision: "Hey Nova, what do you see?"` connect `NovaGlasses` to `.look`?**
+  _Cohesion score 0.14616755793226383 - nodes in this community are weakly interconnected._
+- **Why does `Vision: "Hey Nova, what do you see?"` connect `.look` to `VoiceMode`?**
   _High betweenness centrality (0.312) - this node is a cross-community bridge._
-- **Are the 21 inferred relationships involving `Conversation` (e.g. with `_is_stale()` and `ConversationDao`) actually correct?**
-  _`Conversation` has 21 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 22 inferred relationships involving `Conversation` (e.g. with `_is_stale()` and `ConversationDao`) actually correct?**
+  _`Conversation` has 22 INFERRED edges - model-reasoned connections that need verification._

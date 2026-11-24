@@ -95,6 +95,13 @@ final class ConversationController {
     private(set) var lastReply = ""
     private(set) var userSpeaking = false
 
+    /// The conversation the next turn will continue, if one is already
+    /// known — same id `conversationIds` persists across launches. Exposed
+    /// so the silent-mode toggle (a per-conversation setting) knows which
+    /// conversation to flip; nil before the first turn, same as a fresh
+    /// install.
+    var currentConversationId: String? { conversationIds.load() }
+
     /// The server rejected our token; the app should show the login screen.
     var onUnauthorized: (() -> Void)?
     /// Sidekick: a whole utterance that was not for Nova (no wake phrase),

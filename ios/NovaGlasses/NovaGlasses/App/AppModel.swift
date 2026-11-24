@@ -18,6 +18,13 @@ final class AppModel {
 
     private(set) var isLoggedIn: Bool
     private(set) var listeningEnabled = false
+    /// Mutes Nova's spoken replies for the current conversation; the text
+    /// reply still appears as normal. Per-session and never persisted —
+    /// always starts OFF on a fresh launch or reconnect, mirroring the
+    /// server's own default. Flipped through the same REST path
+    /// (`APIClient.setSilentMode`) the voice tool uses, so a "silent mode
+    /// on" command and this toggle can never disagree about the state.
+    private(set) var silentModeEnabled = false
     private(set) var errorMessage: String?
     /// A "New conversation" request is in flight — guards against a double tap
     /// starting two at once.
@@ -236,6 +243,38 @@ final class AppModel {
         }
     }
 
+    // MARK: - Silent mode
+
+    /// Flips silent mode for the active conversation. Best-effort against
+    /// the server, same as closing a conversation: the local toggle is the
+    /// source of truth for the UI, and a failed round trip is logged rather
+    /// than surfaced, since Nova (or another client) may have already set it
+    /// moments ago and a retry would just fight that update.
+    func setSilentMode(_ on: Bool) async {
+        silentModeEnabled = on
+        guard let conversationId = controller.currentConversationId else {
+            // No conversation yet (fresh install, nothing said): nothing to
+            // flip server-side. The next turn starts a conversation id, and
+            // silent mode starts OFF on it like any new session, per spec.
+            return
+        }
+        do {
+            try await api.setSilentMode(conversationId: conversationId, enabled: on)
+        } catch {
+            AudioLog.shared.add("Setting silent mode failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Picks up the server's silent-mode state for the active conversation,
+    /// e.g. after Nova flips it by voice — called when the screen appears so
+    /// the toggle never drifts from what is actually in effect.
+    func refreshSilentMode() async {
+        guard let conversationId = controller.currentConversationId else { return }
+        if let enabled = try? await api.silentMode(conversationId: conversationId) {
+            silentModeEnabled = enabled
+        }
+    }
+
     /// "New conversation": closes whatever thread is open (settling an
     /// in-flight reply first), clears the on-screen transcript, and hands
     /// both the glasses socket and Sidekick a fresh conversation id — so the
@@ -259,6 +298,11 @@ final class AppModel {
         if wasSidekickOn {
             sidekick.start()
         }
+
+        // A new conversation is a new session: silent mode starts OFF on
+        // the server for a conversation id it has never seen, so the local
+        // toggle must follow rather than keep showing the old one's state.
+        silentModeEnabled = false
 
         guard let closingId else { return }
         do {

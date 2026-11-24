@@ -1219,6 +1219,16 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             if not tts_available:
                                 continue
                             line, line_role, queued_at = item
+                            if conversation_service.is_silent(conversation_id):
+                                # Silent mode: the text was already sent to
+                                # the client via the speech_text event above;
+                                # only the speaker is muted. Checked per line
+                                # (not once for the whole turn) so a
+                                # set_silent_mode call mid-turn takes effect
+                                # immediately — including the "silent mode
+                                # off" confirmation line Nova speaks right
+                                # after turning it back on.
+                                continue
                             _mark_timing(
                                 timer,
                                 "speech_queue_wait",

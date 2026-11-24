@@ -68,6 +68,18 @@ class ConversationService:
     # on the browser socket, hanging up on a phone call.
     _stop_requests: ClassVar[dict[UUID, str]] = {}
 
+    # Per-conversation silent mode: when True, Nova's live replies are not
+    # spoken (text/events to the client are unaffected). Class-level for the
+    # same reason as the two dicts above — the tool layer builds a fresh
+    # service instance per call, the controller holds its own, and this has
+    # to be visible to both. Unlike _switch_targets/_stop_requests this is
+    # read (not popped) on every line of a turn's speech, since it has to
+    # keep applying for the whole conversation, not just the turn that set
+    # it. Defaults to OFF and is never persisted: a fresh process (reconnect
+    # included, since nothing keys this off a browser session) starts quiet
+    # mode off, per spec — it is a live toggle, not a durable preference.
+    _silent_mode: ClassVar[dict[UUID, bool]] = {}
+
     def __init__(self):
         self.conversation_dao = ConversationDao()
         self.message_dao = MessageDao()
@@ -315,3 +327,26 @@ class ConversationService:
     def pop_stop_request(self, conversation_uuid: UUID) -> str | None:
         """Reason Nova ended the session this turn, if it did."""
         return ConversationService._stop_requests.pop(conversation_uuid, None)
+
+    def set_silent_mode(self, conversation_uuid: str, enabled: bool) -> dict:
+        """
+        Turn silent mode on or off for this conversation.
+
+        Only the live-reply TTS is affected: the ASR pipeline, the agent
+        loop, and the text sent to the client all keep working exactly as
+        normal — only the speaker is muted. Background Sidekick reports
+        (report_type 'speak') are a separate path and are never affected by
+        this flag, by design.
+
+        Shared by the `set_silent_mode` voice tool (conversation_uuid
+        injected by the harness) and the REST endpoint the web/iOS toggle
+        calls, so both ways of flipping it go through one setter and can
+        never drift out of sync.
+        """
+        uuid = UUID(str(conversation_uuid))
+        ConversationService._silent_mode[uuid] = bool(enabled)
+        return {"status": "ok", "silentMode": bool(enabled)}
+
+    def is_silent(self, conversation_uuid: UUID) -> bool:
+        """Whether live replies should be spoken for this conversation. Defaults to False."""
+        return ConversationService._silent_mode.get(conversation_uuid, False)
