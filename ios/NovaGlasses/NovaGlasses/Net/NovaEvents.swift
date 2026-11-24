@@ -158,6 +158,12 @@ enum ServerEvent: Equatable, Sendable {
     case sidekickEnded(reason: String)
     /// Nova's `look` tool wants a photo right now; upload it with this id.
     case captureRequest(requestId: String, conversationId: String?)
+    /// Silent mode changed for this conversation — the set_silent_mode tool
+    /// fired, or another client (web, or a REST call) flipped it. Pushed by
+    /// ConversationService._push_silent_mode_state on every change, and once
+    /// more right after `start` names a conversation, so a fresh or
+    /// reconnecting socket is authoritative rather than assuming OFF.
+    case silentModeState(enabled: Bool)
     case pong
     case other(type: String)
 }
@@ -166,7 +172,7 @@ extension ServerEvent: Codable {
     private enum Keys: String, CodingKey {
         case type, message, endpointMs, count, bytes, text, seq, conversationId
         case role, streamId, mimeType, chunkBase64, assistantText, code, requestId, tool, reason
-        case expectsReply
+        case expectsReply, enabled
     }
 
     var type: String {
@@ -193,6 +199,7 @@ extension ServerEvent: Codable {
         case .silent: "silent"
         case .sidekickEnded: "sidekick_ended"
         case .captureRequest: "capture_request"
+        case .silentModeState: "silent_mode_state"
         case .pong: "pong"
         case .other(let type): type
         }
@@ -268,6 +275,8 @@ extension ServerEvent: Codable {
                 requestId: try c.decode(String.self, forKey: .requestId),
                 conversationId: try c.decodeIfPresent(String.self, forKey: .conversationId)
             )
+        case "silent_mode_state":
+            self = .silentModeState(enabled: try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false)
         case "pong": self = .pong
         default: self = .other(type: type)
         }
@@ -328,6 +337,8 @@ extension ServerEvent: Codable {
         case .captureRequest(let requestId, let conversationId):
             try c.encode(requestId, forKey: .requestId)
             try c.encodeIfPresent(conversationId, forKey: .conversationId)
+        case .silentModeState(let enabled):
+            try c.encode(enabled, forKey: .enabled)
         case .pong, .other:
             break
         }

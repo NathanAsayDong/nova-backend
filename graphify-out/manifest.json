@@ -978,9 +978,9 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/App/AppModel.swift": {
-    "mtime": 1795544477.3810506,
-    "seen": 1795544960.067917,
-    "ast_hash": "e345a771fab9d10d4a0be221311532bf",
+    "mtime": 1795545058.1028125,
+    "seen": 1795545086.7281768,
+    "ast_hash": "cda882c324f0cef60cd0df5a9d9ecc92",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/App/NovaGlassesApp.swift": {
@@ -1038,9 +1038,9 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Conversation/ConversationController.swift": {
-    "mtime": 1795544477.3884974,
-    "seen": 1795544960.067928,
-    "ast_hash": "85c14a1e7ae367af18865f0370082e80",
+    "mtime": 1795545052.7995586,
+    "seen": 1795545086.728506,
+    "ast_hash": "ac8fbecbc3ed594b9f1fc44afd6658dc",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Conversation/Ports.swift": {
@@ -1050,9 +1050,9 @@
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Net/NovaEvents.swift": {
-    "mtime": 1795544477.3897908,
-    "seen": 1795544960.0679302,
-    "ast_hash": "c7c77cbcc44d44d5f1f0a0c9700af4a4",
+    "mtime": 1795545044.7421877,
+    "seen": 1795545086.728543,
+    "ast_hash": "f46cac59730f78992c5164c1e97df373",
     "semantic_hash": ""
   },
   "ios/NovaGlasses/NovaGlasses/Net/NovaSocket.swift": {

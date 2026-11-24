@@ -109,6 +109,12 @@ final class ConversationController {
     var onAmbientUtterance: ((Data) -> Void)?
     /// "Hey Nova" was heard, before the controller acts on it.
     var onWakeHeard: (() -> Void)?
+    /// Silent mode changed for this conversation (the set_silent_mode tool,
+    /// another client's REST call, or this socket's own connect/reconnect
+    /// sync) — see ServerEvent.silentModeState. AppModel mirrors this into
+    /// its own silentModeEnabled so the toggle never drifts from the
+    /// server's view, the same way onWakeHeard mirrors into Sidekick.
+    var onSilentModeChange: ((Bool) -> Void)?
 
     // MARK: Collaborators
 
@@ -1049,6 +1055,9 @@ final class ConversationController {
         case .captureRequest(let requestId, _):
             AudioLog.shared.add("Nova asked to look (\(requestId))")
             serveCaptureRequest(requestId)
+
+        case .silentModeState(let enabled):
+            onSilentModeChange?(enabled)
 
         case .userTranscript(let text, let conversationId):
             AudioLog.shared.add("Server heard: \"\(text)\"")

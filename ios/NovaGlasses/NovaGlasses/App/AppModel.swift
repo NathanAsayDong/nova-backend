@@ -124,6 +124,13 @@ final class AppModel {
         controller.onUnauthorized = { [weak self] in
             self?.signedOut(message: "Your session expired. Log in again.")
         }
+        // Mirrors the server's push the same way onWakeHeard mirrors into
+        // Sidekick: fires for a tool-driven change, another client's REST
+        // toggle, or this socket's own connect/reconnect sync, so the UI
+        // toggle never needs a manual refresh to catch up.
+        controller.onSilentModeChange = { [weak self] enabled in
+            self?.silentModeEnabled = enabled
+        }
         wireRouteEvents()
     }
 
