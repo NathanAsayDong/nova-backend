@@ -83,6 +83,18 @@ struct HomeView: View {
                         }
                     }
                     .disabled(!model.listeningEnabled)
+                    Toggle(isOn: Binding(
+                        get: { model.silentModeEnabled },
+                        set: { on in Task { await model.setSilentMode(on) } }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Silent mode")
+                            Text("Nova keeps listening and replying on screen, just without talking")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .task { await model.refreshSilentMode() }
                     if model.sidekick.isOn {
                         LabeledContent("Overheard", value: model.sidekick.lastHeard.isEmpty ? "—" : model.sidekick.lastHeard)
                         if !model.sidekick.lastRemark.isEmpty {

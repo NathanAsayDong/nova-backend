@@ -102,6 +102,26 @@ struct APIClient: Sendable {
         _ = try await perform(request("conversations/\(id)/close", method: "POST"))
     }
 
+    /// GET /conversations/{id}: current server-side state, including
+    /// `silentMode` — read this to sync the toggle on reconnect/launch.
+    func silentMode(conversationId: String) async throws -> Bool {
+        let json = try await perform(request("conversations/\(conversationId)", method: "GET"))
+        return json["silentMode"] as? Bool ?? false
+    }
+
+    /// POST /conversations/{id}/silent-mode: the same endpoint the web
+    /// toggle and the `set_silent_mode` voice tool go through, so a voice
+    /// command and a UI tap can never leave this out of sync. Only mutes
+    /// Nova's live-reply speaker — ASR, the reply text, and background
+    /// Sidekick reports are unaffected.
+    @discardableResult
+    func setSilentMode(conversationId: String, enabled: Bool) async throws -> Bool {
+        let json = try await perform(request(
+            "conversations/\(conversationId)/silent-mode", method: "POST", body: ["enabled": enabled]
+        ))
+        return json["silentMode"] as? Bool ?? enabled
+    }
+
     // MARK: - Vision
 
     /// POST /vision/images: a glasses photo → its id for `stop.imageIds`.

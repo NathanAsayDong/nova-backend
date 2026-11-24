@@ -8,7 +8,7 @@ conversation, so this is the single place the client reads it back from.
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 
 from src.model.message import MessageRole
 from src.service.conversation_service import ConversationService
@@ -53,6 +53,7 @@ async def get_conversation(conversation_id: str) -> dict:
         "conversationId": str(conversation.uuid),
         "isClosed": conversation.is_closed,
         "project": project,
+        "silentMode": conversation_service.is_silent(uuid_value),
     }
 
 
@@ -94,6 +95,29 @@ async def get_conversation_messages(conversation_id: str) -> dict:
             for message in messages
         ],
     }
+
+
+@router.post("/{conversation_id}/silent-mode")
+async def set_conversation_silent_mode(conversation_id: str, payload: dict = Body(...)) -> dict:
+    """
+    Flip silent mode for this conversation — the same endpoint the web and
+    iOS settings toggles call. Goes through the exact setter the
+    `set_silent_mode` voice tool uses (ConversationService.set_silent_mode),
+    so a voice command and a UI tap can never leave the flag out of sync.
+    Only the live-reply speaker is affected; Sidekick's own background
+    reports are untouched.
+    """
+    uuid_value = _parse_uuid(conversation_id)
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="'enabled' must be a boolean.")
+
+    conversation = await asyncio.to_thread(conversation_service.get_conversation, uuid_value)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+
+    conversation_service.set_silent_mode(str(uuid_value), enabled)
+    return {"conversationId": str(uuid_value), "silentMode": enabled}
 
 
 @router.post("/{conversation_id}/close")

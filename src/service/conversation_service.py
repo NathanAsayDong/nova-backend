@@ -1,6 +1,7 @@
+import asyncio
 import os
 from datetime import datetime, timezone
-from typing import ClassVar
+from typing import Any, Awaitable, Callable, ClassVar
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
@@ -67,6 +68,64 @@ class ConversationService:
     # and acts on it in whatever way its transport calls "stop" — going idle
     # on the browser socket, hanging up on a phone call.
     _stop_requests: ClassVar[dict[UUID, str]] = {}
+
+    # Per-conversation silent mode: when True, Nova's live replies are not
+    # spoken (text/events to the client are unaffected). Class-level for the
+    # same reason as the two dicts above — the tool layer builds a fresh
+    # service instance per call, the controller holds its own, and this has
+    # to be visible to both. Unlike _switch_targets/_stop_requests this is
+    # read (not popped) on every line of a turn's speech, since it has to
+    # keep applying for the whole conversation, not just the turn that set
+    # it. Defaults to OFF and is never persisted: a fresh process (reconnect
+    # included, since nothing keys this off a browser session) starts quiet
+    # mode off, per spec — it is a live toggle, not a durable preference.
+    _silent_mode: ClassVar[dict[UUID, bool]] = {}
+
+    # conversation_uuid -> the live /ws/transcribe sockets listening for
+    # that conversation's silent-mode changes, each as a coroutine function
+    # that sends one event down that socket. Same pattern as
+    # VisionService.cameras / SidekickService._connections: the connection
+    # that owns the live websocket hands this process-wide registry a way
+    # to reach it, rather than this module importing the controller (a
+    # cycle) or trying to hold the websocket itself. A list, not a single
+    # entry, because unlike the glasses camera a conversation can have more
+    # than one live listener (e.g. a browser tab and the iOS app open on
+    # the same conversation at once).
+    _silent_mode_listeners: ClassVar[dict[UUID, list[Callable[[dict], Awaitable[None]]]]] = {}
+
+    # The API process's event loop, bound once at startup (see main.py's
+    # lifespan, same as VisionService.bind_loop / SidekickService.bind_loop).
+    # set_silent_mode can run on the agent loop's worker thread (the
+    # set_silent_mode tool executes there, same as the `look` tool), so
+    # reaching a listener requires scheduling onto this loop rather than a
+    # bare await.
+    loop: ClassVar[Any] = None
+
+    @classmethod
+    def bind_loop(cls, loop: Any) -> None:
+        """Attach this process's event loop, so silent-mode pushes can schedule onto it."""
+        cls.loop = loop
+
+    @classmethod
+    def register_silent_mode_listener(
+        cls, conversation_uuid: UUID, send: Callable[[dict], Awaitable[None]]
+    ) -> None:
+        """A /ws/transcribe connection just learned its conversation id: it can now be pushed to."""
+        listeners = cls._silent_mode_listeners.setdefault(conversation_uuid, [])
+        if send not in listeners:
+            listeners.append(send)
+
+    @classmethod
+    def unregister_silent_mode_listener(
+        cls, conversation_uuid: UUID, send: Callable[[dict], Awaitable[None]]
+    ) -> None:
+        listeners = cls._silent_mode_listeners.get(conversation_uuid)
+        if not listeners:
+            return
+        if send in listeners:
+            listeners.remove(send)
+        if not listeners:
+            del cls._silent_mode_listeners[conversation_uuid]
 
     def __init__(self):
         self.conversation_dao = ConversationDao()
@@ -315,3 +374,53 @@ class ConversationService:
     def pop_stop_request(self, conversation_uuid: UUID) -> str | None:
         """Reason Nova ended the session this turn, if it did."""
         return ConversationService._stop_requests.pop(conversation_uuid, None)
+
+    def set_silent_mode(self, conversation_uuid: str, enabled: bool) -> dict:
+        """
+        Turn silent mode on or off for this conversation.
+
+        Only the live-reply TTS is affected: the ASR pipeline, the agent
+        loop, and the text sent to the client all keep working exactly as
+        normal — only the speaker is muted. Background Sidekick reports
+        (report_type 'speak') are a separate path and are never affected by
+        this flag, by design.
+
+        Shared by the `set_silent_mode` voice tool (conversation_uuid
+        injected by the harness) and the REST endpoint the web/iOS toggle
+        calls, so both ways of flipping it go through one setter and can
+        never drift out of sync.
+        """
+        uuid = UUID(str(conversation_uuid))
+        enabled = bool(enabled)
+        ConversationService._silent_mode[uuid] = enabled
+        ConversationService._push_silent_mode_state(uuid, enabled)
+        return {"status": "ok", "silentMode": enabled}
+
+    def is_silent(self, conversation_uuid: UUID) -> bool:
+        """Whether live replies should be spoken for this conversation. Defaults to False."""
+        return ConversationService._silent_mode.get(conversation_uuid, False)
+
+    @classmethod
+    def _push_silent_mode_state(cls, conversation_uuid: UUID, enabled: bool) -> None:
+        """
+        Notify every live /ws/transcribe socket for this conversation that
+        silent mode changed, so a client never has to poll GET
+        /conversations/{id} to see what the set_silent_mode tool (or another
+        client's REST call) just did.
+
+        Best-effort and fire-and-forget: no listener for this conversation,
+        or no loop bound yet (e.g. a unit test with no running server), is
+        the normal case, not an error — the state is still recorded in
+        _silent_mode above regardless of whether anyone is listening right
+        now, which is what a fresh connection reads via is_silent() on
+        connect.
+        """
+        listeners = cls._silent_mode_listeners.get(conversation_uuid)
+        if not listeners or cls.loop is None:
+            return
+        payload = {"type": "silent_mode_state", "enabled": enabled}
+        for send in list(listeners):
+            try:
+                asyncio.run_coroutine_threadsafe(send(payload), cls.loop)
+            except Exception:
+                continue

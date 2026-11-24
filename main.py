@@ -63,6 +63,14 @@ async def lifespan(app: FastAPI):
 
     SidekickService.bind_loop(asyncio.get_running_loop())
 
+    # Same hop for pushing silent-mode state changes (from the
+    # set_silent_mode tool, which runs on the agent loop's worker thread, or
+    # the REST toggle) to any live /ws/transcribe socket for that
+    # conversation. See ConversationService._push_silent_mode_state.
+    from src.service.conversation_service import ConversationService
+
+    ConversationService.bind_loop(asyncio.get_running_loop())
+
     # Expired login sessions are dead weight; sweep them on each start.
     try:
         await asyncio.to_thread(auth_service.purge_expired)

@@ -570,6 +570,42 @@ PROJECT_TOOLS: list[dict] = [
         },
     },
     {
+        "name": "set_silent_mode",
+        "description": (
+            "Turn silent mode on or off for the current session. Call this "
+            "when the user says something like 'silent mode on', 'stop "
+            "talking', 'go quiet', 'silent mode off', or 'you can talk "
+            "again' — a clear instruction to mute or unmute your spoken "
+            "replies. Only your voice is affected: you keep listening, "
+            "keep thinking, and your text reply still appears on screen as "
+            "normal either way; this never affects background Sidekick "
+            "updates. Silent mode is per-session and always starts OFF on a "
+            "new session or reconnect — it is a live toggle, not a saved "
+            "preference, so do not assume it carries over. After turning it "
+            "ON, say nothing else — your written reply is enough and this "
+            "call itself stays unspoken. After turning it OFF, say a short "
+            "spoken confirmation (e.g. 'Okay, I'm back') so the user knows "
+            "it worked, since that is the only audible sign the toggle took "
+            "effect."
+        ),
+        "config": {
+            "type": "service_method",
+            "callable_path": "src.service.conversation_service.ConversationService.set_silent_mode",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "True to go silent (mute spoken replies), false to speak again.",
+                    },
+                },
+                "required": ["enabled"],
+                "additionalProperties": False,
+            },
+            "context_kwargs": ["conversation_uuid"],
+        },
+    },
+    {
         "name": "look",
         "description": (
             "See through the user's glasses camera right now: takes a photo of "

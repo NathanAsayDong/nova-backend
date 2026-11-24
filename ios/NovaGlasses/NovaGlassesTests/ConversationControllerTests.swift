@@ -613,6 +613,22 @@ final class ConversationControllerTests: XCTestCase {
         rig.speak(500)
         XCTAssertEqual(rig.socket.log, sent, "the mic is ignored while off")
     }
+
+    // MARK: - Silent mode plumbing
+
+    func testCurrentConversationIdIsNilBeforeAnyTurn() {
+        let rig = Rig.idle()
+        XCTAssertNil(rig.controller.currentConversationId, "fresh install, nothing said yet")
+    }
+
+    func testCurrentConversationIdTracksTheServersId() {
+        // AppModel reads this to know which conversation to flip silent
+        // mode on; it must be the same id the rest of the turn uses, not a
+        // stale or locally-generated one.
+        let rig = Rig.speaking()
+        XCTAssertEqual(rig.controller.currentConversationId, "conv-1")
+        XCTAssertEqual(rig.ids.load(), rig.controller.currentConversationId)
+    }
 }
 
 extension ConversationControllerTests.Rig {

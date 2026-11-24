@@ -95,6 +95,13 @@ final class ConversationController {
     private(set) var lastReply = ""
     private(set) var userSpeaking = false
 
+    /// The conversation the next turn will continue, if one is already
+    /// known — same id `conversationIds` persists across launches. Exposed
+    /// so the silent-mode toggle (a per-conversation setting) knows which
+    /// conversation to flip; nil before the first turn, same as a fresh
+    /// install.
+    var currentConversationId: String? { conversationIds.load() }
+
     /// The server rejected our token; the app should show the login screen.
     var onUnauthorized: (() -> Void)?
     /// Sidekick: a whole utterance that was not for Nova (no wake phrase),
@@ -102,6 +109,12 @@ final class ConversationController {
     var onAmbientUtterance: ((Data) -> Void)?
     /// "Hey Nova" was heard, before the controller acts on it.
     var onWakeHeard: (() -> Void)?
+    /// Silent mode changed for this conversation (the set_silent_mode tool,
+    /// another client's REST call, or this socket's own connect/reconnect
+    /// sync) — see ServerEvent.silentModeState. AppModel mirrors this into
+    /// its own silentModeEnabled so the toggle never drifts from the
+    /// server's view, the same way onWakeHeard mirrors into Sidekick.
+    var onSilentModeChange: ((Bool) -> Void)?
 
     // MARK: Collaborators
 
@@ -1042,6 +1055,9 @@ final class ConversationController {
         case .captureRequest(let requestId, _):
             AudioLog.shared.add("Nova asked to look (\(requestId))")
             serveCaptureRequest(requestId)
+
+        case .silentModeState(let enabled):
+            onSilentModeChange?(enabled)
 
         case .userTranscript(let text, let conversationId):
             AudioLog.shared.add("Server heard: \"\(text)\"")
