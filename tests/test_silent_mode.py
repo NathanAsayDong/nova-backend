@@ -9,7 +9,9 @@ must be muted while silent, and a Sidekick 'speak' report must never consult
 this flag at all.
 """
 
+import asyncio
 import os
+import threading
 import unittest
 from unittest import mock
 from unittest.mock import patch
@@ -354,6 +356,167 @@ class TTSProviderNeverCalledWhenSilentTests(unittest.TestCase):
         # should never have anything to refuse here.
         audio_events = [m["type"] for m in messages if m["type"].startswith("assistant_audio_stream")]
         self.assertEqual(audio_events, [])
+
+
+class SilentModeStatePushTests(unittest.TestCase):
+    """
+    The state-push half of silent mode: every path that flips the flag must
+    notify any live /ws/transcribe socket for that conversation, not just
+    update the stored value — otherwise a client only ever learns the new
+    state by polling GET /conversations/{id}.
+
+    `set_silent_mode` is called synchronously from both callers (the tool
+    runs on the agent loop's worker thread same as `look`; the REST route
+    below calls it inline), so the push has to cross a thread boundary via
+    run_coroutine_threadsafe exactly like VisionService.look's
+    capture_request does — same loop-on-a-background-thread pattern as
+    LookToolTests in test_vision.py.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls._saved_loop = ConversationService.loop
+        cls.loop = asyncio.new_event_loop()
+        cls._thread = threading.Thread(target=cls.loop.run_forever, daemon=True)
+        cls._thread.start()
+        ConversationService.bind_loop(cls.loop)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.loop.call_soon_threadsafe(cls.loop.stop)
+        cls._thread.join(timeout=2)
+        cls.loop.close()
+        ConversationService.loop = cls._saved_loop
+
+    def setUp(self):
+        ConversationService._silent_mode.clear()
+        ConversationService._silent_mode_listeners.clear()
+        self.addCleanup(ConversationService._silent_mode.clear)
+        self.addCleanup(ConversationService._silent_mode_listeners.clear)
+
+    def _register_listener(self, conversation_uuid):
+        """Stand in for a live /ws/transcribe socket's push_to_client."""
+        received: list[dict] = []
+        done = threading.Event()
+
+        async def send(payload: dict) -> None:
+            received.append(payload)
+            done.set()
+
+        ConversationService.register_silent_mode_listener(conversation_uuid, send)
+        return received, done
+
+    def test_tool_driven_change_pushes_state(self):
+        # The exact call the set_silent_mode voice tool makes: a fresh
+        # service instance, conversation_uuid injected by the harness as a
+        # string (see ToolRegistrationTests above).
+        conversation_uuid = uuid4()
+        received, done = self._register_listener(conversation_uuid)
+
+        build_service().set_silent_mode(str(conversation_uuid), True)
+
+        self.assertTrue(done.wait(timeout=1), "push did not arrive")
+        self.assertEqual(received, [{"type": "silent_mode_state", "enabled": True}])
+
+    def test_rest_driven_change_pushes_state(self):
+        conversation_uuid = uuid4()
+        received, done = self._register_listener(conversation_uuid)
+        conversation = Conversation(uuid=conversation_uuid)
+
+        app = FastAPI()
+        app.include_router(conversation_controller.router)
+        client = TestClient(app)
+        with patch.object(
+            conversation_controller.conversation_service,
+            "get_conversation",
+            lambda _uuid: conversation,
+        ):
+            response = client.post(
+                f"/conversations/{conversation_uuid}/silent-mode",
+                json={"enabled": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(done.wait(timeout=1), "push did not arrive")
+        self.assertEqual(received, [{"type": "silent_mode_state", "enabled": True}])
+
+    def test_no_listener_and_no_bound_loop_are_both_quiet_no_ops(self):
+        # Nothing registered for this conversation: must not raise.
+        build_service().set_silent_mode(str(uuid4()), True)
+
+        # No loop bound at all (e.g. a plain unit test, the common case in
+        # the rest of this file): must still not raise, and the flag must
+        # still be recorded for a later is_silent()/fresh connection to read.
+        saved_loop = ConversationService.loop
+        ConversationService.loop = None
+        try:
+            conversation_uuid = uuid4()
+            build_service().set_silent_mode(str(conversation_uuid), True)
+            self.assertTrue(build_service().is_silent(conversation_uuid))
+        finally:
+            ConversationService.loop = saved_loop
+
+
+class SilentModeStateOnConnectTests(unittest.TestCase):
+    """
+    A fresh (or reconnecting) /ws/transcribe socket must be handed the
+    authoritative current silent-mode state for its conversation as soon as
+    that conversation id is known, not left to assume the default until it
+    happens to ask — see sync_silent_mode_listener in nova_controller.
+    """
+
+    def setUp(self):
+        ConversationService._silent_mode.clear()
+        ConversationService._silent_mode_listeners.clear()
+        self.addCleanup(ConversationService._silent_mode.clear)
+        self.addCleanup(ConversationService._silent_mode_listeners.clear)
+
+        app = FastAPI()
+        app.include_router(nova_controller.router)
+        self.app = app
+        self.patches = [
+            patch.object(nova_controller.meeting_service, "get_active_meeting", lambda: None),
+        ]
+        for p in self.patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def test_connect_sends_default_false_state(self):
+        conversation_uuid = uuid4()
+        with TestClient(self.app).websocket_connect("/ws/transcribe") as ws:
+            ws.receive_json()  # ready
+            ws.send_json(
+                {
+                    "event": "start",
+                    "purpose": "turn",
+                    "mimeType": "audio/webm",
+                    "conversationId": str(conversation_uuid),
+                }
+            )
+            state_event = ws.receive_json()
+            self.assertEqual(
+                state_event, {"type": "silent_mode_state", "enabled": False}
+            )
+            ws.receive_json()  # listening
+
+    def test_connect_sends_true_when_already_silenced(self):
+        conversation_uuid = uuid4()
+        ConversationService._silent_mode[conversation_uuid] = True
+        with TestClient(self.app).websocket_connect("/ws/transcribe") as ws:
+            ws.receive_json()  # ready
+            ws.send_json(
+                {
+                    "event": "start",
+                    "purpose": "turn",
+                    "mimeType": "audio/webm",
+                    "conversationId": str(conversation_uuid),
+                }
+            )
+            state_event = ws.receive_json()
+            self.assertEqual(
+                state_event, {"type": "silent_mode_state", "enabled": True}
+            )
+            ws.receive_json()  # listening
 
 
 if __name__ == "__main__":

@@ -591,6 +591,46 @@ async def transcribe_socket(websocket: WebSocket) -> None:
     # run under GLASSES_PROMPT; anything else is the web voice UI.
     capture_client = "web"
 
+    # One lock for every frame this connection writes, turn-relayed or not.
+    # Used to be created fresh per turn (two writer tasks during a turn: the
+    # event relay and the speaker), but the silent-mode push below can land
+    # between turns too, so it has to share the same lock as everything
+    # else this socket sends or frames could still interleave.
+    connection_send_lock = asyncio.Lock()
+    # The conversation id this socket is currently registered under for
+    # silent-mode pushes (see sync_silent_mode_listener below). None until
+    # the first `start`/`stop` names a conversation.
+    silent_mode_conversation_id: UUID | None = None
+
+    async def push_to_client(payload: dict) -> None:
+        await _send_locked(websocket, payload, connection_send_lock)
+
+    async def sync_silent_mode_listener(current_conversation_id: UUID) -> None:
+        """
+        Keep this socket registered as a silent-mode listener for whichever
+        conversation it is currently on, and hand a fresh connection (or one
+        that just switched conversations) the authoritative current state —
+        see ConversationService._push_silent_mode_state, the other half of
+        this push.
+        """
+        nonlocal silent_mode_conversation_id
+        if current_conversation_id == silent_mode_conversation_id:
+            return
+        if silent_mode_conversation_id is not None:
+            conversation_service.unregister_silent_mode_listener(
+                silent_mode_conversation_id, push_to_client
+            )
+        conversation_service.register_silent_mode_listener(
+            current_conversation_id, push_to_client
+        )
+        silent_mode_conversation_id = current_conversation_id
+        await push_to_client(
+            {
+                "type": "silent_mode_state",
+                "enabled": conversation_service.is_silent(current_conversation_id),
+            }
+        )
+
     # Live-caption state. `generation` invalidates in-flight partials when a
     # recording stops or restarts; `chunks_done` is how much audio the last
     # completed partial covered; `seq` orders the captions client-side.
@@ -864,6 +904,8 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             {"type": "error", "message": "Invalid conversationId."}
                         )
                         continue
+                if conversation_id is not None:
+                    await sync_silent_mode_listener(conversation_id)
                 await websocket.send_json(
                     {
                         "type": "listening",
@@ -1151,6 +1193,8 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                             conversation_id = agent_loop.new_conversation_id()
                             existing = None
 
+                    await sync_silent_mode_listener(conversation_id)
+
                     # Echo what was heard so the transcript shows the spoken
                     # turn the same way it shows a typed one.
                     await websocket.send_json(
@@ -1199,7 +1243,7 @@ async def transcribe_socket(websocket: WebSocket) -> None:
                     # narrating. Lines go on a queue instead and are spoken
                     # in order while the turn carries on; the client already
                     # queues the audio streams the same way.
-                    send_lock = asyncio.Lock()
+                    send_lock = connection_send_lock
                     speech_queue: asyncio.Queue[tuple[str, str, float] | None] = (
                         asyncio.Queue()
                     )
@@ -1411,3 +1455,8 @@ async def transcribe_socket(websocket: WebSocket) -> None:
         if "close message has been sent" not in str(exc):
             raise
         print("[ws] client socket closed mid-turn; ending connection")
+    finally:
+        if silent_mode_conversation_id is not None:
+            conversation_service.unregister_silent_mode_listener(
+                silent_mode_conversation_id, push_to_client
+            )
