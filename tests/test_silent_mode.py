@@ -11,6 +11,7 @@ this flag at all.
 
 import os
 import unittest
+from unittest import mock
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -276,6 +277,83 @@ class SpeakQueuedLinesGatingTests(unittest.TestCase):
         self.assertEqual(speech_texts, ["Here is your answer."])
         done = [m for m in messages if m["type"] == "done"][0]
         self.assertEqual(done["assistantText"], "Here is your answer.")
+
+
+class TTSProviderNeverCalledWhenSilentTests(unittest.TestCase):
+    """
+    Silent mode must skip synthesis entirely, not synthesize audio and throw
+    it away: no call to the TTS provider (ElevenLabs/Cartesia/OpenAI, behind
+    TTSService.stream_text_to_speech) at all while silent, since that would
+    burn API credits and latency for audio nobody hears. Unlike
+    SpeakQueuedLinesGatingTests, this does NOT stub out stream_tts_audio —
+    it runs the real function and mocks only the provider-facing call one
+    level down, so the assertion holds even if stream_tts_audio itself is
+    refactored, as long as the gate in speak_queued_lines still runs before
+    stream_tts_audio is ever invoked.
+    """
+
+    def setUp(self):
+        ConversationService._silent_mode.clear()
+        self.addCleanup(ConversationService._silent_mode.clear)
+
+        app = FastAPI()
+        app.include_router(nova_controller.router)
+        self.app = app
+
+        def fake_stream_text_to_speech(text, chunk_size=4096, previous_text=None, timer=None):
+            yield b"fake-audio-bytes"
+
+        self.synthesize = mock.Mock(side_effect=fake_stream_text_to_speech)
+        self.agent = FakeAgentLoop(["Here is your answer."])
+        self.patches = [
+            patch.object(nova_controller, "transcribe_serialized", lambda *a, **k: "hello"),
+            patch.object(nova_controller, "agent_loop", self.agent),
+            patch.object(nova_controller.tts_service, "stream_text_to_speech", self.synthesize),
+            patch.object(nova_controller.meeting_service, "get_active_meeting", lambda: None),
+            patch.object(nova_controller.conversation_service, "get_conversation", lambda _: None),
+            patch.object(nova_controller.conversation_service, "pop_stop_request", lambda _: None),
+        ]
+        for p in self.patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def _run_turn(self):
+        with TestClient(self.app).websocket_connect("/ws/transcribe") as ws:
+            ws.receive_json()  # ready
+            ws.send_json({"event": "start", "purpose": "turn", "mimeType": "audio/webm"})
+            ws.receive_json()  # listening
+            ws.send_bytes(b"a" * 1000)
+            ws.receive_json()  # chunk_received
+            ws.send_json({"event": "stop", "purpose": "turn"})
+            messages = []
+            for _ in range(80):
+                message = ws.receive_json()
+                messages.append(message)
+                if message["type"] == "done":
+                    break
+            return messages
+
+    def test_provider_is_called_when_not_silent(self):
+        # Sanity check: the mock is wired into the real call path, so the
+        # negative assertion below actually means something.
+        self._run_turn()
+        self.synthesize.assert_called_once()
+
+    def test_provider_is_never_called_while_silent(self):
+        conversation_id = self.agent.new_conversation_id()
+        with patch.object(self.agent, "new_conversation_id", lambda: conversation_id):
+            ConversationService._silent_mode[conversation_id] = True
+            messages = self._run_turn()
+
+        self.synthesize.assert_not_called()
+        # The text reply still goes out — only synthesis is skipped.
+        speech_texts = [m["text"] for m in messages if m["type"] == "speech_text"]
+        self.assertEqual(speech_texts, ["Here is your answer."])
+        # No audio stream frames were sent at all, not even an empty one —
+        # the frontend's own "refuse to play while silent" safety net
+        # should never have anything to refuse here.
+        audio_events = [m["type"] for m in messages if m["type"].startswith("assistant_audio_stream")]
+        self.assertEqual(audio_events, [])
 
 
 if __name__ == "__main__":

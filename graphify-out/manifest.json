@@ -1476,9 +1476,9 @@
     "semantic_hash": ""
   },
   "tests/test_silent_mode.py": {
-    "mtime": 1795541433.0640292,
-    "seen": 1795541753.7071989,
-    "ast_hash": "add24b9ceab95fa0bce4280f5ee1b49f",
+    "mtime": 1795541834.1398826,
+    "seen": 1795541880.645042,
+    "ast_hash": "2351f7c3e95b69629f99af38c0b68fb8",
     "semantic_hash": ""
   }
 }
